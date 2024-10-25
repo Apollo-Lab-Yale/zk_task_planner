@@ -88,7 +88,8 @@ class AI2ThorSimEnv:
             "lookup": self.look_up,
             "lookdown": self.look_down,
             "scanroom": self.handle_scan_room,
-            "break": self.break_obj
+            "break": self.break_obj,
+
         }
         self.room_names = ['kitchen']#, 'livingroom', 'bedroom', 'bathroom']
         self.nav_thread = None

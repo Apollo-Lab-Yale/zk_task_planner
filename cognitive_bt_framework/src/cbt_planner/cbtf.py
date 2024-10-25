@@ -10,6 +10,7 @@ from keybert import KeyBERT
 from sentence_transformers import SentenceTransformer, util
 from ratelimit import sleep_and_retry, limits
 
+
 from cognitive_bt_framework.src.llm_interface.llm_interface_claude import LLMInterfaceClaude
 from cognitive_bt_framework.src.llm_interface.llm_interface_openai import LLMInterfaceOpenAI
 from cognitive_bt_framework.utils.db_utils import setup_database, add_behavior_tree, insert_subtasks,  \
@@ -21,8 +22,6 @@ from cognitive_bt_framework.src.sim.ai2_thor.ai2_thor_sim import AI2ThorSimEnv
 from cognitive_bt_framework.src.cbt_planner.memory import Memory
 from cognitive_bt_framework.utils.logic_utils import cosine_similarity, stop_words
 from cognitive_bt_framework.src.cbt_planner.sub_task import SubTask
-from sklearn.feature_extraction.text import TfidfVectorizer
-# from sklearn.metrics.pairwise import cosine_similarity
 
 OPENAI_MODEL = 'gpt-4o'
 CLAUDE_MODEL = 'claude-3-5-sonnet-20240620'

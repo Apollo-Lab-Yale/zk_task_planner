@@ -29,6 +29,7 @@ AI2THOR_ACTIONS = [
     'lookup',
     'lookdown',
     'scanroom',
+    'search'
 ]
 
 AI2THOR_ACTIONS_ANNOTATED = [
@@ -52,7 +53,8 @@ AI2THOR_ACTIONS_ANNOTATED = [
     'lookup',
     'lookdown',
     'scanroom <object> (does a visual scan from the current position looking for object)',
-    'putin <reciptical> (attempts to place object in agents hand onto/into target receptical)'
+    'putin <reciptical> (attempts to place object in agents hand onto/into target receptical)',
+    'search <object> searches for object in the environment if successful the object will be visible and close'
 ]
 
 AI2THOR_NO_TARGET = [

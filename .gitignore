@@ -149,3 +149,5 @@ cython_debug/
 Thumbs.db
 *.db
 data/
+*.pt
+*.ply
