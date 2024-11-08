@@ -122,6 +122,30 @@ class Camera:
 
         return bg_removed, depth_colormap
 
+    def get_closest_blob(self) -> Optional[Tuple[float, Tuple[int, int]]]:
+        """Returns the distance and coordinates of the closest blob to the camera."""
+        frames = self.get_frames()
+        if frames is None or self.depth_scale is None:
+            return None
+
+        _, depth_image = frames
+
+        # Mask out zero values (which indicate no depth information)
+        non_zero_depths = np.where(depth_image > 0, depth_image, np.inf)
+        min_distance = np.min(non_zero_depths)
+
+        # If no valid depth was found, return None
+        if min_distance == np.inf:
+            return None
+
+        # Find coordinates of the closest point
+        min_coords = np.unravel_index(np.argmin(non_zero_depths), non_zero_depths.shape)
+
+        # Convert distance to meters
+        min_distance_m = min_distance * self.depth_scale
+
+        return min_distance_m, min_coords
+
     def visualize(self, clipping_distance_m: float = 1.0) -> None:
         """Display processed frames."""
         result = self.process_frames(clipping_distance_m)
@@ -138,6 +162,13 @@ if __name__ == "__main__":
         try:
             while True:
                 camera.visualize()
+
+                # Example usage of get_closest_blob method
+                closest_blob = camera.get_closest_blob()
+                if closest_blob:
+                    distance, (x, y) = closest_blob
+                    print(f"Closest blob is at ({x}, {y}) with a distance of {distance:.2f} meters")
+
                 if cv2.waitKey(1) & 0xFF in (ord('q'), 27):
                     break
         finally:
