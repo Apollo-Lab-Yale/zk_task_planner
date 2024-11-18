@@ -7,8 +7,11 @@ from cognitive_bt_framework.src.vision.realsense import Camera
 
 
 class ObjectDetection:
-    def __init__(self, model_path: str = "yolov8x-seg.pt"):
-        self.camera = Camera()
+    def __init__(self, model_path: str = "yolov8x-seg.pt", is_sim=False):
+        if not is_sim:
+            self.camera = Camera()
+        else:
+            self.camera = None
         self.model = YOLO(model_path)
         self.class_colors = {i: tuple(np.random.randint(0, 255, 3).tolist()) for i in range(80)}
 
@@ -34,7 +37,7 @@ class ObjectDetection:
         return detections
 
     def get_object_depth(self, depth_image: np.ndarray, mask: np.ndarray) -> float:
-        masked_depth = depth_image[mask > 0.5]
+        masked_depth = depth_image[mask] #> 0.5]
         return np.mean(masked_depth[masked_depth > 0]) if masked_depth.size > 0 else 0
 
     def apply_mask_overlay(self, image: np.ndarray, mask: np.ndarray, color: Tuple[int, int, int],

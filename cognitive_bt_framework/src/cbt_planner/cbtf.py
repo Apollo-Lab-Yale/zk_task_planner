@@ -2,13 +2,11 @@ import sqlite3
 import os
 import numpy as np
 from cachetools import LRUCache
-from transformers import AutoTokenizer, AutoModel, BertTokenizer, BertModel, RobertaTokenizer, RobertaModel
+# from transformers import AutoTokenizer, AutoModel, BertTokenizer, BertModel, RobertaTokenizer, RobertaModel
 import torch
 import json
 import datetime
-from keybert import KeyBERT
 from sentence_transformers import SentenceTransformer, util
-from ratelimit import sleep_and_retry, limits
 
 
 from cognitive_bt_framework.src.llm_interface.llm_interface_claude import LLMInterfaceClaude
@@ -47,8 +45,8 @@ class CognitiveBehaviorTreeFramework:
         self.db_path += f'behavior_tree.db'
         self.actions = actions
         setup_database(self.db_path)
-        self.tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
-        self.model = RobertaModel.from_pretrained('roberta-base')
+        # self.tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
+        # self.model = RobertaModel.from_pretrained('roberta-base')
         self.keyword_model = KeyBERT('all-MiniLM-L6-v2')
         self.keyword_embedder = SentenceTransformer('paraphrase-MiniLM-L6-v2')
         self.object_names = set(robot_interface.get_object_names())
