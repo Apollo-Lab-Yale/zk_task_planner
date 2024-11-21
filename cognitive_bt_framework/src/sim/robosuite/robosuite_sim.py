@@ -30,7 +30,7 @@ class RobosuiteSim(object):
             "layout_ids": layout,
             "camera_depths": True,
             "style_ids": style,
-            "translucent_robot": True,
+            "translucent_robot": False,
             "camera_names": ["leg0_robotview"]
         }
         self.renderer = renderer
@@ -85,7 +85,7 @@ class RobosuiteSim(object):
 
     def get_last_obs(self):
         with self.obs_mutex:
-            obs = deepcopy(self.last_obs)
+            obs, _, _, _ = self.env.step(np.zeros(self.env.action_dim))
             return obs
     
     def set_last_obs(self, obs):
@@ -95,7 +95,8 @@ class RobosuiteSim(object):
     def navigate_to_object(self, obj):
         pass
 
-    def grab_object(self, obs):
+    def grab_object(self, obj):
+        state = self.get_state()
         pass
 
     def place_object(self, obj):
@@ -114,6 +115,7 @@ class RobosuiteSim(object):
     def look_up(self, rads=np.pi/6):
         pass
 
+
     def get_state(self):
         global itern
         obs = self.get_last_obs()
@@ -123,11 +125,12 @@ class RobosuiteSim(object):
         detections = []
         object_positions = []
         for idx, camera_name in enumerate(self.config["camera_names"]):
-            rgb_frame = obs["leg0_robotview_image"]
-            cv2.imwrite(f'./test/img{itern}.png', rgb_frame)
-            itern+=1
+            
+            bgr_frame = obs["leg0_robotview_image"]
+            rgb_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_RGB2BGR)
+            depth_frame = obs["leg0_robotview_depth"]
             camera_detections = self.object_detection.detect_objects(rgb_frame)
-            print(f"CAMERA_DETECTIONS: {[det['name'] for det in camera_detections]}")
+            print(f"CAMERA_DETECTIONS: {[(det['name'], det['conf']) for det in camera_detections]}")
             camera_id = self.env.sim.model.camera_name2id(camera_name)
             fovy = self.env.sim.model.cam_fovy[camera_id]
             img_height, img_width = rgb_frame.shape[:2]
@@ -141,34 +144,33 @@ class RobosuiteSim(object):
             cam_pose = self.env.sim.data.get_camera_xmat(camera_name)  # rotation matrix (3x3)
             cam_pos = self.env.sim.data.get_camera_xpos(camera_name)  # position (3,)
             for detection in camera_detections:
-                mask = detection['mask']
-                # Get depth values within the mask
-                depth_frame = depth_frame.reshape(
-                    mask.shape
-                )
-                masked_depth = depth_frame * mask
-                ys, xs = np.where(mask > 0)
-                depths = masked_depth[ys, xs]
-                # Exclude zero depth values
-                valid = depths > 0
-                xs = xs[valid]
-                ys = ys[valid]
-                depths = depths[valid]
-                if len(depths) == 0:
-                    continue
-                # Back-project pixel coordinates to camera coordinates
-                x_cam = (xs - cx) * depths / fx
-                y_cam = (ys - cy) * depths / fy
-                z_cam = depths
-                points_cam = np.stack([x_cam, y_cam, z_cam], axis=-1)
-                # Compute centroid in camera frame
-                centroid_cam = np.mean(points_cam, axis=0)
+                bbox = detection['bbox']
+                # Get bounding box coordinates
+                x_min, y_min, x_max, y_max = bbox
+                # Compute center of the bounding box
+                x_center = (x_min + x_max) / 2
+                y_center = (y_min + y_max) / 2
+                # Round to integer pixel coordinates
+                x_center = int(round(x_center))
+                y_center = int(round(y_center))
+                # Ensure coordinates are within image bounds
+                x_center = min(max(0, x_center), img_width - 1)
+                y_center = min(max(0, y_center), img_height - 1)
+                # Get depth value at the center pixel
+                depth = depth_frame[y_center, x_center]
+                if depth <= 0:
+                    continue  # Skip if depth is invalid
+                # Back-project pixel to camera coordinates
+                x_cam = (x_center - cx) * depth / fx
+                y_cam = (y_center - cy) * depth / fy
+                z_cam = depth
+                centroid_cam = np.array([x_cam, y_cam, z_cam])
                 # Transform centroid to world frame
                 centroid_world = cam_pose @ centroid_cam + cam_pos
                 # Add 3D position to detection
                 detection['position'] = centroid_world
                 object_positions.append(detection)
-            return object_positions
+        return object_positions
 
     def simulation_loop(self):
         global itern
@@ -191,12 +193,10 @@ class RobosuiteSim(object):
             # Step the environment
 
             for step in range(n_time_steps):
-                print('ACTION')
-                obs, reward, done, info = self.env.step(action)
+                with self.obs_mutex:
+                    obs, reward, done, info = self.env.step(action)
                 rgb_frame = obs["leg0_robotview_image"]
-                cv2.imwrite(f'/home/liam/dev/zk_task_planner/cognitive_bt_framework/src/sim/robosuite/test/img{itern}.png', rgb_frame)
-                print('wrote ' + f'/home/liam/dev/zk_task_planner/cognitive_bt_framework/src/sim/robosuite/test/img{itern}.png')
-                itern+=1
+                
                 self.env.render()
                 self.set_last_obs(obs)
                 # Wait for the next control step
@@ -221,29 +221,28 @@ def main():
     global itern
     # Instantiate the simulation
     sim = RobosuiteSim()
-    # sim.start()
+    sim.start()
     last_img = None
     for i in range(50):
         sim.add_action(np.random.uniform(-1,1, sim.env.action_dim), 1)
         obs = sim.get_last_obs()
-        rgb_frame = obs["leg0_robotview_image"]
+        sim.get_state()
+        # rgb_frame = obs["leg0_robotview_image"]
         # cv2.imwrite(f'/home/liam/dev/zk_task_planner/cognitive_bt_framework/src/sim/robosuite/test/img{itern}.png', rgb_frame)
         # print('wrote ' + f'/home/liam/dev/zk_task_planner/cognitive_bt_framework/src/sim/robosuite/test/img{itern}.png')
         # itern+=1
-        time.sleep(0.1)
-        if last_img is not None:
-            print(not np.any(cv2.subtract(rgb_frame, last_img)))
-        last_img = rgb_frame
+        # if last_img is not None:
+        #     print(not np.any(cv2.subtract(rgb_frame, last_img)))
     
-    sim.simulation_loop()
-    for i in range(50):
-        sim.add_action(np.random.uniform(-1,1, sim.env.action_dim), 1)
-        obs = sim.get_last_obs()
+    # # sim.simulation_loop()
+    # for i in range(50):
+    #     sim.add_action(np.random.uniform(-1,1, sim.env.action_dim), 1)
+    #     obs = sim.get_last_obs()
         
-        time.sleep(0.1)
-        if last_img is not None:
-            print(not np.any(cv2.subtract(rgb_frame, last_img)))
-        last_img = rgb_frame
+    #     time.sleep(0.1)
+    #     if last_img is not None:
+    #         print(not np.any(cv2.subtract(rgb_frame, last_img)))
+    #     last_img = rgb_frame
     # Start generating actions in the main thread or another thread
 
     # Keep the main thread alive if needed
