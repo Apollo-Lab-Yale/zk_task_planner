@@ -3,11 +3,19 @@ import json
 import time
 from collections import deque
 import threading
-from robosuite.utils.observables import Observable
 from copy import deepcopy
+
 import robosuite
 from robosuite.controllers import load_composite_controller_config
 from robosuite.wrappers import VisualizationWrapper
+from robosuite.utils import camera_utils
+from robosuite.utils import transform_utils as T
+from robosuite.utils.observables import Observable
+
+from robocasa.models.scenes.scene_registry import LayoutType, StyleType
+
+
+
 import h5py
 import imageio
 import mujoco
@@ -16,13 +24,18 @@ import math
 from robocasa.scripts.collect_demos import collect_human_trajectory
 import cv2
 import memory_profiler
+import math
 
 from cognitive_bt_framework.src.vision.object_detection.yolo import ObjectDetection
 itern = 0
 
+MAX_TIMESTEPS = 50
+GRASP_ERROR = 0.025
+WORKING_RADIUS = 0.75
+
 class RobosuiteSim(object):
-    def __init__(self, task='PnPCounterToCab', layout="0", style="5",
-                 robot='B1Z1Floating', renderer='mjviewer', arm_ctl="", turn_speed=1.0):
+    def __init__(self, task='PrewashFoodAssembly', layout=LayoutType.ONE_WALL_SMALL, style=StyleType.COASTAL,
+                 robot='B1Z1Floating', renderer='mjviewer', arm_ctl="", turn_speed=1.0, move_speed=1.0, use_camera='leg0_robotview'):
         self.config = {
             "env_name": task,
             "robots": robot,
@@ -30,9 +43,11 @@ class RobosuiteSim(object):
             "layout_ids": layout,
             "camera_depths": True,
             "style_ids": style,
-            "translucent_robot": False,
-            "camera_names": ["leg0_robotview"]
+            "translucent_robot": True,
+            "camera_names": ["leg0_robotview"],
+            "obj_instance_split": 'A'
         }
+        self.camera_name = use_camera
         self.renderer = renderer
         self.env = robosuite.make(
             **self.config,
@@ -44,24 +59,30 @@ class RobosuiteSim(object):
             control_freq=20,
             renderer=renderer,
         )
+        self.running = False
         self.obs_mutex = threading.Lock()
         # self.env = VisualizationWrapper(self.env)
         if robot == 'B1Z1':
             raise NotImplementedError("B1Z1 is not yet implemented.")
         else:
             self.get_action = self.cmd_to_action_floating_base
+
         # Initialize the action queue
         self.action_queue = deque()
         self.control_freq = 20  # Control frequency in Hz
         self.dt = 1.0 / self.control_freq
         self.turn_speed = turn_speed # 1.0 rad / sec by default
+        self.move_speed = move_speed
+
         self.object_detection = ObjectDetection()
+
         self.last_obs = self.env.reset()
 
         # Start the simulation thread
         self.action_fn_from_str = {
             "walk_to_object": self.navigate_to_object,
             "walk": self.navigate_to_object,
+            "moveright": self.move_right,
             "grab": self.grab_object,
             "turnleft": self.turn_left,
             "turnright": self.turn_right,
@@ -72,9 +93,15 @@ class RobosuiteSim(object):
     def start(self):
         self.simulation_thread = threading.Thread(target=self.simulation_loop)
         self.simulation_thread.daemon = True  # Allow thread to exit when main program exits
+        self.running = True
         self.simulation_thread.start()
     
-    def cmd_to_action_floating_base(self, base_vx, base_vy, base_omega, gripper_pos, close_gripper=False):
+    def stop(self):
+        self.running = False
+        self.simulation_thread.join()
+        # self.env.sim.end()
+    
+    def cmd_to_action_floating_base(self, base_vx=0.0, base_vy=0.0, base_omega=0.0, gripper_pos=np.zeros(6), close_gripper=False):
         action = np.zeros(self.env.action_dim)
         action[-4] = base_vx
         action[-3] = base_vy
@@ -86,19 +113,68 @@ class RobosuiteSim(object):
     def get_last_obs(self):
         with self.obs_mutex:
             obs, _, _, _ = self.env.step(np.zeros(self.env.action_dim))
+            self.last_obs = obs
             return obs
     
     def set_last_obs(self, obs):
         with self.obs_mutex:
             self.last_obs = deepcopy(obs)
     
+    def get_closest_obj(self, obj):
+        state = self.get_state()
+        objs = [ob for ob in state if ob['name'] == obj]
+        if len(objs) == 0:
+            return None, None
+        min_dist = np.inf
+        closest_obj = None
+        for ob in objs:
+            distance = np.linalg.norm(ob['position'])
+            print(ob['position'])
+            if distance < min_dist:
+                closest_obj = ob
+                min_dist = distance
+        return closest_obj, min_dist
+    
     def navigate_to_object(self, obj):
-        pass
+        for i in range(MAX_TIMESTEPS):
+            closest_obj, min_dist = self.get_closest_obj(obj)
+            if closest_obj is None:
+                return False, f"Couldn't find any {obj}."
+            vx, vy = 0.0, 0.0
+            print(closest_obj['position'], min_dist)
+            if math.fabs(closest_obj['position'][0]) > WORKING_RADIUS:
+                vx = self.move_speed
+                if closest_obj['position'][0] < 0: vx = -vx
+
+            if math.fabs(closest_obj['position'][1]) > WORKING_RADIUS:
+                vy = self.move_speed
+                if closest_obj['position'][1] < 0: vy = -vy
+
+            if vx < self.move_speed and vy < self.move_speed:
+                return True, ""
+            action = self.get_action(base_vx=vx, base_vy = vy)
+            self.add_action(action, 1)
+        return False, f"Failed to navigate to {obj} in {MAX_TIMESTEPS} timesteps"
+        
 
     def grab_object(self, obj):
-        state = self.get_state()
-        pass
-
+        obj_name = obj
+        for i in range(MAX_TIMESTEPS):
+            closest_obj, min_dist = self.get_closest_obj( obj)
+            if closest_obj is None:
+                return False, f"Couldn't find any {obj}."
+            if min_dist < GRASP_ERROR:
+                action = self.get_action(close_gripper=True)
+                self.action_queue.append((action, 1))
+                return True, ""
+            gripper_pos = np.zeros(6)
+            gripper_pos[:3] = closest_obj['position']
+            action = self.get_action(base_vx=0, base_vy=0, base_omega=0.0, gripper_pos=gripper_pos)
+            self.action_queue.append((action, 3))
+            time.sleep(self.dt)
+        return False, f"Failed to grab {obj_name} in {MAX_TIMESTEPS} timesteps."
+        
+        
     def place_object(self, obj):
         pass
 
@@ -112,9 +188,73 @@ class RobosuiteSim(object):
         action_time = math.ceil(rads * self.turn_speed / self.dt)
         self.action_queue.append((action, action_time))
 
+    def move_right(self, dis=1.0):
+        action_time = math.ceil(rads * self.turn_speed / self.dt)
+
     def look_up(self, rads=np.pi/6):
         pass
 
+    def get_object_positions(self, camera_detections):
+        object_positions = []
+        camera_name = self.camera_name
+        sim = self.env.sim
+        self.last_obs = self.get_last_obs()
+        # Get camera image size
+        img = self.last_obs[f"{camera_name}_image"]
+        img_height, img_width = img.shape[:2]
+
+        # Get the camera intrinsic matrix
+        K = camera_utils.get_camera_intrinsic_matrix(sim, camera_name, img_height, img_width)
+        K_inv = np.linalg.inv(K)
+
+        # Get the camera extrinsic matrix
+        camera_to_world_transform = camera_utils.get_camera_extrinsic_matrix(sim, camera_name)
+
+        # Get the depth map and convert it to actual depth values
+        depth_map = self.last_obs[f"{camera_name}_depth"]
+        depth_map = camera_utils.get_real_depth_map(sim, depth_map)
+        depth_maps = np.array([depth_map])
+        # world_coords = camera_utils.transform_from_pixels_to_world(img, depth_map, camera_to_world_transform)
+        print([det['name'] for det in camera_detections])
+        for detection in camera_detections:
+            bbox = detection['bbox']
+            # Get bounding box coordinates
+            x_min, y_min, x_max, y_max = bbox
+            # Compute center of the bounding box
+            x_center = (x_min + x_max) / 2
+            y_center = (y_min + y_max) / 2
+            # Ensure coordinates are within image bounds
+            x_center = np.clip(x_center, 0, img_width - 1)
+            y_center = np.clip(y_center, 0, img_height - 1)
+            # Round to integer pixel coordinates
+            x_center_int = int(round(x_center))
+            y_center_int = int(round(y_center))
+            coords = np.array([(y_center_int, x_center_int)])
+            
+            world_coord = camera_utils.transform_from_pixels_to_world(coords, depth_maps, camera_to_world_transform)
+            pose = world_coord[0]# / 1000
+            detection['position'] = pose
+            object_positions.append(detection)
+
+        return object_positions
+
+    def get_pose_in_gripper_frame(self, obs, object_positions):
+        ee_pose = obs['robot0_eef_pos']
+        ee_quat = obs['robot0_eef_quat']
+
+        # Convert quaternion to rotation matrix
+        # Ensure quaternion is in (x, y, z, w) format
+        ee_quat = T.convert_quat(ee_quat, to='xyzw')
+        R_world_ee = T.quat2mat(ee_quat)  # Rotation matrix from ee to world frame
+        R_ee_world = R_world_ee.T  # Rotation matrix from world to ee frame
+        
+        # Translate object positions to the ee frame
+        for detection in object_positions:
+            P_world = detection['position']  # Object position in world frame
+            # Compute object position relative to the ee frame
+            P_ee = R_ee_world @ (P_world - ee_pose)
+            detection['position_in_ee'] = P_ee  # Add position in ee frame to detection
+        return object_positions
 
     def get_state(self):
         global itern
@@ -124,64 +264,29 @@ class RobosuiteSim(object):
         depth_frames = []
         detections = []
         object_positions = []
-        for idx, camera_name in enumerate(self.config["camera_names"]):
             
-            bgr_frame = obs["leg0_robotview_image"]
-            rgb_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_RGB2BGR)
-            depth_frame = obs["leg0_robotview_depth"]
-            camera_detections = self.object_detection.detect_objects(rgb_frame)
-            print(f"CAMERA_DETECTIONS: {[(det['name'], det['conf']) for det in camera_detections]}")
-            camera_id = self.env.sim.model.camera_name2id(camera_name)
-            fovy = self.env.sim.model.cam_fovy[camera_id]
-            img_height, img_width = rgb_frame.shape[:2]
-            f = 0.5 * img_height / np.tan(fovy * np.pi / 360)
-            fx = f
-            fy = f
-            cx = img_width / 2
-            cy = img_height / 2
-
-            # Get camera extrinsics
-            cam_pose = self.env.sim.data.get_camera_xmat(camera_name)  # rotation matrix (3x3)
-            cam_pos = self.env.sim.data.get_camera_xpos(camera_name)  # position (3,)
-            for detection in camera_detections:
-                bbox = detection['bbox']
-                # Get bounding box coordinates
-                x_min, y_min, x_max, y_max = bbox
-                # Compute center of the bounding box
-                x_center = (x_min + x_max) / 2
-                y_center = (y_min + y_max) / 2
-                # Round to integer pixel coordinates
-                x_center = int(round(x_center))
-                y_center = int(round(y_center))
-                # Ensure coordinates are within image bounds
-                x_center = min(max(0, x_center), img_width - 1)
-                y_center = min(max(0, y_center), img_height - 1)
-                # Get depth value at the center pixel
-                depth = depth_frame[y_center, x_center]
-                if depth <= 0:
-                    continue  # Skip if depth is invalid
-                # Back-project pixel to camera coordinates
-                x_cam = (x_center - cx) * depth / fx
-                y_cam = (y_center - cy) * depth / fy
-                z_cam = depth
-                centroid_cam = np.array([x_cam, y_cam, z_cam])
-                # Transform centroid to world frame
-                centroid_world = cam_pose @ centroid_cam + cam_pos
-                # Add 3D position to detection
-                detection['position'] = centroid_world
-                object_positions.append(detection)
+        bgr_frame = obs["leg0_robotview_image"]
+        rgb_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_RGB2BGR)
+        depth_frame = obs["leg0_robotview_depth"]
+        camera_detections = self.object_detection.detect_objects(rgb_frame)
+        # print([det['name'] for det in camera_detections])
+        object_positions = self.get_object_positions(camera_detections)
+        object_positions = self.get_pose_in_gripper_frame(obs, object_positions)
         return object_positions
+
+            
 
     def simulation_loop(self):
         global itern
         count = 0
         max_fr = 20
-        while True:
+        while self.running:
             start = time.time()
             # Pop action from the queue if available
             action = np.zeros(self.env.action_dim)
             if self.action_queue:
                 act = self.action_queue.popleft()
+                print(act)
                 action, n_time_steps = act
             else:
                 # # Use zero action if no action is available
@@ -195,10 +300,6 @@ class RobosuiteSim(object):
             for step in range(n_time_steps):
                 with self.obs_mutex:
                     obs, reward, done, info = self.env.step(action)
-                rgb_frame = obs["leg0_robotview_image"]
-                
-                self.env.render()
-                self.set_last_obs(obs)
                 # Wait for the next control step
                 if max_fr is not None:
                     elapsed = time.time() - start
@@ -222,33 +323,14 @@ def main():
     # Instantiate the simulation
     sim = RobosuiteSim()
     sim.start()
-    last_img = None
-    for i in range(50):
-        sim.add_action(np.random.uniform(-1,1, sim.env.action_dim), 1)
-        obs = sim.get_last_obs()
-        sim.get_state()
-        # rgb_frame = obs["leg0_robotview_image"]
-        # cv2.imwrite(f'/home/liam/dev/zk_task_planner/cognitive_bt_framework/src/sim/robosuite/test/img{itern}.png', rgb_frame)
-        # print('wrote ' + f'/home/liam/dev/zk_task_planner/cognitive_bt_framework/src/sim/robosuite/test/img{itern}.png')
-        # itern+=1
-        # if last_img is not None:
-        #     print(not np.any(cv2.subtract(rgb_frame, last_img)))
-    
-    # # sim.simulation_loop()
-    # for i in range(50):
-    #     sim.add_action(np.random.uniform(-1,1, sim.env.action_dim), 1)
-    #     obs = sim.get_last_obs()
-        
-    #     time.sleep(0.1)
-    #     if last_img is not None:
-    #         print(not np.any(cv2.subtract(rgb_frame, last_img)))
-    #     last_img = rgb_frame
-    # Start generating actions in the main thread or another thread
-
-    # Keep the main thread alive if needed
-    input("Press any key to exit.")
-
-    sim.env.close()
+    sim.env.render()
+    # for i in range(100):
+    #     action = sim.get_action(gripper_pos = (0,0,1,0,0,0))
+    #     sim.add_action(action, 5)
+    print(sim.navigate_to_object("bowl"))
+    print(sim.grab_object("bowl"))
+    input('press key to exit')
+    sim.stop()
 
 if __name__ == "__main__":
    main()

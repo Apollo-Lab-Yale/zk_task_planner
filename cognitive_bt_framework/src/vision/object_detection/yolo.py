@@ -7,7 +7,7 @@ from cognitive_bt_framework.src.vision.realsense import Camera
 
 
 class ObjectDetection:
-    def __init__(self, model_path: str = "yolo11x.pt", is_sim=False):
+    def __init__(self, model_path: str = "yolov8x.pt", is_sim=False):
         if not is_sim:
             self.camera = Camera()
         else:
