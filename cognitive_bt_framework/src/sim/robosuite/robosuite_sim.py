@@ -195,44 +195,66 @@ class RobosuiteSim(object):
         pass
 
     def get_object_positions(self, camera_detections):
+        global itern
+        folder_path = '/home/liam/dev/zk_task_planner/cognitive_bt_framework/src/sim/robosuite/test/'
         object_positions = []
         camera_name = self.camera_name
         sim = self.env.sim
         self.last_obs = self.get_last_obs()
+        
         # Get camera image size
         img = self.last_obs[f"{camera_name}_image"]
         img_height, img_width = img.shape[:2]
-
-        # Get the camera intrinsic matrix
+        cv2.imwrite(folder_path+f"camera_image{itern}.png", img)
+        
+        # Get the camera matrices
         K = camera_utils.get_camera_intrinsic_matrix(sim, camera_name, img_height, img_width)
         K_inv = np.linalg.inv(K)
-
-        # Get the camera extrinsic matrix
         camera_to_world_transform = camera_utils.get_camera_extrinsic_matrix(sim, camera_name)
 
-        # Get the depth map and convert it to actual depth values
+        # Get and process depth map
         depth_map = self.last_obs[f"{camera_name}_depth"]
+        itern+=1
         depth_map = camera_utils.get_real_depth_map(sim, depth_map)
-        depth_maps = np.array([depth_map])
-        # world_coords = camera_utils.transform_from_pixels_to_world(img, depth_map, camera_to_world_transform)
+        cv2.imwrite(folder_path+f"camera_depth{itern}.png", depth_map*100)
+        
         print([det['name'] for det in camera_detections])
         for detection in camera_detections:
             bbox = detection['bbox']
-            # Get bounding box coordinates
-            x_min, y_min, x_max, y_max = bbox
-            # Compute center of the bounding box
-            x_center = (x_min + x_max) / 2
-            y_center = (y_min + y_max) / 2
+            mask = detection['mask']
+            
+            # Get depth values within the mask
+            masked_depth = depth_map[mask]
+            
+            # Remove outliers using IQR method
+            q1 = np.percentile(masked_depth, 25)
+            q3 = np.percentile(masked_depth, 75)
+            iqr = q3 - q1
+            lower_bound = q1 - 1.5 * iqr
+            upper_bound = q3 + 1.5 * iqr
+            filtered_depth = masked_depth[(masked_depth >= lower_bound) & (masked_depth <= upper_bound)]
+            
+            # Get average depth after filtering outliers
+            avg_depth = np.mean(filtered_depth)
+            
+            # Get mask centroid
+            y_coords, x_coords = np.where(mask)
+            x_center = np.mean(x_coords)
+            y_center = np.mean(y_coords)
+            
             # Ensure coordinates are within image bounds
             x_center = np.clip(x_center, 0, img_width - 1)
             y_center = np.clip(y_center, 0, img_height - 1)
+            
             # Round to integer pixel coordinates
             x_center_int = int(round(x_center))
             y_center_int = int(round(y_center))
+            
             coords = np.array([(y_center_int, x_center_int)])
+            depth_maps = np.array([[avg_depth]])  # Use filtered average depth
             
             world_coord = camera_utils.transform_from_pixels_to_world(coords, depth_maps, camera_to_world_transform)
-            pose = world_coord[0]# / 1000
+            pose = world_coord[0]
             detection['position'] = pose
             object_positions.append(detection)
 

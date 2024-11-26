@@ -7,7 +7,7 @@ from cognitive_bt_framework.src.vision.realsense import Camera
 
 
 class ObjectDetection:
-    def __init__(self, model_path: str = "yolov8x.pt", is_sim=False):
+    def __init__(self, model_path: str = "yolov8x-seg.pt", is_sim=False):
         if not is_sim:
             self.camera = Camera()
         else:
@@ -27,8 +27,16 @@ class ObjectDetection:
         # print(f"RESULTS------------------------{results}")
         if results is None or results.boxes is None:
             return detections
-        # print(f"DETECTIONS---------------{detections}")
-        # for box, mask in zip(results.boxes, results.masks):
+        print(f"DETECTIONS---------------{detections}")
+        for box, mask in zip(results.boxes, results.masks):
+            detections.append({
+                'bbox': box.xyxy[0].cpu().numpy(),
+                'conf': box.conf.item(),
+                'cls': box.cls.item(),
+                'name': results.names[int(box.cls.item())],
+                'mask': mask.data[0].cpu().numpy()
+            })
+        # for box in results.boxes:
         #     detections.append({
         #         'bbox': box.xyxy[0].cpu().numpy(),
         #         'conf': box.conf.item(),
@@ -36,14 +44,6 @@ class ObjectDetection:
         #         'name': results.names[int(box.cls.item())],
         #         'mask': mask.data[0].cpu().numpy()
         #     })
-        for box in results.boxes:
-            detections.append({
-                'bbox': box.xyxy[0].cpu().numpy(),
-                'conf': box.conf.item(),
-                'cls': box.cls.item(),
-                'name': results.names[int(box.cls.item())],
-                # 'mask': mask.data[0].cpu().numpy()
-            })
         return detections
 
     def get_object_depth(self, depth_image: np.ndarray, mask: np.ndarray) -> float:
