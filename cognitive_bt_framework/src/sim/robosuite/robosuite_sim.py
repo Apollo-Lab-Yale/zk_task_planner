@@ -35,7 +35,7 @@ WORKING_RADIUS = 0.75
 
 class RobosuiteSim(object):
     def __init__(self, task='PrewashFoodAssembly', layout=LayoutType.ONE_WALL_SMALL, style=StyleType.COASTAL,
-                 robot='B1Z1Floating', renderer='mjviewer', arm_ctl="", turn_speed=1.0, move_speed=1.0, use_camera='leg0_robotview'):
+                 robot='B1Z1Floating', renderer='mjviewer', arm_ctl="", turn_speed=1.0, move_speed=10.0, use_camera='leg0_robotview'):
         self.config = {
             "env_name": task,
             "robots": robot,
@@ -153,7 +153,7 @@ class RobosuiteSim(object):
             if vx < self.move_speed and vy < self.move_speed:
                 return True, ""
             action = self.get_action(base_vx=vx, base_vy = vy)
-            self.add_action(action, 1)
+            self.add_action(action, 5)
         return False, f"Failed to navigate to {obj} in {MAX_TIMESTEPS} timesteps"
         
 
@@ -202,60 +202,37 @@ class RobosuiteSim(object):
         sim = self.env.sim
         self.last_obs = self.get_last_obs()
         
-        # Get camera image size
         img = self.last_obs[f"{camera_name}_image"]
         img_height, img_width = img.shape[:2]
-        cv2.imwrite(folder_path+f"camera_image{itern}.png", img)
         
-        # Get the camera matrices
-        K = camera_utils.get_camera_intrinsic_matrix(sim, camera_name, img_height, img_width)
-        K_inv = np.linalg.inv(K)
-        camera_to_world_transform = camera_utils.get_camera_extrinsic_matrix(sim, camera_name)
-
-        # Get and process depth map
+        camera_to_world_transform = camera_utils.get_camera_transform_matrix(sim, camera_name, 640, 640)
+        camera_to_world_transform = np.linalg.inv(camera_to_world_transform)
+        
         depth_map = self.last_obs[f"{camera_name}_depth"]
-        itern+=1
         depth_map = camera_utils.get_real_depth_map(sim, depth_map)
-        cv2.imwrite(folder_path+f"camera_depth{itern}.png", depth_map*100)
         
-        print([det['name'] for det in camera_detections])
         for detection in camera_detections:
-            bbox = detection['bbox']
-            mask = detection['mask']
-            
-            # Get depth values within the mask
-            masked_depth = depth_map[mask]
-            
-            # Remove outliers using IQR method
-            q1 = np.percentile(masked_depth, 25)
-            q3 = np.percentile(masked_depth, 75)
-            iqr = q3 - q1
-            lower_bound = q1 - 1.5 * iqr
-            upper_bound = q3 + 1.5 * iqr
-            filtered_depth = masked_depth[(masked_depth >= lower_bound) & (masked_depth <= upper_bound)]
-            
-            # Get average depth after filtering outliers
-            avg_depth = np.mean(filtered_depth)
-            
-            # Get mask centroid
+            mask = detection['mask'].astype(bool)
+            if not np.any(mask):
+                continue
+                
             y_coords, x_coords = np.where(mask)
-            x_center = np.mean(x_coords)
-            y_center = np.mean(y_coords)
+            x_center = int(np.mean(x_coords))
+            y_center = int(np.mean(y_coords))
             
-            # Ensure coordinates are within image bounds
-            x_center = np.clip(x_center, 0, img_width - 1)
-            y_center = np.clip(y_center, 0, img_height - 1)
+            pixel_coords = np.array([[y_center, x_center]])
+            depth_value = depth_map[y_center, x_center]
+            depth_array = np.array([depth_map])
             
-            # Round to integer pixel coordinates
-            x_center_int = int(round(x_center))
-            y_center_int = int(round(y_center))
-            
-            coords = np.array([(y_center_int, x_center_int)])
-            depth_maps = np.array([[avg_depth]])  # Use filtered average depth
-            
-            world_coord = camera_utils.transform_from_pixels_to_world(coords, depth_maps, camera_to_world_transform)
-            pose = world_coord[0]
-            detection['position'] = pose
+            world_coord = camera_utils.transform_from_pixels_to_world(
+                pixel_coords, 
+                depth_array,
+                camera_to_world_transform
+            )
+            robot_quat = self.last_obs['robot0_base_quat']
+            R = T.quat2mat(robot_quat)
+            detection['position'] = (world_coord[0]  - self.last_obs['robot0_base_pos']) @ R
+            print(detection['position'], detection['name'])
             object_positions.append(detection)
 
         return object_positions
@@ -323,11 +300,11 @@ class RobosuiteSim(object):
                 with self.obs_mutex:
                     obs, reward, done, info = self.env.step(action)
                 # Wait for the next control step
-                if max_fr is not None:
-                    elapsed = time.time() - start
-                    diff = 1 / max_fr - elapsed
-                    if diff > 0:
-                        time.sleep(diff)
+                # if max_fr is not None:
+                #     elapsed = time.time() - start
+                #     diff = 1 / max_fr - elapsed
+                #     if diff > 0:
+                #         time.sleep(diff)
 
     def add_action(self, action, n_timesteps):
         """Add an action to the action queue."""
@@ -346,9 +323,7 @@ def main():
     sim = RobosuiteSim()
     sim.start()
     sim.env.render()
-    # for i in range(100):
-    #     action = sim.get_action(gripper_pos = (0,0,1,0,0,0))
-    #     sim.add_action(action, 5)
+    print(sim.get_last_obs().keys())
     print(sim.navigate_to_object("bowl"))
     print(sim.grab_object("bowl"))
     input('press key to exit')
