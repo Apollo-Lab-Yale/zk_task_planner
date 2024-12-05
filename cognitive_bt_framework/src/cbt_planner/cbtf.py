@@ -47,7 +47,6 @@ class CognitiveBehaviorTreeFramework:
         setup_database(self.db_path)
         # self.tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
         # self.model = RobertaModel.from_pretrained('roberta-base')
-        self.keyword_model = KeyBERT('all-MiniLM-L6-v2')
         self.keyword_embedder = SentenceTransformer('paraphrase-MiniLM-L6-v2')
         self.object_names = set(robot_interface.get_object_names())
         print(self.object_names)
@@ -411,6 +410,8 @@ if __name__ == "__main__":
     # 28, 27,
     # no walk 19, 23,
     sim = AI2ThorSimEnv(scene_index=28)
+    print(sim.get_state())
+    exit()
     # goal, _ = get_make_coffee(sim)
     cbtf = CognitiveBehaviorTreeFramework(sim)
     cbtf.set_goal('coffee')
