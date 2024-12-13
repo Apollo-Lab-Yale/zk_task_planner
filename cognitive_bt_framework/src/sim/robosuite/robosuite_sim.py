@@ -26,7 +26,7 @@ MAX_TIMESTEPS = 200
 GRASP_ERROR = 0.0375
 WORKING_RADIUS = 0.57
 
-class RobosuiteSim(object):
+class RobosuiteSimEnv(object):
     def __init__(self, task='BeverageSorting', layout=LayoutType.ONE_WALL_SMALL, style=StyleType.COASTAL,
                  robot='B1Z1Floating', renderer='mjviewer', arm_ctl="", turn_speed=1.0, move_speed=1, use_camera='leg0_robotview',
                  scene_index=-1, width=600, height=600, gridSize=0.25, visibilityDistance=20, 
@@ -86,10 +86,10 @@ class RobosuiteSim(object):
             raise
 
         self.object_detection = ObjectDetection()
+        self.object_names = self.get_object_names()
         
         # Initialize state
         self.last_obs = self.env.reset()
-        print('reset env')
         self.init_ee_pos = self.get_gripper_pose()
         
         self.action_fn_from_str = {
@@ -102,12 +102,19 @@ class RobosuiteSim(object):
             "put": self.place_object,
             "lookup": self.look_up
         }
-        
+    
+    def get_object_names(self):
+        return self.object_detection.get_classes()
+
     def __del__(self):
         """Ensure proper cleanup of resources."""
         self.stop()
         if hasattr(self, 'env'):
             self.env.close()
+
+    def get_camera_image(self):
+        obs = self.get_last_obs()
+        return obs[f"{self.camera_name}_image"]
 
     def get_gripper_pose(self) -> np.ndarray:
         """Get current gripper pose in robot frame."""
@@ -124,13 +131,10 @@ class RobosuiteSim(object):
         print('starting sim')
         if self._running:
             return
-        print('setting up thread')
         self._running = True
         self.simulation_thread = threading.Thread(target=self.simulation_loop)
         self.simulation_thread.daemon = True
-        print('starting thread')
         self.simulation_thread.start()
-        print('thread started')
     
     def stop(self) -> None:
         """Stop simulation thread safely."""
@@ -189,7 +193,6 @@ class RobosuiteSim(object):
             if closest_obj is None:
                 return False, f"Couldn't find any {obj}."
             pos = closest_obj['position']
-            print(f"POSE: {pos}")
             vx = vy = 0.0
             while self._action_queue:
                 if abs(pos[0]) <= WORKING_RADIUS and abs(pos[1]) <= WORKING_RADIUS:
@@ -519,7 +522,8 @@ class RobosuiteSim(object):
         """Execute a sequence of actions."""
         for action in actions:
             act, target = action.split(' ', 1)
-            if target.lower() not in [obj['name'].lower() for obj in self.get_state()['objects']]:
+            if target.lower() not in [obj['name'].lower() for obj in self.get_state()['objects']] and\
+                action != 'search':
                 return False, f"Object {target} not found"
             
             fn = self.action_fn_from_str.get(act)
@@ -535,7 +539,7 @@ class RobosuiteSim(object):
 def main():
     global itern
     # Instantiate the simulation
-    sim = RobosuiteSim()
+    sim = RobosuiteSimEnv()
     sim.start()
     print('started sim')
     sim.env.render()

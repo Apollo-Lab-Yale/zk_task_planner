@@ -25,9 +25,8 @@ class ObjectDetection:
         results = self.model(image, verbose=False)[0]
         detections = []
         # print(f"RESULTS------------------------{results}")
-        if results is None or results.boxes is None:
+        if results is None or results.boxes is None or results.masks is None:
             return detections
-        print(f"DETECTIONS---------------{detections}")
         for box, mask in zip(results.boxes, results.masks):
             detections.append({
                 'bbox': box.xyxy[0].cpu().numpy(),
@@ -93,6 +92,9 @@ class ObjectDetection:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
         return vis_color, vis_depth
+
+    def get_classes(self) -> List[str]:
+        return list(self.model.names.values())
 
     def run(self) -> None:
         if not self.start():

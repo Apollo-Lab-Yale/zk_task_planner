@@ -26,6 +26,15 @@ def get_claude_key():
     except:
         raise "failed to find api key."
 
+def get_hf_key():
+    file_path = "/usr/config/hf_keys.txt"
+    try:
+        with open(file_path, 'r') as file:
+            first_line = file.readline()
+            return first_line.strip()
+    except:
+        raise "failed to find api key."
+
 def setup_openai():
     file_path = "/usr/config/llm_task_planning.txt"
     try:

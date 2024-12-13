@@ -17,6 +17,7 @@ from cognitive_bt_framework.utils.bt_utils import parse_node, parse_bt_xml, BASE
 from cognitive_bt_framework.utils.goal_gen_aithor import get_wash_mug_in_sink_goal, get_make_coffee, get_put_apple_in_fridge_goal
 from cognitive_bt_framework.src.sim.ai2_thor.utils import AI2THOR_ACTIONS, AI2THOR_PREDICATES, AI2THOR_ACTIONS_ANNOTATED
 from cognitive_bt_framework.src.sim.ai2_thor.ai2_thor_sim import AI2ThorSimEnv
+from cognitive_bt_framework.src.sim.robosuite.robosuite_sim import RobosuiteSimEnv
 from cognitive_bt_framework.src.cbt_planner.memory import Memory
 from cognitive_bt_framework.utils.logic_utils import cosine_similarity, stop_words
 from cognitive_bt_framework.src.cbt_planner.sub_task import SubTask
@@ -265,26 +266,28 @@ class CognitiveBehaviorTreeFramework:
     def manage_task_ordered(self, task_name):
         episode_id = self.memory.start_new_episode(task_name)
         itter = 0
+        print('starting task')
         while not self.robot_interface.check_goal(self.goal) and itter < self.max_goal_retries:
             itter += 1
-            try:
-                context, states = self.robot_interface.get_context(4)
-                decomposition, context = (
-                    self.llm_interface.get_task_decomposition_ordered_context(task_name,
-                                                                              self.robot_interface.object_names,
-                                                                              context))
-                print(decomposition)
+            print('task loop')
+            # try:
+            context, states = self.robot_interface.get_context(1)
+            decomposition, context = (
+                self.llm_interface.get_task_decomposition_ordered_context(task_name,
+                                                                            self.robot_interface.object_names,
+                                                                            context))
+            print(decomposition)
 
-                for subtask_name, details in decomposition.items():
-                    sub_complete = False
-                    subtask_conditions = details['conditions']
-                    print(f"DETAILS {details}")
-                    if not self.robot_interface.validate_goal(details):
-                        raise Exception("Object in goal condition is not in known objects")
-                print(decomposition)
-            except Exception as e:
-                print(f"Task Decomposition failed: {e}")
-                continue
+            for subtask_name, details in decomposition.items():
+                sub_complete = False
+                subtask_conditions = details['conditions']
+                print(f"DETAILS {details}")
+                if not self.robot_interface.validate_goal(details):
+                    raise Exception("Object in goal condition is not in known objects")
+            print(decomposition)
+            # except Exception as e:
+            #     print(f"Task Decomposition failed: {e}")
+            #     continue
 
             def execute_subtasks(subtasks, completed_subtasks):
                 print(subtasks)
@@ -409,14 +412,13 @@ if __name__ == "__main__":
     # 28, 24, 9
     # 28, 27,
     # no walk 19, 23,
-    sim = AI2ThorSimEnv(scene_index=28)
+    sim = RobosuiteSimEnv()
+    sim.start()
     print(sim.get_state())
-    exit()
     # goal, _ = get_make_coffee(sim)
     cbtf = CognitiveBehaviorTreeFramework(sim)
-    cbtf.set_goal('coffee')
-    get_wash_mug_in_sink_goal(sim)
+    cbtf.set_goal('poor')
+    # get_wash_mug_in_sink_goal(sim)
     # sim.image_saver.goal = "Set a place at the table."
-    print(cbtf.manage_task_ordered("Bring a mug of coffee to the table."))
-    print([obj for obj in sim.get_graph()['objects'] if 'sinkbasin' in obj['name'].lower()])
+    print(cbtf.manage_task_ordered("poor the bottle into the sink."))
 
