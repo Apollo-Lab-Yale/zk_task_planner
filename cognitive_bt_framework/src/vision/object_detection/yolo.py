@@ -3,11 +3,13 @@ import cv2
 import numpy as np
 from typing import Optional, Tuple, List, Dict
 from cognitive_bt_framework.src.vision.realsense import Camera
+# from cognitive_bt_framework.src.sim.robosuite.robosuite_sim import RobosuiteSimEnv
 
 
 
 class ObjectDetection:
     def __init__(self, model_path: str = "yolo11x-seg.pt", is_sim=False):
+        self.is_sim = is_sim
         if not is_sim:
             self.camera = Camera()
         else:
@@ -46,7 +48,7 @@ class ObjectDetection:
         return detections
 
     def get_object_depth(self, depth_image: np.ndarray, mask: np.ndarray) -> float:
-        masked_depth = depth_image[mask] #> 0.5]
+        masked_depth = depth_image[mask > 0.5]
         return np.mean(masked_depth[masked_depth > 0]) if masked_depth.size > 0 else 0
 
     def apply_mask_overlay(self, image: np.ndarray, mask: np.ndarray, color: Tuple[int, int, int],
@@ -57,10 +59,12 @@ class ObjectDetection:
 
         return cv2.addWeighted(image, 1, colored_mask, alpha, 0)
 
-    def process_frame(self) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-        frames = self.camera.get_frames()
-        if not frames:
-            return None
+    def process_frame(self, frames = None) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        if self.is_sim:
+            frames = self.camera.get_frames()
+        elif not frames:
+            return None, None
+        
 
         color_image, depth_image = frames
         detections = self.detect_objects(color_image)
@@ -115,5 +119,4 @@ class ObjectDetection:
 
 
 if __name__ == "__main__":
-    detector = ObjectDetection()
-    detector.run()
+    pass

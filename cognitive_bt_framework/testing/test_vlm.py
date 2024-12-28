@@ -1,236 +1,204 @@
-import os
-from PIL import Image
-import numpy as np
+from ultralytics import YOLO
+import cv2
 import numpy as np
 import base64
-import io
-import time
-
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
- # Disable GLFW warnings
-os.environ['PYOPENGL_PLATFORM'] = 'egl'
-
-from transformers import AutoTokenizer, AutoModelForCausalLM
-import torch
-from huggingface_hub import InferenceClient
-
-from cognitive_bt_framework.src.sim.robosuite.robosuite_sim import RobosuiteSimEnv
+from io import BytesIO
+from PIL import Image
+from typing import List, Dict, Optional
+from cognitive_bt_framework.utils import get_claude_key
 from cognitive_bt_framework.src.vision.object_detection.yolo import ObjectDetection
-from cognitive_bt_framework.utils.llm_utils import get_hf_key
+from cognitive_bt_framework.src.sim.robosuite.robosuite_sim import RobosuiteSimEnv
 
+import anthropic
 
-class PredicateDetector:
-    def __init__(self, model_path="THUDM/cogvlm-chat-hf"):
-        hf_key = get_hf_key()
-        # Ensure CUDA is visible
-        self.client = InferenceClient(api_key=hf_key)
-        
-        self.predicate_prompts = {
-            'visible': "Is the {obj_name} clearly visible in region {bbox}?",
-            'receptacle': "Looking at the {obj_name} in region {bbox}, can it contain or hold other objects?",
-            'toggleable': "Can the {obj_name} in region {bbox} be turned on or off?", 
-            'breakable': "Is the {obj_name} in region {bbox} fragile or breakable?",
-            'canFillWithLiquid': "Can the {obj_name} in region {bbox} be filled with liquid?",
-            'dirtyable': "Can the {obj_name} in region {bbox} become dirty or stained?",
-            'cookable': "Can the {obj_name} in region {bbox} be cooked?",
-            'isHeatSource': "Is the {obj_name} in region {bbox} a source of heat?",
-            'sliceable': "Can the {obj_name} in region {bbox} be cut or sliced?",
-            'openable': "Can the {obj_name} in region {bbox} be opened and closed?",
-            'pickupable': "Can the {obj_name} in region {bbox} be picked up and carried?",
-            'moveable': "Can the {obj_name} in region {bbox} be moved around?",
-            'isOpen': "Is the {obj_name} in region {bbox} currently in an open state?",
-            'isToggled': "Is the {obj_name} in region {bbox} currently turned on?",
-            'isBroken': "Does the {obj_name} in region {bbox} appear to be broken?",
-            'isFilledWithLiquid': "Does the {obj_name} in region {bbox} currently contain liquid?",
-            'isDirty': "Does the {obj_name} in region {bbox} appear dirty or stained?",
-            'isCooked': "Has the {obj_name} in region {bbox} been cooked?",
-            'isSliced': "Has the {obj_name} in region {bbox} been cut or sliced?",
-            'isPickedUp': "Is the {obj_name} in region {bbox} currently being held?"
-        }
+class ObjectStateDetector:
+    def __init__(self, yolo_model_path: str = "yolo11x-seg.pt", claude_model: str = "claude-3-5-sonnet-20240620"):
+        """
+        Initialize the object state detector with YOLO and Claude interfaces
+        """
+        self.yolo = YOLO(yolo_model_path)
+        self.client = anthropic.Anthropic(api_key=get_claude_key())
+        self.claude_model = claude_model
+        self.predicate_list = [
+            'visible', 'receptacle', 'toggleable', 'breakable',
+            'canFillWithLiquid', 'dirtyable', 'cookable', 'isHeatSource',
+            'sliceable', 'openable', 'pickupable', 'moveable', 'isOpen',
+            'isToggled', 'isBroken', 'isFilledWithLiquid', 'isDirty',
+            'isCooked', 'isSliced', 'isPickedUp'
+        ]
 
-    def _encode_image(self, image):
-        """Convert PIL Image or numpy array to base64 string."""
-        if isinstance(image, np.ndarray):
-            image = Image.fromarray(image)
-        
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
-            
-        buffered = io.BytesIO()
-        image.save(buffered, format="JPEG")
+    def _encode_image(self, image: np.ndarray) -> str:
+        """Convert numpy array image to base64 string"""
+        img_pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        buffered = BytesIO()
+        img_pil.save(buffered, format="PNG")
         return base64.b64encode(buffered.getvalue()).decode()
 
-    def get_object_states(self, image, bbox, class_name):
-        try:
-            image_b64 = self._encode_image(image)
-            
-            # Scale bbox
-            if isinstance(image, np.ndarray):
-                h, w = image.shape[:2]
-            else:
-                w, h = image.size
-                
-            scaled_bbox = [
-                int(bbox[0] * 1000 / w),
-                int(bbox[1] * 1000 / h),
-                int(bbox[2] * 1000 / w),
-                int(bbox[3] * 1000 / h)
-            ]
-            bbox_str = f"[[{scaled_bbox[0]},{scaled_bbox[1]},{scaled_bbox[2]},{scaled_bbox[3]}]]"
-            
-            # Construct combined prompt
-            combined_prompt = (
-                f"For the {class_name} in region {bbox_str}, answer the following questions with Yes or No only:\n"
-                f"1. Is the {class_name} clearly visible?\n"
-                f"2. Can the {class_name} contain or hold other objects?\n"
-                f"3. Can the {class_name} be turned on or off?\n"
-                f"4. Is the {class_name} fragile or breakable?\n"
-                f"5. Can the {class_name} be filled with liquid?\n"
-                f"6. Can the {class_name} become dirty?\n"
-                f"7. Can the {class_name} be cooked?\n"
-                f"8. Is the {class_name} a heat source?\n"
-                f"9. Can the {class_name} be cut or sliced?\n"
-                f"10. Can the {class_name} be opened and closed?\n"
-                f"11. Can the {class_name} be picked up?\n"
-                f"12. Can the {class_name} be moved?\n"
-                f"13. Is the {class_name} currently open?\n"
-                f"14. Is the {class_name} currently turned on?\n"
-                f"15. Does the {class_name} appear broken?\n"
-                f"16. Does the {class_name} contain liquid?\n"
-                f"17. Does the {class_name} appear dirty?\n"
-                f"18. Has the {class_name} been cooked?\n"
-                f"19. Has the {class_name} been sliced?\n"
-                f"20. Is the {class_name} currently being held?\n"
-                "Respond with a numbered list of Yes/No answers only. "
-                "Yes or no answers should be followed by - <explaination>"
-            )
+    def detect_objects(self, image: np.ndarray) -> List[Dict]:
+        """
+        Detect objects in the image using YOLO
+        """
+        results = self.yolo(image, verbose=False)[0]
+        detections = []
+        
+        if results.boxes is not None and results.masks is not None:
+            for box, mask in zip(results.boxes, results.masks):
+                detections.append({
+                    'bbox': box.xyxy[0].cpu().numpy(),
+                    'conf': box.conf.item(),
+                    'cls': box.cls.item(),
+                    'name': results.names[int(box.cls.item())],
+                    'mask': mask.data[0].cpu().numpy()
+                })
+        return detections
 
-            # Make single API call
-            stream = self.client.chat.completions.create(
-                model="meta-llama/Llama-3.2-11B-Vision-Instruct",
+    def generate_state_query(self, image: np.ndarray, detections: List[Dict]) -> str:
+        """
+        Generate a prompt for Claude to analyze object states
+        """
+        detected_objects = [f"{det['name']} (confidence: {det['conf']:.2f})" for det in detections]
+        objects_str = "\n".join(detected_objects)
+        predicates_str = "\n".join(self.predicate_list)
+        
+        return f"""Please analyze this image and provide boolean values (1 for true, 0 for false) for each predicate 
+        for each detected object. Consider the visual evidence carefully.
+
+        Detected Objects:
+        {objects_str}
+
+        Predicates to evaluate:
+        {predicates_str}
+
+        For each object, provide a JSON-like structure with predicate values. Only include predicates that can be 
+        reasonably determined from the image. If a predicate cannot be determined with reasonable confidence, 
+        omit it from the results.
+
+        Focus on clearly visible properties and states. For example:
+        - 'visible' should be 1 for detected objects
+        - 'receptacle' for objects that can contain other items
+        - 'openable' for objects with visible hinges or lids
+        - 'isOpen' for objects currently in an open state
+        - 'isFilledWithLiquid' for containers with visible liquid
+
+        Return the results in a simple dictionary format like this example:
+        {{
+            "object1": {{
+                "visible": 1,
+                "canFillWithLiquid": 1,
+                "isFilledWithLiquid": 0
+            }},
+            "object2": {{
+                "visible": 1,
+                "receptacle": 1
+            }}
+        }}
+
+        Only provide the dictionary/JSON response with no additional explanation or text."""
+
+    def query_claude(self, image: np.ndarray, prompt: str) -> Dict:
+        """
+        Query Claude with the image and prompt, return parsed results
+        """
+        try:
+            response = self.client.messages.create(
+                model=self.claude_model,
+                max_tokens=2000,
+                temperature=0,
                 messages=[{
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": combined_prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": self._encode_image(image)
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": prompt
+                        }
                     ]
-                }],
-                max_tokens=1000,
-                stream=True
+                }]
             )
-
-            # Collect response
-            response_text = ""
-            for chunk in stream:
-                if chunk.choices[0].delta.content:
-                    response_text += chunk.choices[0].delta.content
-
-            # Parse responses into states dict
-            states = {}
-            predicate_list = list(self.predicate_prompts.keys())
             
-            # Split response into lines and process each answer
-            answers = [line.strip().lower() for line in response_text.split('\n') if line.strip()]
-            
-            for i, answer in enumerate(answers):
-                print(f"______ " + answer)
-                if i < len(predicate_list):
-                    states[predicate_list[i]] = 'yes' in answer and 'no' not in answer
-            states['name'] = class_name
-            return states
-                
-        except Exception as e:
-            print(f"Error in get_object_states: {str(e)}")
+            # Extract JSON from response
+            response_text = response.content[0].text
+            # Find JSON content between curly braces
+            start_idx = response_text.find('{')
+            end_idx = response_text.rfind('}') + 1
+            if start_idx >= 0 and end_idx > start_idx:
+                json_str = response_text[start_idx:end_idx]
+                return eval(json_str)  # Using eval since we know the format is safe
             return {}
-        
-    def _parse_response(self, response):
-        """Convert model response to boolean."""
-        pos_words = ['yes', 'true', 'correct', 'it is', 'it does']
-        neg_words = ['no', 'false', 'incorrect', 'it is not', 'it does not']
-        
-        response = response.lower()
-        
-        is_positive = any(word in response for word in pos_words)
-        is_negative = any(word in response for word in neg_words)
-        
-        if is_positive and not is_negative:
-            return True
-        return False
+            
+        except Exception as e:
+            print(f"Error querying Claude: {e}")
+            return {}
 
-    def detect_spatial_relationships(self, image, detections):
-        """Get spatial relationships between objects."""
-        # Convert image to base64
-        image_b64 = self._encode_image(image)
-            
-        # Format detections
-        if isinstance(image, np.ndarray):
-            h, w = image.shape[:2]
-        else:
-            w, h = image.size
-            
-        objects_desc = []
-        for det in detections:
-            bbox = [
-                int(det['bbox'][0] * 1000 / w),
-                int(det['bbox'][1] * 1000 / h),
-                int(det['bbox'][2] * 1000 / w),
-                int(det['bbox'][3] * 1000 / h)
-            ]
-            objects_desc.append(f"{det['name']} at [[{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}]]")
-            
-        prompt = "Describe the spatial relationships between these objects: " + ", ".join(objects_desc)
+    def get_object_states(self, image: np.ndarray) -> Dict:
+        """
+        Main method to get object states from an image
+        """
+        # Detect objects using YOLO
+        detections = self.detect_objects(image)
         
-        stream = self.client.chat.completions.create(
-                    model="meta-llama/Llama-3.2-11B-Vision-Instruct",
-                    messages=[{
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
-                        ]
-                    }],
-                    max_tokens=1000,
-                    stream=True
-                )
-                
-        # Collect response
-        response_text = ""
-        for chunk in stream:
-            if chunk.choices[0].delta.content:
-                response_text += chunk.choices[0].delta.content
+        if not detections:
+            return {}
+            
+        # Generate query for Claude
+        prompt = self.generate_state_query(image, detections)
         
-        return response_text
-    
-# Usage example:
+        # Get state analysis from Claude
+        object_states = self.query_claude(image, prompt)
+        
+        return object_states
+
+    def visualize_results(self, image: np.ndarray, object_states: Dict) -> np.ndarray:
+        """
+        Visualize the detection results and object states
+        """
+        vis_image = image.copy()
+        y_offset = 30
+        
+        for obj_name, states in object_states.items():
+            # Add object name and states as text overlay
+            text = f"{obj_name}: "
+            true_predicates = [pred for pred, val in states.items() if val == 1]
+            text += ", ".join(true_predicates)
+            
+            cv2.putText(vis_image, text, (10, y_offset), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            y_offset += 25
+            
+        return vis_image
+
 if __name__ == "__main__":
-    detector = PredicateDetector()
-    obj_detector = ObjectDetection()
+    from cognitive_bt_framework.src.sim.robosuite.robosuite_sim import RobosuiteSimEnv  # Import your simulation environment
+    import matplotlib.pyplot as plt
+    # Initialize detector and simulation
+    detector = ObjectStateDetector()
     sim = RobosuiteSimEnv()
-    sim.start()
     
-    # Get image and detections
+    # Get and process image
     image = sim.get_camera_image()
-    detections = obj_detector.detect_objects(image)
-
-    # Process a single object
-    states = detector.get_object_states(
-        image,
-        bbox=[100, 100, 200, 200],
-        class_name="cup"
-    )
-    print('_______________')
-    print(states)
-    print('_______________')
-    input()
-    # Get relationships between objects
-    relationships = detector.detect_spatial_relationships(
-        image,
-        detections=[
-            {"name": "cup", "bbox": [100,100,200,200]},
-            {"name": "table", "bbox": [50,150,300,300]}
-        ])
-    print(f"Spatial relationships: {relationships}")
-
-    sim.stop()
+    object_states = detector.get_object_states(image)
+    
+    # Create visualization
+    fig = detector.visualize_results(image, object_states)
+    
+    # Display the results
+    plt.show()
+    
+    # Optional: Save the figure
+    # fig.savefig('object_states_visualization.png', bbox_inches='tight', dpi=300)
+    
+    # Print detailed results
+    print("\nDetected Object States:")
+    for obj_name, states in object_states.items():
+        print(f"\n{obj_name}:")
+        for pred, val in states.items():
+            print(f"  {pred}: {val}")
+    input()        
+    plt.close()  # Clean up the figure when done

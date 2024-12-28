@@ -1,21 +1,19 @@
-from cognitive_bt_framework.src.vision.sam.sam import SAM2MaskGenerator, SAM2MaskConfig
+from cognitive_bt_framework.src.vision.sam.fast_sam import FastSAMMaskGenerator, FastSAMConfig
+
 from cognitive_bt_framework.src.sim.robosuite.robosuite_sim import RobosuiteSimEnv
 
 import cv2
 import time
 
-# Create memory-optimized configuration
-config = SAM2MaskConfig(
-    model_cfg="configs/sam2.1/sam2.1_hiera_t.yaml",
-    checkpoint_path="/home/liam/dev/zk_task_planner/cognitive_bt_framework/src/vision/sam/sam2.1_hiera_tiny.pt",
-    max_image_size=1024,  # Limit image size
-    points_per_batch=32,  # Reduce batch size
-    points_per_side=16,   # Reduce points
-    # enable_memory_efficient_attention=True
+config = FastSAMConfig(
+    model_type="FastSAM-s",  # or "FastSAM-x"
+    max_image_size=640,
+    conf_threshold=0.6,
+    iou_threshold=0.9
 )
 
-# Initialize generator
-mask_gen = SAM2MaskGenerator(config)
+mask_gen = FastSAMMaskGenerator(config)
+
 sim = RobosuiteSimEnv()
 sim.start()
 
@@ -34,7 +32,7 @@ try:
     print('got masks')
     # Visualize results
     print(len(labeled_masks))
-    mask_gen.show_masks(image, labeled_masks, metadata)
+    viz_img = mask_gen.show_masks(image, labeled_masks, metadata)
     input()
 except RuntimeError as e:
     print(f"Memory error: {e}")

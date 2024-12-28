@@ -2,11 +2,13 @@ import numpy as np
 import torch
 from sam2.build_sam import build_sam2
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+from cognitive_bt_framework.src.sim.robosuite.robosuite_sim import RobosuiteSimEnv
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 import cv2
 import gc
 import os
+import time
 
 @dataclass
 class SAM2MaskConfig:
@@ -33,8 +35,8 @@ class SAM2MaskConfig:
     use_m2m: bool = True
     
     # Post-processing parameters
-    remove_small_regions: bool = True
-    merge_overlapping: bool = True
+    remove_small_regions: bool = False
+    merge_overlapping: bool = False
     overlap_threshold: float = 0.5
     draw_borders: bool = True
 
@@ -94,18 +96,18 @@ class SAM2MaskGenerator:
 
             # Initialize mask generator with memory-optimized settings
             self.mask_generator = SAM2AutomaticMaskGenerator(
-                model=self.sam2,
-                points_per_side=self.config.points_per_side,
-                points_per_batch=self.config.points_per_batch,
-                pred_iou_thresh=self.config.pred_iou_thresh,
-                stability_score_thresh=self.config.stability_score_thresh,
-                stability_score_offset=self.config.stability_score_offset,
-                crop_n_layers=self.config.crop_n_layers,
-                box_nms_thresh=self.config.box_nms_thresh,
-                crop_n_points_downscale_factor=self.config.crop_n_points_downscale_factor,
-                min_mask_region_area=self.config.min_mask_region_area,
-                use_m2m=self.config.use_m2m
-            )
+                model=self.sam2,)
+            #     points_per_side=self.config.points_per_side,
+            #     points_per_batch=self.config.points_per_batch,
+            #     pred_iou_thresh=self.config.pred_iou_thresh,
+            #     stability_score_thresh=self.config.stability_score_thresh,
+            #     stability_score_offset=self.config.stability_score_offset,
+            #     crop_n_layers=self.config.crop_n_layers,
+            #     box_nms_thresh=self.config.box_nms_thresh,
+            #     crop_n_points_downscale_factor=self.config.crop_n_points_downscale_factor,
+            #     min_mask_region_area=self.config.min_mask_region_area,
+            #     use_m2m=self.config.use_m2m
+            # )
 
         except RuntimeError as e:
             if "out of memory" in str(e):
@@ -161,10 +163,10 @@ class SAM2MaskGenerator:
             if self.config.device == "cuda":
                 torch.cuda.empty_cache()
                 gc.collect()
-
+            start_time = time.time()
             # Generate masks using SAM2
             sam_masks = self.mask_generator.generate(processed_image)
-            
+            print(f"Time taken for mask generation: {time.time() - start_time} seconds")
             # Create labeled mask array
             height, width = processed_image.shape[:2]
             labeled_masks = np.zeros((height, width), dtype=np.int32)

@@ -8,6 +8,7 @@ from typing import Tuple, List, Optional, Dict, Any
 import logging
 import base64
 import math
+import matplotlib.pyplot as plt
 
 import robosuite
 from robosuite.controllers import load_composite_controller_config
@@ -27,7 +28,7 @@ GRASP_ERROR = 0.0375
 WORKING_RADIUS = 0.57
 
 class RobosuiteSimEnv(object):
-    def __init__(self, task='BeverageSorting', layout=LayoutType.ONE_WALL_SMALL, style=StyleType.COASTAL,
+    def __init__(self, task='DrawerUtensilSort', layout=LayoutType.ONE_WALL_SMALL, style=StyleType.COASTAL,
                  robot='B1Z1Floating', renderer='mjviewer', arm_ctl="", turn_speed=1.0, move_speed=1, use_camera='leg0_robotview',
                  scene_index=-1, width=600, height=600, gridSize=0.25, visibilityDistance=20, 
                  single_room='kitchen', save_video=False, use_find=False):
@@ -115,6 +116,10 @@ class RobosuiteSimEnv(object):
     def get_camera_image(self):
         obs = self.get_last_obs()
         return obs[f"{self.camera_name}_image"]
+    
+    def get_camera_frames(self):
+        obs = self.get_last_obs()
+        return obs[f"{self.camera_name}_image"], obs[f"{self.camera_name}_depth"]
 
     def get_gripper_pose(self) -> np.ndarray:
         """Get current gripper pose in robot frame."""
@@ -533,8 +538,20 @@ class RobosuiteSimEnv(object):
             success, msg = fn(target)
             if not success:
                 return False, msg
-                
+        
         return True, "Actions executed successfully"
+    
+    def display_result(self, labeled_image):
+        """
+        Display the segmented and labeled image.
+        
+        Args:
+            labeled_image (numpy.ndarray): Labeled image with segments
+        """
+        plt.figure(figsize=(12, 8))
+        plt.imshow(labeled_image)
+        plt.axis('off')
+        plt.show()
     
 def main():
     global itern
@@ -551,5 +568,13 @@ def main():
     sim.stop()
 
 if __name__ == "__main__":
-   main()
 
+#    main()
+    sim = RobosuiteSimEnv()
+    sim.start()
+    sim.env.render()
+    while True:
+        frames = sim.get_camera_frames()
+        proc_frames = sim.object_detection.process_frame(frames)
+        sim.display_result(proc_frames[0])
+    sim.stop()
