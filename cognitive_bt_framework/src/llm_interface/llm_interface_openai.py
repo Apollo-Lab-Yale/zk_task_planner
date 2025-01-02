@@ -3,10 +3,20 @@ from openai import OpenAI
 from cognitive_bt_framework.utils import setup_openai, get_openai_key, parse_llm_response, parse_llm_response_ordered, parse_task_decomposition_and_context_with_subtask_context
 from ratelimit import limits, sleep_and_retry
 from cognitive_bt_framework.src.sim.ai2_thor.utils import AI2THOR_PREDICATES_ANNOTATED
+from typing import List, Dict, Optional, Tuple, Union
+
 import json
 import pprint
+import cv2
+import base64
+import numpy as np
+import time
+import re
+
+from cognitive_bt_framework.utils import BOOL_PREDS, RELATIONAL_PREDS
+
 class LLMInterfaceOpenAI:
-    def __init__(self, model_name="gpt-4o"):
+    def __init__(self, model_name="gpt-4o-turbo"):
         """
         Initialize the interface with your OpenAI API key and model choice.
         :param api_key: Your OpenAI API key.
@@ -318,6 +328,160 @@ class LLMInterfaceOpenAI:
             ]
             prompt.insert(1, {'role': 'user', "content": img_msg})
         return prompt
+
+    def _encode_image(self, image: np.ndarray) -> str:
+        """Convert numpy array image to base64 string"""
+        img_pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        buffered = BytesIO()
+        img_pil.save(buffered, format="PNG")
+        return base64.b64encode(buffered.getvalue()).decode()
+
+    def _crop_object(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """Extract object crop using mask"""
+        x, y, w, h = cv2.boundingRect(mask.astype(np.uint8))
+        crop = image[y:y+h, x:x+w].copy()
+        mask_crop = mask[y:y+h, x:x+w]
+        crop[~mask_crop] = 0
+        return crop
+
+    def generate_state_query(self, image: np.ndarray, masks: np.ndarray, metadata: Dict) -> str:
+        """Generate a prompt for GPT-4V to analyze object states"""
+        # Create individual object crops
+        object_crops = []
+        for mask_id in np.unique(masks)[1:]:  # Skip 0 (background)
+            if mask_id in metadata:
+                mask = masks == mask_id
+                crop = self._crop_object(image, mask)
+                object_crops.append({
+                    'id': mask_id,
+                    'crop': crop,
+                    'area': metadata[mask_id]['area']
+                })
+
+        # Sort objects by area (largest first)
+        object_crops.sort(key=lambda x: x['area'], reverse=True)
+        
+        # Create prompt
+        prompt = f"""Analyze this scene image to identify objects and their states. For each segmented region:
+
+    1. First identify what the object is, considering its visual appearance and context.
+    2. Then evaluate the following predicates for each identified object:
+
+    Boolean predicates (1 for true, 0 for false):
+    {', '.join(BOOL_PREDS)}
+
+    Relational predicates (requiring additional object or room information):
+    {', '.join(RELATIONAL_PREDS)}
+
+    Please provide results in this JSON format:
+    [
+        {{
+            "name": "object_name",
+            "predicates": {{
+                "visible": 1,
+                "receptacle": 0,
+                "inRoom": {{"value": 1, "room": "kitchen"}},
+                "isOnTop": {{"value": 1, "object": "counter"}},
+                "isInside": {{"value": 0, "object": null}}
+            }},
+            "region_id": "region_1",
+            "caption": "a short text description of the object and its state that would be good context for an LLM"
+        }},
+        ...
+    ]
+
+    For relational predicates:
+    - 'inRoom' should specify the room name
+    - 'isOnTop' should specify the object being rested upon
+    - 'isInside' should specify the containing object
+
+    Focus on clearly visible properties and spatial relationships. Consider:
+    - Physical properties (broken, sliced, cooked, etc.)
+    - Containment relationships (what objects can contain others)
+    - Spatial relationships (on top, inside, proximity)
+    - States (open/closed, switched on/off, filled)
+
+    Remember all of the following predicates should be evaluated for all detected objects and be present in the output state:
+    {', '.join(BOOL_PREDS + RELATIONAL_PREDS)}
+
+    For boolean predicates, use 1 for true and 0 for false.
+    For relational predicates, include both the value (1/0) and the related object/room information."""
+        return prompt
+
+    def get_object_states(self, image: np.ndarray, mask_generator) -> Tuple[Dict, np.ndarray, Dict]:
+        """
+        Main method to get object states from an image
+        
+        Returns:
+            Tuple[Dict, np.ndarray, Dict]: 
+                - Object states dictionary
+                - Labeled masks array
+                - Mask metadata dictionary
+        """
+        # Get segmentation masks using FastSAM/OWL-ViT
+        masks, metadata = mask_generator.generate_masks(image)
+        
+        if not np.any(masks):
+            return {}, masks, metadata
+            
+        # Generate query for GPT-4V
+        prompt = self.generate_state_query(image, masks, metadata)
+        
+        # Get state analysis from GPT-4V
+        try:
+            messages = [
+                {
+                    "role": "user", 
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{self._encode_image(image)}"
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": prompt
+                        }
+                    ]
+                }
+            ]
+            
+            response_text = self.query_llm(messages)
+            
+            import json
+
+            # Extract JSON from response
+            print(response_text)
+            start_idx = response_text.find('[')
+            end_idx = response_text.rfind(']') + 1
+            if start_idx >= 0 and end_idx > start_idx:
+                json_str = response_text[start_idx:end_idx]
+                try:
+                    object_states = json.loads(json_str)
+                except json.JSONDecodeError as e:
+                    print(f"Error parsing JSON response: {e}")
+                    print(f"Response text: {response_text}")
+                    object_states = {}
+            else:
+                object_states = {}
+                
+        except Exception as e:
+            print(f"Error querying GPT-4V: {e}")
+            return {}, masks, metadata
+        
+        # Add mask data to object states
+        for state_info in object_states:
+            print(state_info.keys())
+            region_id = state_info['region_id'].split('_')[1]
+            if region_id in metadata:
+                mask_id = region_id
+                state_info['mask'] = masks == mask_id
+                state_info['bbox'] = metadata[mask_id]['bbox']
+                state_info['image'] = image
+        
+        return object_states, masks, metadata
+
 
     @sleep_and_retry
     @limits(calls=100, period=60)  # Example: Max 10 calls per minute

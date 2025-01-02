@@ -1,10 +1,19 @@
 import openai
 from openai import OpenAI
 import anthropic
+import numpy as np
+from typing import List, Dict, Optional, Tuple, Union
+import cv2
+from PIL import Image
+from io import BytesIO
+import base64
+
+
 from cognitive_bt_framework.utils import setup_openai, get_openai_key, parse_llm_response, get_claude_key
 from cognitive_bt_framework.utils.bt_utils import DOMAIN_DEF
 from ratelimit import limits, sleep_and_retry
 from cognitive_bt_framework.src.sim.ai2_thor.utils import AI2THOR_PREDICATES_ANNOTATED
+from cognitive_bt_framework.utils import BOOL_PREDS, RELATIONAL_PREDS
 
 class LLMInterfaceClaude:
     def __init__(self, model_name="claude-3-5-sonnet-20240620"):
@@ -29,39 +38,21 @@ class LLMInterfaceClaude:
         while tokens > self.token_limit:
             tokens -= len(self.conversation_history[0]['content'])
             self.conversation_history.pop(0)
+    
+    def _encode_image(self, image: np.ndarray) -> str:
+        """Convert numpy array image to base64 string"""
+        img_pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        buffered = BytesIO()
+        img_pil.save(buffered, format="PNG")
+        return base64.b64encode(buffered.getvalue()).decode()
 
-    # def generate_prompt_htn(self, task, known_objects, context):
-    #     """
-    #     Generate a prompt for the task decomposition.
-    #     :param task: The task description.
-    #     :return: A string prompt for the GPT model.
-    #     """
-    #     msg = f"""
-    #             You are assisting in decomposing a high-level goal for a robot.
-    #             Each subgoal should be its own line with NO ADDITIONAL CHARACTERS.
-    #             The format should be short and underscore separated similar to a pythonic class name
-    #             with no spaces. Please provide the most complete decomposition
-    #             possible, all subtasks should be as basic as possible
-    #             is its own atomic step moving closer to the high-level goal. Include a
-    #             name for the high-level task in the same format as the subtasks as
-    #             the first line of your response. If the task is sufficiently small,
-    #              then you do not need to generate subtasks. Sufficiently reduced
-    #             subtasks include tasks like empty_trash, clear_counters,
-    #             empty_dishwasher, etc.
-    #             Additionally, for each subtask, provide a SINGLE object state condition
-    #             that defines when the subtask is considered complete. Format these conditions
-    #             as a bulleted list directly under the subtask, each condition on a new line
-    #             with a dash "-" at the beginning. All Conditions should come from
-    #             the following list without exception: {AI2THOR_PREDICATES_ANNOTATED} followed
-    #             by a space and the object that the condition applies to and a 1
-    #             or 0 indicating if the predicate should be true of false. All conditions
-    #             must target a specific object and cannot contain placeholders.
-    #              All objects should come from this list without exception: {known_objects}.
-    #             Here is a brief description of the environment: {context}
-    #             Decompose the following task into detailed subtask steps: {task} """
-    #     instruction = {"role": 'user', 'content': [{'type': 'text', 'text': msg}]}
-    #     message = {"role": "user", "content": instruction}
-    #     return [instruction]
+    def _crop_object(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """Extract object crop using mask"""
+        x, y, w, h = cv2.boundingRect(mask.astype(np.uint8))
+        crop = image[y:y+h, x:x+w].copy()
+        mask_crop = mask[y:y+h, x:x+w]
+        crop[~mask_crop] = 0
+        return crop
 
     def generate_prompt_htn(self, task, known_objects, context):
         """
@@ -183,43 +174,6 @@ class LLMInterfaceClaude:
         The following subgoals have already been completed:
         {completed_subtasks}
         ''' if len(completed_subtasks) > 0 else ""
-        # user_message = f'''
-        #             You are going to be tasked with creating a behavior tree in XML format for a robot to execute a specific task. Follow these rules carefully:
-        #             **Actions**: Use only the actions from this list:
-        #              {actions}.
-        #              Other actions are not allowed.
-        #              each action tag should contain name and target members where name is the action being performed and target is the target of the action
-        #             **Conditions**: Use only the conditions from this list:
-        #             {conditions}.
-        #             No other conditions are allowed.
-        #             each condition tag should contain name and target members. where name is the condition being checked and target is the target of the condition
-        #             {completed_goals_str}
-        #             **Domain**
-        #             the domain is defined in pddl as follows:
-        #             {DOMAIN_DEF}
-        #             **Behavior Tree Structure**:
-        #             - Use <Sequence> tags to execute all child actions or conditions in order until one fails or returns False.
-        #     -       - Use <Selector> tags to execute each child action or condition in order until one succeeds or returns True.
-        #
-        #            **Object Classes**: You can only interact with objects from this list:
-        #            {relevant_objects}.
-        #            No other objects are allowed. Exception: Slicing a food object results in '<item>sliced', e.g., 'apple' becomes 'applesliced'.
-        #             The one exception to the above requirement is: all food objects can be acted on by slice and become <item>sliced. For example, slicing "apple" results in "applesliced"
-        #             **Example Behavior Tree**:
-        #             Here is an example of a properly formed XML behavior tree for the task "FillGlassWater":
-        #             {example}
-        #             ** Environmental Description**
-        #             {context}
-        #             **Task**:
-        #             Now, please create a behavior tree in XML format for the robot to execute the task: {task}'.
-        #             This task is a sub task of {big_task}
-        #             The following subtasks have already been completed: {completed_subtasks}
-        #             Make sure that you consider the cases where objects are contained in other objects or the task is already complete in your answer!
-        #             The completion condition for this task is: {complete_condition}
-        #             Ensure your response contains only the XML behavior tree and no additional text.
-        #             "{task}"
-        #             Behavior Tree for {task}:
-        #         '''
         user_message = f'''
                             You are going to be tasked with creating a behavior tree in XML format for a robot to execute a specific task. Follow these rules carefully:
                             **Actions**: Use only the actions from this list:
@@ -280,35 +234,6 @@ class LLMInterfaceClaude:
                 }
             ]
         error_info = f"Error Category: {error_category}" if error_category else ""
-        # user_message = f'''
-        #     Task attempted: "{task}"
-        #     This is a subtask of: {big_task}
-        #     The following subtasks have already been completed: {completed_subtasks}
-        #     The behavior tree provided for this task resulted in an error.
-        #     Sub-tree where the error occurred: {original_bt_xml}
-        #     Associated feedback and error information: {feedback}. {error_info}
-        #     **Domain**
-        #     the domain is defined in pddl as follows:
-        #     {DOMAIN_DEF}
-        #     Please modify the behavior tree to address this failure, adhering to the following requirements:
-        #     1. Valid actions for an <Action> tag: {actions}. No other actions are allowed, and each action should contain name and target members.
-        #     where name is the action being performed and target is the target of the action.
-        #     2. Applicable <condition>s for the actions: {conditions}. No other conditions are allowed, and each condition should contain name and target members.
-        #     where name is the condition being checked and target is the target of the condition. an additional 'recipient'
-        #     member can also be provided for <condition>s for example <Condition name='isOnTop' target='plate' recipient='diningtable'>.
-        #     3. Detectable object classes: {known_objects}. Only these objects may be used.
-        #        Exception: All food objects can be acted on by the slice action, becoming <item>sliced. For example, "apple" becomes "applesliced".
-        #     4. The only valid tags are <Action>, <Condition>, <Sequence>, <Selector>, <root>, <?xml version="1.0"?>.
-        #     - Use <Sequence> tags to execute all child actions or conditions in order until one fails or returns False.
-        #     - Use <Selector> tags to execute each child action or condition in order until one succeeds or returns True.
-        #     The following is an example of a complete behavior tree:
-        #     {example}.
-        #     Here is a brief description of the environment: {context}
-        #     Your response should contain only the corrected behavior tree in XML format and no additional text.
-        #     the completion criteria for this task is: {complete_condition}
-        #     Make sure that you consider the cases where objects are contained in other objects or the task is already complete in your answer!
-        #     Corrected Behavior Tree in XML:
-        # '''
         user_message = f'''
                    Task attempted: "{task}"
                    This is a subtask of: {big_task}
@@ -361,6 +286,144 @@ class LLMInterfaceClaude:
             'content': content
         }]
         return prompt
+
+    def generate_state_query(self, image: np.ndarray, masks: np.ndarray, metadata: Dict) -> str:
+        """Generate a prompt for Claude to analyze object states"""
+        # Create individual object crops
+        object_crops = []
+        for mask_id in np.unique(masks)[1:]:  # Skip 0 (background)
+            if mask_id in metadata:
+                mask = masks == mask_id
+                crop = self._crop_object(image, mask)
+                object_crops.append({
+                    'id': mask_id,
+                    'crop': crop,
+                    'area': metadata[mask_id]['area']
+                })
+
+        # Sort objects by area (largest first)
+        object_crops.sort(key=lambda x: x['area'], reverse=True)
+        
+        # Create prompt
+        prompt = f"""
+            Analyze this scene image to identify objects and their states. For each segmented region:
+
+            1. First identify what the object is, considering its visual appearance and context.
+            2. Then evaluate the following predicates for each identified object:
+
+            Boolean predicates (1 for true, 0 for false):
+            {', '.join(BOOL_PREDS)}
+
+            Relational predicates (requiring additional object or room information):
+            {', '.join(RELATIONAL_PREDS)}
+
+            Please provide results in this JSON format:
+            [
+                {{
+                    "name": "object_name",
+                    "predicates": {{
+                        "visible": 1,
+                        "receptacle": 0,
+                        "inRoom": {{"value": 1, "room": "kitchen"}},
+                        "isOnTop": {{"value": 1, "object": "counter"}},
+                        "isInside": {{"value": 0, "object": null}}
+                    }},
+                    "region_id": "region_1",
+                    "caption": "a short text description of the object and its state that would be good context for an LLM"
+                }},
+                ...
+            ]
+
+            For relational predicates:
+            - 'inRoom' should specify the room name
+            - 'isOnTop' should specify the object being rested upon
+            - 'isInside' should specify the containing object
+
+            Focus on clearly visible properties and spatial relationships. Consider:
+            - Physical properties (broken, sliced, cooked, etc.)
+            - Containment relationships (what objects can contain others)
+            - Spatial relationships (on top, inside, proximity)
+            - States (open/closed, switched on/off, filled)
+
+            Remember all of the following predicates should be evaluated for all detected objects and be present in the output state:
+            {', '.join(BOOL_PREDS + RELATIONAL_PREDS)}
+
+            For boolean predicates, use 1 for true and 0 for false.
+            For relational predicates, include both the value (1/0) and the related object/room information."""
+        return prompt
+
+    def get_object_states(self, image: np.ndarray, mask_generator) -> Tuple[Dict, np.ndarray, Dict]:
+        """
+        Main method to get object states from an image
+        
+        Returns:
+            Tuple[Dict, np.ndarray, Dict]: 
+                - Object states dictionary
+                - Labeled masks array
+                - Mask metadata dictionary
+        """
+        # Get segmentation masks using FastSAM
+        masks, metadata = mask_generator.generate_masks(image)
+        
+        if not np.any(masks):
+            return {}, masks, metadata
+            
+        # Generate query for Claude
+        prompt = self.generate_state_query(image, masks, metadata)
+        
+        # Get state analysis from Claude
+        try:
+            messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": self._encode_image(image)
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": prompt
+                        }
+                    ]
+                }]
+            response_text = self.query_llm(messages)
+            
+            import json
+
+            # Extract JSON from response
+            print(response_text)
+            start_idx = response_text.find('[')
+            end_idx = response_text.rfind(']') + 1
+            if start_idx >= 0 and end_idx > start_idx:
+                json_str = response_text[start_idx:end_idx]
+                try:
+                    object_states = json.loads(json_str)
+                except json.JSONDecodeError as e:
+                    print(f"Error parsing JSON response: {e}")
+                    print(f"Response text: {response_text}")
+                    object_states = {}
+            else:
+                object_states = {}
+                
+        except Exception as e:
+            print(f"Error querying Claude: {e}")
+            return {}, masks, metadata
+        
+        # Add mask data to object states
+        for state_info in object_states:
+            print(state_info.keys())
+            region_id = state_info['region_id'].split('_')[1]
+            if region_id in metadata:
+                mask_id = region_id
+                state_info['mask'] = masks == mask_id
+                state_info['bbox'] = metadata[mask_id]['bbox']
+                state_info['image'] = image
+        
+        return object_states, masks, metadata
 
     @sleep_and_retry
     @limits(calls=100, period=60)  # Example: Max 10 calls per minute

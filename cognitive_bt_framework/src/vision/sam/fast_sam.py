@@ -16,7 +16,7 @@ class FastSAMConfig:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     
     # Memory management
-    max_image_size: int = 1024  # Input image size for processing
+    max_image_size: int = 640  # Input image size for processing
     enable_memory_efficient_attention: bool = False
     
     # Mask generation parameters
