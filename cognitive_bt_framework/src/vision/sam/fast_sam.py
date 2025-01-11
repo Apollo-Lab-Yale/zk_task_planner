@@ -9,6 +9,13 @@ from typing import List, Dict, Optional, Tuple, Union
 from ultralytics import FastSAM
 from ultralytics.models.fastsam import FastSAMPredictor
 
+def overlaps(box1, box2):
+        """Check if two bounding boxes overlap"""
+        return not (box1[2] < box2[0] or
+                    box1[0] > box2[2] or
+                    box1[3] < box2[1] or 
+                    box1[1] > box2[3])
+
 @dataclass
 class FastSAMConfig:
     """Configuration settings for Ultralytics FastSAM-based mask generation"""
@@ -20,13 +27,13 @@ class FastSAMConfig:
     enable_memory_efficient_attention: bool = False
     
     # Mask generation parameters
-    conf_threshold: float = 0.4  # Confidence threshold for detection
+    conf_threshold: float = 0.6  # Confidence threshold for detection
     iou_threshold: float = 0.9   # IoU threshold for NMS
     retina_masks: bool = True    # Use high-quality mask output
     
     # Post-processing parameters
-    remove_small_regions: bool = False
-    merge_overlapping: bool = False
+    remove_small_regions: bool = True
+    merge_overlapping: bool = True
     overlap_threshold: float = 0.5
     min_area: float = 25.0  # Minimum area for mask retention
     draw_borders: bool = True
@@ -250,23 +257,10 @@ class FastSAMMaskGenerator:
         metadata: Dict,
         alpha: float = 0.5
     ) -> np.ndarray:
-        """
-        Create a visualization of the masks overlaid on the image
-        
-        Args:
-            image (np.ndarray): Original RGB image
-            masks (np.ndarray): Labeled mask array
-            metadata (Dict): Mask metadata dictionary
-            alpha (float): Transparency of the masks
-            
-        Returns:
-            np.ndarray: Visualization image with overlaid masks
-        """
         vis_image = image.copy()
-        unique_masks = np.unique(masks)[1:]  # Skip 0 (background)
-        
-        # Create blank overlay for all masks
+        unique_masks = np.unique(masks)[1:]
         overlay = np.zeros_like(vis_image, dtype=np.float32)
+        placed_boxes = []
         
         for mask_id in unique_masks:
             if mask_id not in metadata:
@@ -274,31 +268,58 @@ class FastSAMMaskGenerator:
                 
             mask = masks == mask_id
             color = np.random.random(3) * 255
-            
-            # Add colored mask to overlay
             overlay[mask] = color
             
-            # Draw borders if enabled
-            if self.config.draw_borders:
-                contours = metadata[mask_id].get('contours')
-                if contours:
-                    cv2.drawContours(
-                        vis_image,
-                        [np.array(c) for c in contours],
-                        -1,
-                        (0, 0, 255),
-                        thickness=1
-                    )
+            y_coords, x_coords = np.where(mask)
+            if len(y_coords) > 0:
+                x_center = int(np.mean(x_coords))
+                y_center = int(np.mean(y_coords))
+                
+                region_id = f"r{mask_id}"
+                text_size = cv2.getTextSize(region_id, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+                
+                text_x = x_center - text_size[0]//2
+                text_y = y_center + text_size[1]//2
+                
+                text_box = (text_x - 5, text_y - text_size[1] - 5,
+                          text_x + text_size[0] + 5, text_y + 5)
+                
+                # Find non-overlapping position
+                offset_y = text_size[1] + 10
+                while any(overlaps(text_box, box) for box in placed_boxes):
+                    text_y += offset_y
+                    text_box = (text_x - 5, text_y - text_size[1] - 5,
+                              text_x + text_size[0] + 5, text_y + 5)
+                
+                placed_boxes.append(text_box)
+                
+                # Draw arrow
+                cv2.arrowedLine(vis_image,
+                              (x_center, y_center),
+                              (text_x + text_size[0]//2, text_y - text_size[1]//2),
+                              (0, 0, 0),
+                              2,
+                              tipLength=0.2)
+                
+                # Draw text with outline
+                for dx, dy in [(-1,-1), (-1,1), (1,-1), (1,1)]:
+                    cv2.putText(vis_image, region_id, 
+                              (text_x+dx, text_y+dy),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,0), 2)
+                cv2.putText(vis_image, region_id,
+                          (text_x, text_y),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+            
+            if self.config.draw_borders and 'contours' in metadata[mask_id]:
+                contours = metadata[mask_id]['contours']
+                cv2.drawContours(vis_image,
+                               [np.array(c) for c in contours],
+                               -1,
+                               (0, 0, 0),
+                               thickness=2)
         
-        # Blend overlay with original image
-        vis_image = cv2.addWeighted(
-            vis_image,
-            1 - alpha,
-            overlay.astype(np.uint8),
-            alpha,
-            0
-        )
-        
+        vis_image = cv2.addWeighted(vis_image, 1 - alpha,
+                                   overlay.astype(np.uint8), alpha, 0)
         return vis_image.astype(np.uint8)
     
     def show_masks(

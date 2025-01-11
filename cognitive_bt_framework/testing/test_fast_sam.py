@@ -6,7 +6,7 @@ import cv2
 import time
 
 config = FastSAMConfig(
-    model_type="FastSAM-s",  # or "FastSAM-x"
+    model_type="FastSAM-x",  # or "FastSAM-x"
     max_image_size=640,
     conf_threshold=0.6,
     iou_threshold=0.9

@@ -1,0 +1,48 @@
+{
+  "name": "switchOn_button_push",
+  "abstract_action": "SwitchOn",
+  "primitive_sequence": [
+    "move_to([1.5, 0.0, 1.1])",
+    "grasp(0.05)",
+    "apply_force(direction=[0,0,1], magnitude=5)",
+    "release()",
+    "retractGripper()"
+  ],
+  "parameters": {
+    "relevant measurements": "button diameter approx. 0.05 meters",
+    "forces": "5 Newtons downward",
+    "positions": "coordinates [1.5, 0.0, 1.1] just above the button"
+  },
+  "object_states": {
+    "visible": 1,
+    "canSwitchOn": 1,
+    "isSwitchedOn": 0,
+    "moveable": 0,
+    "inRoom": {
+      "value": 1,
+      "room": "livingroom"
+    },
+    "isOnTop": {
+      "value": 0,
+      "object": null
+    },
+    "isInside": {
+      "value": 0,
+      "object": null
+    },
+    "pose": [
+      1.5,
+      0.0,
+      1.2
+    ]
+  },
+  "prerequisites": [
+    "Robot must be able to reach the button at 1.2 meters height",
+    "Button must not be already pressed (isSwitchedOn = 0)"
+  ],
+  "constraints": [
+    "Ensure the force applied is not excessive to avoid damaging the button",
+    "The button is not obscured or blocked by any objects"
+  ],
+  "image_id": "SwitchOn_d007b1"
+}

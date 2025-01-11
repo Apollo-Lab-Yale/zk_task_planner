@@ -120,6 +120,10 @@ class RobosuiteSimEnv(object):
     def get_camera_frames(self):
         obs = self.get_last_obs()
         return obs[f"{self.camera_name}_image"], obs[f"{self.camera_name}_depth"]
+    
+    def get_camera_pos(self):
+        obs = self.get_last_obs()
+        return obs[obs[f"{self.camera_name}_pos"]]
 
     def get_gripper_pose(self) -> np.ndarray:
         """Get current gripper pose in robot frame."""
@@ -577,4 +581,5 @@ if __name__ == "__main__":
         frames = sim.get_camera_frames()
         proc_frames = sim.object_detection.process_frame(frames)
         sim.display_result(proc_frames[0])
+        print(sim.get_last_obs().keys())
     sim.stop()

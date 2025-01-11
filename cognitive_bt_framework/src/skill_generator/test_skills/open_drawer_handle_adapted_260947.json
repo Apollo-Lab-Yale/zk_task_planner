@@ -1,0 +1,42 @@
+{
+  "name": "open_drawer_handle_adapted_260947",
+  "abstract_action": "Open",
+  "primitive_sequence": [
+    "move_to(position)",
+    "grasp(width)",
+    "apply_force(direction, magnitude)",
+    "release()"
+  ],
+  "parameters": {
+    "relevant measurements": "handle width approximately 10 cm",
+    "forces": "pull force approximately 5-10 N",
+    "positions": "handle at reachable height, approximately 1 meter from ground"
+  },
+  "object_states": {
+    "visible": 1,
+    "openable": 1,
+    "isOpen": 0,
+    "moveable": 1,
+    "inRoom": {
+      "value": 1,
+      "room": "bedroom"
+    },
+    "isOnTop": {
+      "value": 0,
+      "object": null
+    },
+    "isInside": {
+      "value": 0,
+      "object": null
+    }
+  },
+  "prerequisites": [
+    "Robot must be able to reach the handle",
+    "Robot gripper must be able to adjust to a width of 10 cm"
+  ],
+  "constraints": [
+    "Ensure that the drawer is not obstructed",
+    "Avoid excessive force that could damage the drawer or its contents"
+  ],
+  "image_id": "Open_51f7c2"
+}

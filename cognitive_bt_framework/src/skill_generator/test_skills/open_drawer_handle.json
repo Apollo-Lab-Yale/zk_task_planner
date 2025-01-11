@@ -1,0 +1,43 @@
+{
+  "name": "open_drawer_handle",
+  "abstract_action": "Open",
+  "primitive_sequence": [
+    "move_to(position)",
+    "grasp(width)",
+    "apply_force(direction, magnitude)",
+    "release()",
+    "retractGripper()"
+  ],
+  "parameters": {
+    "relevant measurements": "handle width: 10 cm",
+    "forces": "pulling force: 5 N",
+    "positions": "coordinates relative to robot and drawer"
+  },
+  "object_states": {
+    "visible": 1,
+    "openable": 1,
+    "isOpen": 0,
+    "moveable": 1,
+    "inRoom": {
+      "value": 1,
+      "room": "kitchen"
+    },
+    "isOnTop": {
+      "value": 0,
+      "object": null
+    },
+    "isInside": {
+      "value": 0,
+      "object": null
+    }
+  },
+  "prerequisites": [
+    "robot must be positioned within reach of the drawer handle",
+    "robot gripper must be compatible with the handle width"
+  ],
+  "constraints": [
+    "ensure the drawer is not obstructed",
+    "apply force smoothly to avoid damaging the drawer mechanism"
+  ],
+  "image_id": "Open_3fcb2e"
+}

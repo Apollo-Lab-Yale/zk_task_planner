@@ -125,36 +125,41 @@ class OWLViTStateDetector:
         timing_stats = {'text_matching': 0, 'spatial': 0}
         states = []
         
+        # Project image embeddings through class head
+        batch_size, height, width, hidden_dim = image_embeds.shape
+        image_feats = image_embeds.reshape(-1, hidden_dim)
+        image_class_embeds = self.model.class_head.dense0(image_feats)
+        image_class_embeds = image_class_embeds / (torch.linalg.norm(image_class_embeds, dim=-1, keepdim=True) + 1e-6)
+        
         for det in detections:
-            # Initialize state dictionary
             state = {
                 'name': det['label'],
                 'bbox': det['bbox'],
-                'predicates': {'visible': 1}  # Always visible if detected
+                'predicates': {'visible': 1}
             }
             
-            # Time text-matching operations
             start_text = time.time()
-            # Check boolean predicates
+            
             for pred in self.bool_preds:
                 if pred == 'visible':
                     continue
                     
                 if pred in self.state_queries:
-                    # Run text-image matching for state queries
                     queries = self.state_queries[pred]
-                    text_embeds = self.processor(text=queries, return_tensors="pt")['attention_mask']
-                    # print([type(data) for data in list(text_embeds.values())])
-                    # print(text_embeds.keys())
-                    # text_embeds = {k: v.to(self.config.device) for k, v in text_inputs.items()}
-                    # text_embeds = self.processor.tokenizer(queries)
+                    text_inputs = self.processor(
+                        text=queries,
+                        return_tensors="pt",
+                        padding=True
+                    )
+                    text_inputs = {k: v.to(self.config.device) for k, v in text_inputs.items()}
+                    
                     with torch.no_grad():
-                        # text_embeds = self.model.get_text_features(
-                        #     input_ids=text_inputs["input_ids"],
-                        #     attention_mask=text_inputs["attention_mask"]
-                        # )
-                        similarity = torch.matmul(text_embeds, image_embeds.T).squeeze()
-                        max_sim = similarity.max().item()
+                        text_embeds = self.model.owlvit.get_text_features(**text_inputs)
+                        text_embeds = text_embeds / (torch.linalg.norm(text_embeds, dim=-1, keepdim=True) + 1e-6)
+                        
+                        # Use einsum for proper batch matmul
+                        pred_logits = torch.einsum("pd,qd->pq", image_class_embeds, text_embeds)
+                        max_sim = pred_logits.max().item()
                         
                         state['predicates'][pred] = 1 if max_sim > self.config.state_confidence else 0
                 else:
@@ -162,15 +167,11 @@ class OWLViTStateDetector:
             
             timing_stats['text_matching'] += time.time() - start_text
             
-            # Time spatial relationship operations
             start_spatial = time.time()
-            # Handle relational predicates
             state['predicates']['inRoom'] = {'value': 1, 'room': self._detect_room(image_embeds)}
             
-            # Detect spatial relationships
             for other_det in detections:
                 if other_det != det:
-                    # Check if object is on top of another
                     if self._check_on_top(det['bbox'], other_det['bbox']):
                         state['predicates']['isOnTop'] = {
                             'value': 1,
@@ -180,7 +181,6 @@ class OWLViTStateDetector:
             if 'isOnTop' not in state['predicates']:
                 state['predicates']['isOnTop'] = {'value': 0, 'object': None}
                 
-            # Check containment
             state['predicates']['isInside'] = {'value': 0, 'object': None}
             for other_det in detections:
                 if other_det != det and self._check_inside(det['bbox'], other_det['bbox']):
@@ -200,13 +200,21 @@ class OWLViTStateDetector:
         """Detect room type using OWL-ViT"""
         room_types = ["kitchen", "living room", "bedroom", "bathroom", "office"]
         
-        text_inputs = self.processor(text=[room_types], return_tensors="pt")
+        text_inputs = self.processor(text=room_types, return_tensors="pt", padding=True)
         text_inputs = {k: v.to(self.config.device) for k, v in text_inputs.items()}
         
+        # Project image embeddings through class head
+        batch_size, height, width, hidden_dim = image_embeds.shape
+        image_feats = image_embeds.reshape(-1, hidden_dim)
+        image_class_embeds = self.model.class_head.dense0(image_feats)
+        image_class_embeds = image_class_embeds / (torch.linalg.norm(image_class_embeds, dim=-1, keepdim=True) + 1e-6)
+        
         with torch.no_grad():
-            text_features = self.model.text_model(**text_inputs).last_hidden_state
-            similarity = torch.matmul(text_features, image_embeds.T).squeeze()
-            most_likely_room = room_types[similarity.argmax().item()]
+            text_embeds = self.model.owlvit.get_text_features(**text_inputs)
+            text_embeds = text_embeds / (torch.linalg.norm(text_embeds, dim=-1, keepdim=True) + 1e-6)
+            
+            pred_logits = torch.einsum("pd,qd->pq", image_class_embeds, text_embeds)
+            most_likely_room = room_types[pred_logits.mean(dim=0).argmax().item()]
         
         return most_likely_room
 

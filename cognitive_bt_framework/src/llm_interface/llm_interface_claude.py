@@ -345,7 +345,7 @@ class LLMInterfaceClaude:
             - Spatial relationships (on top, inside, proximity)
             - States (open/closed, switched on/off, filled)
 
-            Remember all of the following predicates should be evaluated for all detected objects and be present in the output state:
+            Remember all of the following predicates should be evaluated for all detected objects zero value predicates can be ommitted:
             {', '.join(BOOL_PREDS + RELATIONAL_PREDS)}
 
             For boolean predicates, use 1 for true and 0 for false.

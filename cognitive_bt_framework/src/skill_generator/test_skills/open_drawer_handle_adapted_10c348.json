@@ -1,0 +1,43 @@
+{
+  "name": "open_drawer_handle_adapted_10c348",
+  "abstract_action": "Open",
+  "primitive_sequence": [
+    "move_to(position)",
+    "grasp(width)",
+    "apply_force(direction, magnitude)",
+    "release()",
+    "retractGripper()"
+  ],
+  "parameters": {
+    "relevant measurements": "handle width approximately 10 cm",
+    "forces": "pulling force of 5 N",
+    "positions": "coordinates relative to the robot's base and the drawer's handle location in the bedroom"
+  },
+  "object_states": {
+    "visible": 1,
+    "openable": 1,
+    "isOpen": 0,
+    "moveable": 1,
+    "inRoom": {
+      "value": 1,
+      "room": "bedroom"
+    },
+    "isOnTop": {
+      "value": 0,
+      "object": null
+    },
+    "isInside": {
+      "value": 0,
+      "object": null
+    }
+  },
+  "prerequisites": [
+    "Robot must be positioned within reach of the drawer handle.",
+    "Drawer must be closed and unlocked."
+  ],
+  "constraints": [
+    "Ensure that the force applied does not exceed the structural limits of the drawer handle.",
+    "Avoid collisions with other objects in the kitchen."
+  ],
+  "image_id": "Open_a7557a"
+}

@@ -17,7 +17,7 @@ class FastSAMStateConfig:
     """Configuration for FastSAM-based state detection"""
     model_type: str = "FastSAM-s"
     max_image_size: int = 640
-    conf_threshold: float = 0.5
+    conf_threshold: float = 0.6
     iou_threshold: float = 0.9
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     llm_model: str = "claude-3-5-sonnet-20240620"
@@ -252,40 +252,87 @@ For relational predicates, include both the value (1/0) and the related object/r
             
         return vis_image
 
-def test_detector():
-    """Test script for FastSAMStateDetector"""
+async def test_detector():
     import matplotlib.pyplot as plt
     from cognitive_bt_framework.src.sim.robosuite.robosuite_sim import RobosuiteSimEnv
-    from cognitive_bt_framework.src.llm_interface.llm_interface_claude import LLMInterfaceClaude
     from cognitive_bt_framework.src.llm_interface.llm_interface_openai import LLMInterfaceOpenAI
 
-    # Initialize detector and simulation
+    # Initialize components
     config = FastSAMStateConfig(
-        model_type="FastSAM-s",
+        model_type="FastSAM-x",
         max_image_size=640,
-        conf_threshold=0.4
+        conf_threshold=0.65
     )
     detector = FastSAMStateDetector(config)
     sim = RobosuiteSimEnv()
-    llm_interface = LLMInterfaceClaude()
+    llm_interface = LLMInterfaceOpenAI(model_name='gpt-4o')
+
     # Get and process image
     image = sim.get_camera_image()
     start = time.time()
-    object_states, masks, metadata = llm_interface.get_object_states(image, detector.mask_generator)
+    object_states, masks, metadata = await llm_interface.get_object_states(image, detector.mask_generator)
     print(f"It took {time.time() - start} seconds to get object states")
-    # object_states, masks, metadata = detector.get_object_states(image)
-    print("$$$$$$$$$$$$$$$$")
-    print(object_states)
-    # Create visualization
+    
+    # First show overall scene with all detections
     vis_image = detector.visualize_results(image, object_states, masks, metadata)
-    print("\nDetected Object States:")
-    for state_info in object_states:
+    plt.figure(figsize=(15, 10))
+    plt.imshow(vis_image)
+    plt.title("Complete Scene with All Detections")
+    plt.axis('off')
+    plt.show()
+
+    # Now iterate through each detected object
+    for i, state_info in enumerate(object_states):
+        print(state_info)
+        # Create figure with two subplots side by side
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+        
+        # Get object name and region
         region_id = state_info['region_id']
-        print(f"\n{state_info['name']} ({region_id}):")
-        for pred, val in state_info['predicates'].items():
-            if val == 1:
-                print(f"  {pred}: {val}")
+        object_name = state_info['name']
+        
+        # Get object mask and apply it to image
+        mask = state_info.get('mask', None)
+        if mask is not None:
+            # Show original image with mask overlay
+            masked_image = image.copy()
+            masked_image[~mask] = masked_image[~mask] // 4  # Dim non-masked regions
+            ax1.imshow(masked_image)
+            ax1.set_title(f"Object: {object_name}")
+            ax1.axis('off')
+            
+            # Show state information as text
+            state_text = f"Object: {object_name}\nRegion: {region_id}\n\nPredicates:\n"
+            for pred, val in state_info['predicates'].items():
+                if isinstance(val, dict):
+                    # Handle relational predicates
+                    if val['value'] == 1:
+                        if 'room' in val:
+                            state_text += f"- {pred}: {val['room']}\n"
+                        elif 'object' in val and val['object']:
+                            state_text += f"- {pred}: {val['object']}\n"
+                elif val == 1:
+                    # Handle boolean predicates
+                    state_text += f"- {pred}\n"
+            
+            ax2.text(0.1, 0.9, state_text, transform=ax2.transAxes, 
+                    verticalalignment='top', fontsize=12,
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+            ax2.axis('off')
+            ax2.set_title("State Information")
+            
+            plt.tight_layout()
+            plt.show()
+
+            # Print detailed state information
+            print(f"\nDetailed State Information for {object_name} ({region_id}):")
+            print(state_text)
+            
+            # Optional: wait for user input before showing next object
+            input("Press Enter to continue to next object...")
+            plt.close()
 
 if __name__ == "__main__":
-    test_detector()
+    import asyncio
+    asyncio.run(test_detector())
     input()

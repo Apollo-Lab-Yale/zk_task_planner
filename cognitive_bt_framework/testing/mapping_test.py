@@ -1,150 +1,160 @@
+from dataclasses import dataclass
 import numpy as np
-from cognitive_bt_framework.src.vision.realsense import Camera
-from cognitive_bt_framework.src.vision.mapping.voxel_map_3d import EnvironmentMapper
-import pyrealsense2 as rs
-import cv2
-import time
-from scipy.spatial.transform import Rotation
-import signal
-import sys
+import open3d as o3d
+from typing import Dict, List, Optional, Tuple
+import copy
+
+from cognitive_bt_framework.src.sim.robosuite.robosuite_sim import RobosuiteSimEnv
+from cognitive_bt_framework.src.vision.sam.fast_sam import FastSAMMaskGenerator, FastSAMConfig
+from cognitive_bt_framework.src.llm_interface.llm_interface_openai import LLMInterfaceOpenAI
 
 
-class MappingApplication:
-    def __init__(self, voxel_size=0.05):
-        self.camera = Camera()
-        self.mapper = EnvironmentMapper(voxel_size=voxel_size)
-        self.running = True
-        self.camera_matrix = None
+@dataclass
+class ObjectState:
+    name: str
+    predicates: Dict
+    region_id: str
+    caption: str
+    position: np.ndarray  # 3D position
+    points: np.ndarray    # Point cloud
+    confidence: float     # Detection confidence
 
-        # Configuration
-        self.center = np.array([0.0, 0.0, 0.0])
-        self.radius = 1.0
-        self.vis_update_interval = 0.1  # 10 Hz visualization update
-        self.depth_scale = 0.03  # Scale factor for depth visualization
+class EnvironmentStateTracker:
+    def __init__(self):
+        self.objects: Dict[str, ObjectState] = {}
+        self.environment_map = o3d.geometry.PointCloud()
+        self.camera_poses = []
+        
+    async def update_state(self, 
+                          rgbd_image: np.ndarray,
+                          depth: np.ndarray,
+                          camera_pose: np.ndarray,
+                          mask_gen,
+                          llm_interface) -> List[ObjectState]:
+        # Get new detections
+        object_states, masks, metadata = await llm_interface.get_object_states(
+            rgbd_image, mask_gen
+        )
+        
+        # Convert depth and masks to point clouds
+        new_points = self._depth_to_pointcloud(depth, camera_pose)
+        self.camera_poses.append(camera_pose)
+        
+        # Update existing objects and add new ones
+        updated_objects = []
+        for state_info in object_states:
+            region_id = state_info['region_id']
+            mask = state_info.get('mask')
+            if mask is None:
+                continue
+                
+            # Get object points from mask
+            object_points = new_points[mask]
+            position = np.mean(object_points, axis=0)
+            
+            # Update existing object or create new one
+            if region_id in self.objects:
+                self._update_object(region_id, state_info, position, object_points)
+            else:
+                self._add_new_object(state_info, position, object_points)
+            
+            updated_objects.append(self.objects[region_id])
+        
+        # Update environment map
+        self._update_environment_map(new_points)
+        
+        return updated_objects
 
-        # Initialize timing variables
-        self.start_time = None
-        self.last_vis_update = None
+    def _depth_to_pointcloud(self, 
+                           depth: np.ndarray, 
+                           camera_pose: np.ndarray) -> np.ndarray:
+        """Convert depth image to point cloud using camera parameters"""
+        # Implementation depends on your camera parameters
+        # This is a simplified version
+        points = o3d.geometry.PointCloud.create_from_depth_image(
+            depth,
+            o3d.camera.PinholeCameraIntrinsic(
+                width=depth.shape[1],
+                height=depth.shape[0],
+                fx=525.0,  # Replace with actual camera parameters
+                fy=525.0,
+                cx=depth.shape[1]/2,
+                cy=depth.shape[0]/2
+            )
+        )
+        points.transform(camera_pose)
+        return np.asarray(points.points)
 
-        # Set up signal handler for graceful shutdown
-        signal.signal(signal.SIGINT, self.signal_handler)
+    def _update_object(self, 
+                      region_id: str, 
+                      state_info: Dict, 
+                      position: np.ndarray,
+                      points: np.ndarray):
+        obj = self.objects[region_id]
+        # Update state information
+        obj.predicates = state_info['predicates']
+        obj.caption = state_info['caption']
+        # Update position using Kalman filter or moving average
+        obj.position = 0.7 * obj.position + 0.3 * position
+        # Update point cloud
+        obj.points = np.vstack([obj.points, points])
+        # Optional: downsample points to manage memory
+        if len(obj.points) > 1000:
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(obj.points)
+            pcd = pcd.voxel_down_sample(voxel_size=0.01)
+            obj.points = np.asarray(pcd.points)
 
-    def signal_handler(self, signum, frame):
-        print("\nSignal received, cleaning up...")
-        self.running = False
-
-    def initialize(self):
-        """Initialize camera and get intrinsics"""
-        if not self.camera.start():
-            print("Failed to start camera")
-            return False
-
-        try:
-            # Get camera intrinsics
-            profile = self.camera.pipeline.get_active_profile()
-            depth_profile = profile.get_stream(rs.stream.depth)
-            intrinsics = depth_profile.as_video_stream_profile().get_intrinsics()
-
-            self.camera_matrix = np.array([
-                [intrinsics.fx, 0, intrinsics.ppx],
-                [0, intrinsics.fy, intrinsics.ppy],
-                [0, 0, 1]
-            ])
-
-            # Initialize visualization
-            self.mapper.initialize_visualizer()
-
-            # Initialize timing
-            self.start_time = time.time()
-            self.last_vis_update = time.time()
-
-            return True
-
-        except Exception as e:
-            print(f"Error during initialization: {e}")
-            return False
-
-    def update_robot_pose(self):
-        """Update robot pose based on time"""
-        t = time.time() - self.start_time
-        angle = t * 0.5
-
-        position = self.center + self.radius * np.array([
-            np.cos(angle),
-            np.sin(angle),
-            0.0
-        ])
-
-        direction = self.center - position
-        orientation = Rotation.from_rotvec(
-            [0, 0, np.arctan2(direction[1], direction[0])]
+    def _add_new_object(self, 
+                       state_info: Dict, 
+                       position: np.ndarray,
+                       points: np.ndarray):
+        self.objects[state_info['region_id']] = ObjectState(
+            name=state_info['name'],
+            predicates=state_info['predicates'],
+            region_id=state_info['region_id'],
+            caption=state_info['caption'],
+            position=position,
+            points=points,
+            confidence=1.0
         )
 
-        self.mapper.update_robot_pose(position, orientation)
+    def _update_environment_map(self, new_points: np.ndarray):
+        # Add new points to environment map
+        current_map = np.asarray(self.environment_map.points)
+        if len(current_map) == 0:
+            self.environment_map.points = o3d.utility.Vector3dVector(new_points)
+        else:
+            combined = np.vstack([current_map, new_points])
+            self.environment_map.points = o3d.utility.Vector3dVector(combined)
+        
+        # Downsample to manage memory
+        self.environment_map = self.environment_map.voxel_down_sample(voxel_size=0.02)
 
-    def process_frames(self):
-        """Process camera frames and update visualizations"""
-        frames = self.camera.get_frames()
-        if not frames:
-            return True
+    def get_environment_map(self) -> o3d.geometry.PointCloud:
+        return copy.deepcopy(self.environment_map)
 
-        color_image, depth_image = frames
-
-        # Update mapping
-        self.update_robot_pose()
-        self.mapper.update_map(depth_image, self.camera_matrix)
-
-        # Visualize raw depth
-        depth_colormap = cv2.applyColorMap(
-            cv2.convertScaleAbs(depth_image, alpha=self.depth_scale),
-            cv2.COLORMAP_JET
-        )
-        cv2.imshow('Raw Depth', depth_colormap)
-
-        # Visualize color
-        cv2.imshow('Color', color_image)
-
-        # Update 3D visualization at controlled rate
-        current_time = time.time()
-        if current_time - self.last_vis_update >= self.vis_update_interval:
-            self.mapper.visualize(block=False)
-            self.last_vis_update = current_time
-
-        # Check for exit command
-        key = cv2.waitKey(1) & 0xFF
-        return key not in (ord('q'), 27)
-
-    def cleanup(self):
-        """Cleanup resources"""
-        print("Cleaning up resources...")
-        try:
-            self.mapper.close_visualizer()
-            self.camera.stop()
-            cv2.destroyAllWindows()
-            self.mapper.save_map('environment_map.ply')
-            print("Cleanup complete")
-        except Exception as e:
-            print(f"Error during cleanup: {e}")
-
-    def run(self):
-        """Main application loop"""
-        if not self.initialize():
-            return
-
-        try:
-            while self.running:
-                if not self.process_frames():
-                    break
-        except Exception as e:
-            print(f"Error in main loop: {e}")
-        finally:
-            self.cleanup()
-
+    def get_object_state(self, region_id: str) -> Optional[ObjectState]:
+        return self.objects.get(region_id)
+    
 
 def main():
-    app = MappingApplication(voxel_size=0.05)
-    app.run()
+    tracker = EnvironmentStateTracker()
+    sim = RobosuiteSimEnv()
+    mask_gen = FastSAMMaskGenerator(FastSAMConfig())
+    llm_interface = LLMInterfaceOpenAI()
+    while True:
+        # Get new RGBD frame
+        rgbd_image, depth = sim.get_camera_frames()
+        camera_pose = sim.get_camera_pose()
 
+            # Update state
+        updated_objects = tracker.update_state(
+            rgbd_image, depth, camera_pose, mask_gen, llm_interface
+        )
+        
+        # Get current environment map
+        current_map = tracker.get_environment_map()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
