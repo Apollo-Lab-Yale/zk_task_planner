@@ -142,7 +142,7 @@ class SkillGenerator:
             }}
             
             Base all values on the visual appearance and state predicates of the object.
-            Return only the raw JSON object with no additional text."""}},
+            Return only the raw JSON object with no additional text."""},
             {"role": "user", "content": [
                 {"type": "text", "text": f"""
                 Abstract Action: {abstract_action}

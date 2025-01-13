@@ -21,7 +21,7 @@ from robocasa.models.scenes.scene_registry import LayoutType, StyleType
 import numpy as np
 import cv2
 
-from cognitive_bt_framework.src.vision.object_detection.yolo import ObjectDetection
+# from cognitive_bt_framework.src.vision.object_detection.yolo import ObjectDetection
 
 MAX_TIMESTEPS = 200
 GRASP_ERROR = 0.0375
@@ -86,7 +86,7 @@ class RobosuiteSimEnv(object):
             logging.error(f"Failed to initialize environment: {e}")
             raise
 
-        self.object_detection = ObjectDetection()
+        # self.object_detection = ObjectDetection()
         self.object_names = self.get_object_names()
         
         # Initialize state
@@ -104,8 +104,8 @@ class RobosuiteSimEnv(object):
             "lookup": self.look_up
         }
     
-    def get_object_names(self):
-        return self.object_detection.get_classes()
+    # def get_object_names(self):
+    #     return self.object_detection.get_classes()
 
     def __del__(self):
         """Ensure proper cleanup of resources."""
@@ -353,47 +353,47 @@ class RobosuiteSimEnv(object):
             detection['position_in_ee'] = P_ee  # Add position in ee frame to detection
         return object_positions
 
-    def get_state(self):
-        """Get current state with object positions and metadata."""
-        obs = self.get_last_obs()
+    # def get_state(self):
+    #     """Get current state with object positions and metadata."""
+    #     obs = self.get_last_obs()
         
-        # Get detections and object positions
-        bgr_frame = obs["leg0_robotview_image"]
-        rgb_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_RGB2BGR)
-        camera_detections = self.object_detection.detect_objects(rgb_frame)
-        object_positions = self.get_object_positions(camera_detections)
+    #     # Get detections and object positions
+    #     bgr_frame = obs["leg0_robotview_image"]
+    #     rgb_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_RGB2BGR)
+    #     camera_detections = self.object_detection.detect_objects(rgb_frame)
+    #     object_positions = self.get_object_positions(camera_detections)
         
-        # Build state dict
-        state = {
-            'rooms': [{'roomType': 'kitchen', 'name': 'kitchen'}],
-            'objects': [],
-            'predicates': [],
-            'robot_state': {
-                'name': 'robot',
-                'position': obs["robot0_base_pos"],
-                'rotation': obs["robot0_base_quat"],
-                'isStanding': True
-            },
-            'memory_dict': {}
-        }
+    #     # Build state dict
+    #     state = {
+    #         'rooms': [{'roomType': 'kitchen', 'name': 'kitchen'}],
+    #         'objects': [],
+    #         'predicates': [],
+    #         'robot_state': {
+    #             'name': 'robot',
+    #             'position': obs["robot0_base_pos"],
+    #             'rotation': obs["robot0_base_quat"],
+    #             'isStanding': True
+    #         },
+    #         'memory_dict': {}
+    #     }
         
-        # Format object data
-        for obj in object_positions:
-            obj_data = {
-                'name': obj['name'],
-                'position': obj["position"],
-                'rotation': np.array([0.0,0.0,0.0]),
-                'visible': True,
-                'isInteractable': True,
-                'pickupable': True,
-                'distance': float(np.linalg.norm(obj['position']))
-            }
-            state['objects'].append(obj_data)
+    #     # Format object data
+    #     for obj in object_positions:
+    #         obj_data = {
+    #             'name': obj['name'],
+    #             'position': obj["position"],
+    #             'rotation': np.array([0.0,0.0,0.0]),
+    #             'visible': True,
+    #             'isInteractable': True,
+    #             'pickupable': True,
+    #             'distance': float(np.linalg.norm(obj['position']))
+    #         }
+    #         state['objects'].append(obj_data)
             
-            # Add common predicates
-            state['predicates'].append(f"GRABBABLE {obj['name']}")
+    #         # Add common predicates
+    #         state['predicates'].append(f"GRABBABLE {obj['name']}")
             
-        return state
+    #     return state
 
     def simulation_loop(self) -> None:
         """Main simulation loop with improved timing and error handling."""
