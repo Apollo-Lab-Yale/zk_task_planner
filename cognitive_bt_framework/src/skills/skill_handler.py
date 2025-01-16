@@ -2,10 +2,11 @@ from typing import Dict, List, Optional, Any, Tuple
 import numpy as np
 from dataclasses import dataclass
 import cv2
+import asyncio
 from pathlib import Path
-
-from cognitive_bt_framework.src.vision.sam.fast_sam_clip import FastSAMWithCLIP, FastSAMConfig
+from cognitive_bt_framework.src.vision import PerceptionSystem, FastSAMConfig, ObjectInfo
 from cognitive_bt_framework.src.skills.primitive_parser import PrimitiveParser, ParsedPrimitive
+from cognitive_bt_framework.src.skills.skill_generator import SkillGenerator
 
 @dataclass
 class ExecutableAction:
@@ -24,56 +25,60 @@ class InstantiatedSkill:
     execution_parameters: Dict[str, Any]
 
 class SkillHandler:
-    def __init__(self, skill_generator, object_detector, perception_system, fast_sam_config: FastSAMConfig):
+    def __init__(self, skill_generator: SkillGenerator, perception_system: PerceptionSystem):
         """
         Initialize skill handler with required components
         
         Args:
             skill_generator: SkillGenerator instance for generating/retrieving skills
-            object_detector: System for detecting and segmenting objects
-            perception_system: System for getting 3D scene information
-            fast_sam_config: Configuration for FastSAM segmentation
+            perception_system: System for getting 3D scene information and object detection
         """
         self.skill_generator = skill_generator
-        self.object_detector = object_detector
         self.perception_system = perception_system
-        
-        # Initialize FastSAM and primitive parser
-        self.segmenter = FastSAMWithCLIP(fast_sam_config)
         self.primitive_parser = PrimitiveParser()
         
-    async def instantiate_skill(self, abstract_action: str, target_object: str) -> Optional[InstantiatedSkill]:
+    async def instantiate_skill(
+        self, 
+        abstract_action: str, 
+        target_object: str,
+        image: np.ndarray,
+        depth_image: Optional[np.ndarray] = None
+    ) -> Optional[InstantiatedSkill]:
         """
         Generate and instantiate a skill for the given action and object
         
         Args:
             abstract_action: High-level action to perform
             target_object: Name of the target object
+            image: RGB image of the scene
+            depth_image: Optional depth image for better pose estimation
             
         Returns:
             Instantiated skill if successful, None otherwise
         """
-        # Get object information from perception
-        object_info = self.object_detector.detect_object(target_object)
+        # Get object information from perception system
+        object_info = self.perception_system.detect_object(
+            target_object,
+            image,
+            depth_image
+        )
+        
         if object_info is None:
             print(f"Could not detect object: {target_object}")
             return None
             
-        image = object_info['image']
-        mask = object_info['mask']
-        
         # Get or generate skill using SkillGenerator
         skill = await self.skill_generator.find_similar_skill(
-            image=image,
-            mask=mask,
+            image=object_info.image,
+            mask=object_info.mask,
             abstract_action=abstract_action,
             target_object=target_object
         )
         
         if skill is None:
             skill = await self.skill_generator.generate_skill(
-                image=image,
-                mask=mask,
+                image=object_info.image,
+                mask=object_info.mask,
                 abstract_action=abstract_action,
                 target_object=target_object
             )
@@ -86,15 +91,13 @@ class SkillHandler:
         return self._instantiate_skill(skill, object_info)
 
     def _identify_interaction_points(self, 
-                                  image: np.ndarray, 
-                                  mask: np.ndarray,
+                                  object_info: ObjectInfo,
                                   keywords: List[str]) -> Dict[str, np.ndarray]:
         """
         Identify 3D interaction points on the object for given keywords
         
         Args:
-            image: RGB image of the object
-            mask: Binary mask of the object
+            object_info: Object information from perception system
             keywords: List of keywords to identify
             
         Returns:
@@ -102,11 +105,11 @@ class SkillHandler:
         """
         interaction_points = {}
         
-        # Use FastSAM to segment interaction points
+        # For each keyword, detect the relevant part using perception system
         for keyword in keywords:
-            # Use CLIP-guided segmentation to find the specific part
-            labeled_masks, metadata = self.segmenter.process_image(
-                image,
+            # Process image for specific part detection
+            labeled_masks, metadata = self.perception_system.segmenter.process_image(
+                object_info.image,
                 query=f"a {keyword} of the object"
             )
             
@@ -116,7 +119,7 @@ class SkillHandler:
             
             for mask_id, meta in metadata.items():
                 component_mask = labeled_masks == mask_id
-                if np.logical_and(component_mask, mask).any():
+                if np.logical_and(component_mask, object_info.mask).any():
                     score = meta.get('clip_score', 0)
                     if score > best_score:
                         best_score = score
@@ -134,7 +137,7 @@ class SkillHandler:
                 
         return interaction_points
         
-    def _instantiate_skill(self, skill, object_info) -> Optional[InstantiatedSkill]:
+    def _instantiate_skill(self, skill, object_info: ObjectInfo) -> Optional[InstantiatedSkill]:
         """Convert abstract skill to concrete executable actions"""
         try:
             # First validate and parse all primitives
@@ -145,8 +148,8 @@ class SkillHandler:
             print(f"Failed to parse skill primitives: {e}")
             return None
             
-        # Get 3D information about the object
-        object_pose = self.perception_system.get_object_pose(object_info['mask'])
+        # Get 3D information about the object - use pose from ObjectInfo if available
+        object_pose = object_info.pose if object_info.pose is not None else np.zeros(6)
         
         # Get all unique keywords from parsed primitives
         all_keywords = set()
@@ -155,11 +158,7 @@ class SkillHandler:
                 all_keywords.update(primitive.parameters['keywords'])
                 
         # Identify interaction points for all keywords at once
-        interaction_points = self._identify_interaction_points(
-            object_info['image'],
-            object_info['mask'],
-            list(all_keywords)
-        )
+        interaction_points = self._identify_interaction_points(object_info, list(all_keywords))
         
         # Convert each parsed primitive to executable action
         action_sequence = []
@@ -188,7 +187,8 @@ class SkillHandler:
             action_sequence=action_sequence,
             execution_parameters=execution_parameters
         )
-        
+
+    # [Previous helper methods remain unchanged]
     def _convert_parsed_primitive_to_executable(self,
                                               parsed_primitive: ParsedPrimitive,
                                               object_pose: np.ndarray,
@@ -559,3 +559,29 @@ class SkillHandler:
                     )
         
         return vis_image
+    
+
+async def main():
+    # Initialize systems
+    fast_sam_config = FastSAMConfig()
+    perception_system = PerceptionSystem(fast_sam_config)
+
+    # Initialize skill handler with perception system
+    skill_handler = SkillHandler(
+        skill_generator=skill_generator,
+        perception_system=perception_system
+    )
+
+    # Use in workflow
+    image = ...  # RGB image
+    depth_image = ...  # Optional depth image
+    target_object = "cup"
+
+    # Detect object
+    object_info = perception_system.detect_object(target_object, image, depth_image)
+
+    # Generate skill
+    skill = await skill_handler.instantiate_skill("pick", target_object)
+
+if __name__ == '__main__':
+    asyncio.run(main())
