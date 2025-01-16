@@ -214,7 +214,7 @@ class SkillHandler:
                 interaction_points=interaction_points,
                 skill_parameters=skill_parameters
             )
-        elif action_type == 'move_to':
+        elif action_type == 'go_to_obj':
             return self._create_move_action(
                 keywords=parameters['keywords'],
                 interaction_points=interaction_points,
@@ -296,7 +296,7 @@ class SkillHandler:
         speed = self._get_speed_value(skill_parameters.get('speed_requirement', 'medium'))
         
         return ExecutableAction(
-            action_type='move_to',
+            action_type='go_to_obj',
             position=target_point,
             orientation=np.zeros(3),  # Will be determined by subsequent grasp or force action
             parameters={

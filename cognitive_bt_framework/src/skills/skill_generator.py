@@ -107,19 +107,17 @@ class SkillGenerator:
                 "skill_name": "specific_action_name_with_mechanism",
                 "primitive_sequence": [
                     "list of primitive actions using only these commands:",
-                    "- apply_force(direction, keywords)",
+                    "apply_force(direction, keywords)",
                         "direction: one of [up, down, left, right, push, pull] relative to object surface",
                         "keywords: list of descriptive words to identify the component (e.g., [handle, knob, button])",
-                    "- apply_torque(axis, keywords)",
+                    "apply_torque(axis, keywords)",
                         "axis: one of [clockwise, counterclockwise] relative to object surface",
                         "keywords: list of descriptive words to identify the component",
-                    "- go_to_obj(keywords)",
-                        "keywords: list of descriptive words to identify the target location",
-                    "- close_gripper()",
-                    "- release()",
-                    "- moveGripperToPose(keywords)",
+                    "close_gripper()",
+                    "release()",
+                    "moveGripperToPose(keywords)",
                         "keywords: list of descriptive words for the target pose location",
-                    "- retractGripper()"
+                    "retractGripper()"
                 ],
                 "parameters": {{
                     "force_threshold": "low/medium/high",
