@@ -1,0 +1,23 @@
+{
+	"folders": [
+		{
+			"path": "../../.."
+		},
+		{
+			"path": "../../../../../installs/robosuite"
+		},
+		{
+			"path": "../../../../../installs/robocasa"
+		},
+		{
+			"path": "../../../../../installs/robosuite_models"
+		},
+		{
+			"path": "../../../../../installs/sam2"
+		},
+		{
+			"path": "../../../../../installs/FastSAM"
+		}
+	],
+	"settings": {}
+}
