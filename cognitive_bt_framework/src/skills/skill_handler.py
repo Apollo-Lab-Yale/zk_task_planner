@@ -7,6 +7,7 @@ from pathlib import Path
 from cognitive_bt_framework.src.vision import PerceptionSystem, FastSAMConfig, ObjectInfo
 from cognitive_bt_framework.src.skills.primitive_parser import PrimitiveParser, ParsedPrimitive
 from cognitive_bt_framework.src.skills.skill_generator import SkillGenerator
+from cognitive_bt_framework.src.llm_interface.llm_interface_openai import LLMInterfaceOpenAI
 
 @dataclass
 class ExecutableAction:
@@ -23,6 +24,28 @@ class InstantiatedSkill:
     target_object: str
     action_sequence: List[ExecutableAction]
     execution_parameters: Dict[str, Any]
+    
+    
+class SyncSkillHandler:
+    def __init__(self, skill_generator, perception_system):
+        self.skill_handler = SkillHandler(skill_generator, perception_system)
+        
+    def instantiate_skill(self, skill_command, target_object, color_image=None, depth_image=None):
+        """Synchronous wrapper for instantiate_skill"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            skill = loop.run_until_complete(
+                self.skill_handler.instantiate_skill(
+                    skill_command,
+                    target_object,
+                    color_image,
+                    depth_image
+                )
+            )
+            return skill
+        finally:
+            loop.close()
 
 class SkillHandler:
     def __init__(self, skill_generator: SkillGenerator, perception_system: PerceptionSystem):
@@ -105,6 +128,9 @@ class SkillHandler:
         """
         interaction_points = {}
         
+        # Get original mask shape for later resizing
+        original_mask_shape = object_info.mask.shape
+        
         # For each keyword, detect the relevant part using perception system
         for keyword in keywords:
             # Process image for specific part detection
@@ -119,6 +145,16 @@ class SkillHandler:
             
             for mask_id, meta in metadata.items():
                 component_mask = labeled_masks == mask_id
+                
+                # Resize component mask to match object mask size if different
+                if component_mask.shape != original_mask_shape:
+                    component_mask = cv2.resize(
+                        component_mask.astype(np.uint8),
+                        (original_mask_shape[1], original_mask_shape[0]),
+                        interpolation=cv2.INTER_NEAREST
+                    ).astype(bool)
+                
+                # Now both masks should be the same size
                 if np.logical_and(component_mask, object_info.mask).any():
                     score = meta.get('clip_score', 0)
                     if score > best_score:
@@ -560,12 +596,53 @@ class SkillHandler:
         
         return vis_image
     
+    
+    
+def create_test_rgb_image(width=640, height=480):
+    """Create a test RGB image with a simple shape."""
+    # Create a black background
+    image = np.zeros((height, width, 3), dtype=np.uint8)
+    
+    # Draw a red "cup-like" shape in the middle
+    center_x, center_y = width // 2, height // 2
+    
+    # Draw cup body (rectangle)
+    cup_width, cup_height = 100, 120
+    x1 = center_x - cup_width // 2
+    x2 = center_x + cup_width // 2
+    y1 = center_y - cup_height // 2
+    y2 = center_y + cup_height // 2
+    
+    # Red cup
+    image[y1:y2, x1:x2] = [255, 0, 0]
+    
+    return image
+
+def create_test_depth_image(width=640, height=480):
+    """Create a test depth image with a simple shape."""
+    # Create a background (far depth)
+    depth = np.ones((height, width), dtype=np.float32) * 2.0
+    
+    # Add closer depth values for the cup shape
+    center_x, center_y = width // 2, height // 2
+    cup_width, cup_height = 100, 120
+    x1 = center_x - cup_width // 2
+    x2 = center_x + cup_width // 2
+    y1 = center_y - cup_height // 2
+    y2 = center_y + cup_height // 2
+    
+    # Set cup depth (closer to camera)
+    depth[y1:y2, x1:x2] = 0.5
+    
+    return depth
+
 
 async def main():
     # Initialize systems
     fast_sam_config = FastSAMConfig()
     perception_system = PerceptionSystem(fast_sam_config)
-
+    llm_interface = LLMInterfaceOpenAI()
+    skill_generator = SkillGenerator(llm_interface=llm_interface)
     # Initialize skill handler with perception system
     skill_handler = SkillHandler(
         skill_generator=skill_generator,
@@ -573,15 +650,15 @@ async def main():
     )
 
     # Use in workflow
-    image = ...  # RGB image
-    depth_image = ...  # Optional depth image
+    rgb_image = create_test_rgb_image()
+    depth_image = create_test_depth_image()
     target_object = "cup"
 
     # Detect object
-    object_info = perception_system.detect_object(target_object, image, depth_image)
+    object_info = perception_system.detect_object(target_object, rgb_image, depth_image)
 
     # Generate skill
-    skill = await skill_handler.instantiate_skill("pick", target_object)
+    skill = await skill_handler.instantiate_skill("pick", target_object, rgb_image, depth_image)
 
 if __name__ == '__main__':
     asyncio.run(main())

@@ -17,7 +17,6 @@ class FastSAMConfig:
     """Configuration settings for FastSAM with CLIP filtering"""
     model_type: str = "FastSAM-x"  # FastSAM-s or FastSAM-x
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
-    
     # Memory management
     max_image_size: int = 640
     enable_memory_efficient_attention: bool = False
@@ -48,6 +47,8 @@ class FastSAMWithCLIP:
         self._setup_memory_config()
         self._setup_models()
         self._next_mask_id = 1
+        self.last_masks = []
+        self.last_metadata = []
 
     def _setup_memory_config(self):
         """Configure memory management settings"""
@@ -133,7 +134,8 @@ class FastSAMWithCLIP:
 
             # Convert results to labeled masks and metadata
             labeled_masks, metadata = self._process_results(results, image, query)
-            
+            self.last_masks = labeled_masks
+            self.last_metadata = metadata
             return labeled_masks, metadata
 
         except RuntimeError as e:
@@ -155,7 +157,7 @@ class FastSAMWithCLIP:
         original_image: Union[str, np.ndarray],
         query: Optional[str] = None
     ) -> Tuple[np.ndarray, Dict]:
-        """Process FastSAM results and apply CLIP filtering if query provided"""
+        """Process FastSAM results with fixed mask dimensions"""
         # Convert image to numpy if needed
         if isinstance(original_image, str):
             original_image = cv2.imread(original_image)
@@ -165,80 +167,101 @@ class FastSAMWithCLIP:
         labeled_masks = np.zeros((height, width), dtype=np.int32)
         metadata = {}
 
+        # Print dimensions for debugging
+        print(f"Original image dimensions: {original_image.shape}")
+        if len(results) > 0 and hasattr(results[0], 'masks') and len(results[0].masks) > 0:
+            print(f"First mask dimensions: {results[0].masks[0].data.shape}")
+
         # Process each mask
         for i, mask_data in enumerate(results[0].masks, 1):
-            # Get mask and resize to match original image dimensions
-            mask = mask_data.data.cpu().numpy()[0]
-            mask = (mask > 0.5).astype(bool)
-            
-            # Resize mask to match original image dimensions
-            mask = cv2.resize(
-                mask.astype(np.uint8), 
-                (width, height), 
-                interpolation=cv2.INTER_NEAREST
-            ).astype(bool)
-            
-            if not mask.any():
-                continue
+            try:
+                # Get mask and convert to numpy
+                mask = mask_data.data.cpu().numpy()[0]
+                mask = (mask > 0.5).astype(bool)
                 
-            area = float(mask.sum())
-            if area < self.config.min_area and self.config.remove_small_regions:
-                continue
-
-            # Get bounding box
-            y_indices, x_indices = np.where(mask)
-            if len(y_indices) == 0 or len(x_indices) == 0:
-                continue
+                print(f"Processing mask {i}, original shape: {mask.shape}")
                 
-            x1, y1 = int(x_indices.min()), int(y_indices.min())
-            x2, y2 = int(x_indices.max()), int(y_indices.max())
-            bbox = [x1, y1, x2 - x1, y2 - y1]
-
-            # Apply CLIP filtering if query provided
-            if query:
-                # Crop and convert to PIL
-                crop = original_image[y1:y2, x1:x2]
-                crop_pil = Image.fromarray(crop)
+                # Resize mask to match original image dimensions
+                if mask.shape != (height, width):
+                    mask = cv2.resize(
+                        mask.astype(np.uint8), 
+                        (width, height), 
+                        interpolation=cv2.INTER_NEAREST
+                    ).astype(bool)
+                    
+                print(f"Mask {i} resized shape: {mask.shape}")
                 
-                # Make crop square with padding
-                if crop.shape[0] > crop.shape[1]:
-                    pad = (crop.shape[0] - crop.shape[1]) // 2
-                    crop_pil = Image.new('RGB', (crop.shape[0], crop.shape[0]), (0,0,0))
-                    crop_pil.paste(Image.fromarray(crop), (pad, 0))
-                else:
-                    pad = (crop.shape[1] - crop.shape[0]) // 2
-                    crop_pil = Image.new('RGB', (crop.shape[1], crop.shape[1]), (0,0,0))
-                    crop_pil.paste(Image.fromarray(crop), (0, pad))
-                
-                clip_score = self.get_clip_score(crop_pil, query)
-                if clip_score < self.config.clip_threshold:
+                if not mask.any():
+                    print(f"Mask {i} is empty after resize")
                     continue
+                    
+                area = float(mask.sum())
+                if area < self.config.min_area and self.config.remove_small_regions:
+                    print(f"Mask {i} too small: {area} < {self.config.min_area}")
+                    continue
+
+                # Get bounding box
+                y_indices, x_indices = np.where(mask)
+                if len(y_indices) == 0 or len(x_indices) == 0:
+                    print(f"Mask {i} has no valid indices")
+                    continue
+                    
+                x1, y1 = int(x_indices.min()), int(y_indices.min())
+                x2, y2 = int(x_indices.max()), int(y_indices.max())
+                bbox = [x1, y1, x2 - x1, y2 - y1]
+
+                # Apply CLIP filtering if query provided
+                clip_score = 1.0
+                if query:
+                    # Ensure crop coordinates are within bounds
+                    x1 = max(0, min(x1, width-1))
+                    y1 = max(0, min(y1, height-1))
+                    x2 = max(0, min(x2, width))
+                    y2 = max(0, min(y2, height))
+                    
+                    if x2 <= x1 or y2 <= y1:
+                        print(f"Invalid crop dimensions for mask {i}: ({x1},{y1}) to ({x2},{y2})")
+                        continue
+                    
+                    # Crop and convert to PIL
+                    crop = original_image[y1:y2, x1:x2]
+                    if crop.size == 0:
+                        print(f"Empty crop for mask {i}")
+                        continue
+                        
+                    crop_pil = Image.fromarray(crop)
+                    
+                    # Make crop square with padding
+                    max_dim = max(crop.shape[0], crop.shape[1])
+                    crop_square = Image.new('RGB', (max_dim, max_dim), (0,0,0))
+                    paste_x = (max_dim - crop.shape[1]) // 2
+                    paste_y = (max_dim - crop.shape[0]) // 2
+                    crop_square.paste(crop_pil, (paste_x, paste_y))
+                    
+                    clip_score = self.get_clip_score(crop_square, query)
+                    print(f"Mask {i} CLIP score: {clip_score}")
+                    
+                    if clip_score < self.config.clip_threshold:
+                        print(f"Mask {i} filtered by CLIP score: {clip_score} < {self.config.clip_threshold}")
+                        continue
                 
-            mask_id = self._next_mask_id
-            self._next_mask_id += 1
-            
-            labeled_masks[mask] = mask_id
-            metadata[mask_id] = {
-                'area': area,
-                'bbox': bbox,
-                'clip_score': clip_score if query else 1.0
-            }
+                mask_id = self._next_mask_id
+                self._next_mask_id += 1
+                
+                labeled_masks[mask] = mask_id
+                metadata[mask_id] = {
+                    'area': area,
+                    'bbox': bbox,
+                    'clip_score': clip_score
+                }
 
-            if self.config.draw_borders:
-                contours, _ = cv2.findContours(
-                    mask.astype(np.uint8),
-                    cv2.RETR_EXTERNAL,
-                    cv2.CHAIN_APPROX_SIMPLE
-                )
-                metadata[mask_id]['contours'] = [
-                    cv2.approxPolyDP(c, epsilon=0.01, closed=True).tolist()
-                    for c in contours
-                ]
+                print(f"Successfully processed mask {i} with ID {mask_id}")
 
-        # Merge overlapping masks if configured
-        if self.config.merge_overlapping:
-            labeled_masks, metadata = self._merge_overlapping_masks(labeled_masks, metadata)
+            except Exception as e:
+                print(f"Error processing mask {i}: {str(e)}")
+                continue
 
+        print(f"Total valid masks after processing: {len(metadata)}")
         return labeled_masks, metadata
 
     def visualize_masks(

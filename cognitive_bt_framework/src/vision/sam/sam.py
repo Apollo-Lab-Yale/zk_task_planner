@@ -2,7 +2,6 @@ import numpy as np
 import torch
 from sam2.build_sam import build_sam2
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
-from cognitive_bt_framework.src.sim.robosuite.robosuite_sim import RobosuiteSimEnv
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 import cv2
