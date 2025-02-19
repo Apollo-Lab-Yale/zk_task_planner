@@ -37,7 +37,7 @@ def main():
         )
 
         # List of objects to detect
-        target_objects = ["cup", "bottle", "keyboard", "mouse"]
+        target_objects = ["container"]
         current_target_idx = 0
 
         while True:
@@ -56,7 +56,7 @@ def main():
                 target_object=target_object,
                 image=color_image,
                 depth_image=depth_image,
-                confidence_threshold=0.7
+                confidence_threshold=0.5
             )
 
             if object_info is not None:

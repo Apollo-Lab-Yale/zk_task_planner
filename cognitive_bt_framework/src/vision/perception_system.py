@@ -51,74 +51,126 @@ class PerceptionSystem:
         self._object_cache = {}  # Cache for detected objects
         
     def detect_object(
-        self,
-        target_object: str,
-        image: np.ndarray,
-        depth_image: Optional[np.ndarray] = None,
-        confidence_threshold: float = 0.85
-    ) -> Optional[ObjectInfo]:
-        """
-        Detect and segment specific object in the scene
-        
-        Args:
-            target_object: Object name/category to detect
-            image: RGB image of the scene
-            depth_image: Optional depth image aligned with RGB
-            confidence_threshold: Minimum confidence for detection
+            self,
+            target_object: str,
+            image: np.ndarray,
+            depth_image: Optional[np.ndarray] = None,
+            confidence_threshold: float = 0.5
+        ) -> Optional[ObjectInfo]:
+            """
+            Detect and segment specific object in the scene
             
-        Returns:
-            ObjectInfo if object found, None otherwise
-        """
-        # Check cache first
-        cache_key = f"{target_object}_{hash(image.tobytes())}"
-        if cache_key in self._object_cache:
-            return self._object_cache[cache_key]
-            
-        # Use FastSAM with CLIP to find the target object
-        labeled_masks, metadata = self.segmenter.process_image(
-            image,
-            query=f"a {target_object}"
-        )
-        
-        # Find best matching mask
-        best_mask_id = None
-        best_score = 0
-        
-        for mask_id, meta in metadata.items():
-            score = meta.get('clip_score', 0)
-            if score > best_score and score >= confidence_threshold:
-                best_score = score
-                best_mask_id = mask_id
+            Args:
+                target_object: Object name/category to detect
+                image: RGB image of the scene
+                depth_image: Optional depth image aligned with RGB
+                confidence_threshold: Minimum confidence for detection
                 
-        if best_mask_id is None:
-            return None
+            Returns:
+                ObjectInfo if object found, None otherwise
+            """
+            # Check cache first
+            cache_key = f"{target_object}_{hash(image.tobytes())}"
+            if cache_key in self._object_cache:
+                return self._object_cache[cache_key]
+                
+            # Store original image for later use
+            original_image = image.copy()
+            original_height, original_width = image.shape[:2]
             
-        # Get mask and bounding box
-        mask = labeled_masks == best_mask_id
-        bbox = metadata[best_mask_id]['bbox']  # [x, y, w, h]
-        
-        # Crop image to object region
-        x, y, w, h = bbox
-        object_image = image[y:y+h, x:x+w].copy()
-        
-        # Create object info
-        object_info = ObjectInfo(
-            id=best_mask_id,
-            name=target_object,
-            mask=mask,
-            image=object_image,
-            bbox=bbox,
-            confidence=best_score
-        )
-        
-        # Estimate pose if depth is available
-        if depth_image is not None:
-            pose = self._estimate_object_pose(mask, depth_image)
-            object_info.pose = pose
+            # Resize only for FastSAM processing
+            max_image_size = self.segmenter.config.max_image_size
+            scale_factor = max_image_size / max(original_height, original_width)
+            resized_height = int(original_height * scale_factor)
+            resized_width = int(original_width * scale_factor)
             
-        # Cache result
-        self._object_cache[cache_key] = object_info
-        return object_info
+            resized_image = cv2.resize(
+                image,
+                (resized_width, resized_height),
+                interpolation=cv2.INTER_LINEAR
+            )
+            
+            # Pad to square if needed
+            if resized_height != resized_width:
+                square_image = np.zeros((max_image_size, max_image_size, 3), dtype=np.uint8)
+                y_offset = (max_image_size - resized_height) // 2
+                x_offset = (max_image_size - resized_width) // 2
+                square_image[y_offset:y_offset+resized_height, 
+                            x_offset:x_offset+resized_width] = resized_image
+                resized_image = square_image
+            
+            # Use FastSAM with CLIP to find the target object
+            labeled_masks, metadata = self.segmenter.process_image(
+                resized_image,
+                query=f"a {target_object}"
+            )
+            
+            # Find best matching mask
+            best_mask_id = None
+            best_score = 0
+            
+            for mask_id, meta in metadata.items():
+                score = meta.get('clip_score', 0)
+                if score > best_score and score >= confidence_threshold:
+                    best_score = score
+                    best_mask_id = mask_id
+                    
+            if best_mask_id is None:
+                return None
+                
+            # Get mask from segmentation output
+            mask = labeled_masks == best_mask_id
+            
+            # If we padded the image, remove padding from mask
+            if resized_height != resized_width:
+                mask = mask[y_offset:y_offset+resized_height, 
+                        x_offset:x_offset+resized_width]
+            
+            # Resize mask back to original dimensions
+            mask = cv2.resize(
+                mask.astype(np.uint8),
+                (original_width, original_height),
+                interpolation=cv2.INTER_NEAREST
+            ).astype(bool)
+            
+            # Get bounding box in original image coordinates
+            y_coords, x_coords = np.where(mask)
+            if len(y_coords) == 0:
+                return None
+                
+            x1, y1 = int(x_coords.min()), int(y_coords.min())
+            x2, y2 = int(x_coords.max()), int(y_coords.max())
+            bbox = [x1, y1, x2 - x1, y2 - y1]
+            
+            # Use original image for cropping
+            x, y, w, h = bbox
+            object_image = original_image[y:y+h, x:x+w].copy()
+            
+            # Create object info using original image crop
+            object_info = ObjectInfo(
+                id=best_mask_id,
+                name=target_object,
+                mask=mask,
+                image=original_image,  # This now maintains original resolution
+                bbox=bbox,
+                confidence=best_score
+            )
+            
+            # Estimate pose if depth is available
+            if depth_image is not None:
+                # Ensure depth image matches RGB dimensions
+                if depth_image.shape[:2] != original_image.shape[:2]:
+                    depth_image = cv2.resize(
+                        depth_image,
+                        (original_width, original_height),
+                        interpolation=cv2.INTER_NEAREST
+                    )
+                pose = self._estimate_object_pose(mask, depth_image)
+                object_info.pose = pose
+                
+            # Cache result
+            self._object_cache[cache_key] = object_info
+            return object_info
         
     def get_object_pose(
         self,
@@ -186,13 +238,27 @@ class PerceptionSystem:
         Returns:
             6D pose array [x, y, z, roll, pitch, yaw]
         """
+        # Ensure mask and depth image have same dimensions
+        if mask.shape != depth_image.shape:
+            # Resize mask to match depth image dimensions
+            mask = cv2.resize(
+                mask.astype(np.uint8),
+                (depth_image.shape[1], depth_image.shape[0]),
+                interpolation=cv2.INTER_NEAREST
+            ).astype(bool)
+        
         # Get object points
         y_coords, x_coords = np.where(mask)
         if len(y_coords) == 0:
             return np.zeros(6)
             
         # Get corresponding depth values
-        depth_values = depth_image[y_coords, x_coords] * self.depth_scale
+        try:
+            depth_values = depth_image[y_coords, x_coords] * self.depth_scale
+        except IndexError as e:
+            print(f"IndexError in _estimate_object_pose: mask shape {mask.shape}, "
+                f"depth shape {depth_image.shape}, coords max ({np.max(y_coords)}, {np.max(x_coords)})")
+            return np.zeros(6)
         
         # Filter out invalid depth values
         valid = depth_values > 0
@@ -209,25 +275,35 @@ class PerceptionSystem:
         points_3d[:, 1] = (y_coords - self.camera_matrix[1, 2]) * depth_values / self.camera_matrix[1, 1]
         points_3d[:, 2] = depth_values
         
+        # Handle case where we don't have enough points for PCA
+        if len(points_3d) < 3:
+            # Return position only with zero rotation
+            centroid = np.mean(points_3d, axis=0)
+            return np.array([centroid[0], centroid[1], centroid[2], 0.0, 0.0, 0.0])
+        
         # Calculate centroid and orientation
         centroid = np.mean(points_3d, axis=0)
         
         # Estimate orientation using PCA
         centered_points = points_3d - centroid
-        covariance_matrix = np.cov(centered_points.T)
-        eigenvalues, eigenvectors = np.linalg.eig(covariance_matrix)
-        
-        # Sort eigenvectors by eigenvalues
-        sort_indices = np.argsort(eigenvalues)[::-1]
-        eigenvectors = eigenvectors[:, sort_indices]
-        
-        # Convert to roll, pitch, yaw
-        roll = np.arctan2(eigenvectors[2, 1], eigenvectors[2, 2])
-        pitch = np.arctan2(-eigenvectors[2, 0], np.sqrt(eigenvectors[2, 1]**2 + eigenvectors[2, 2]**2))
-        yaw = np.arctan2(eigenvectors[1, 0], eigenvectors[0, 0])
+        try:
+            covariance_matrix = np.cov(centered_points.T)
+            eigenvalues, eigenvectors = np.linalg.eig(covariance_matrix)
+            
+            # Sort eigenvectors by eigenvalues
+            sort_indices = np.argsort(eigenvalues)[::-1]
+            eigenvectors = eigenvectors[:, sort_indices]
+            
+            # Convert to roll, pitch, yaw
+            roll = np.arctan2(eigenvectors[2, 1], eigenvectors[2, 2])
+            pitch = np.arctan2(-eigenvectors[2, 0], np.sqrt(eigenvectors[2, 1]**2 + eigenvectors[2, 2]**2))
+            yaw = np.arctan2(eigenvectors[1, 0], eigenvectors[0, 0])
+        except np.linalg.LinAlgError:
+            # Fallback to zero rotation if PCA fails
+            roll, pitch, yaw = 0.0, 0.0, 0.0
         
         return np.array([centroid[0], centroid[1], centroid[2], roll, pitch, yaw])
-        
+            
     def _estimate_basic_pose(self, mask: np.ndarray) -> np.ndarray:
         """
         Estimate basic pose without depth information

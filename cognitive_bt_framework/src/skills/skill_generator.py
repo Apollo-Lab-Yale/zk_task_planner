@@ -70,6 +70,87 @@ class SkillGenerator:
             return cv2.imread(str(image_path))
         return None
 
+    def _validate_input_dimensions(self, image: np.ndarray, mask: np.ndarray) -> bool:
+        """
+        Validate that image and mask dimensions match
+        
+        Args:
+            image: Input image array
+            mask: Input mask array
+            
+        Returns:
+            True if dimensions match, False otherwise
+            
+        Raises:
+            ValueError: If dimensions don't match with detailed information
+        """
+        if mask.shape[:2] != image.shape[:2]:
+            raise ValueError(
+                f"Mask dimensions {mask.shape[:2]} do not match image dimensions {image.shape[:2]}. "
+                "Please ensure mask and image have the same height and width."
+            )
+        return True
+
+
+    '''
+    OLD SKILL GEN PROMPT
+
+    combined_prompt = [
+                {"role": "system", "content": f"""Analyze the object visually and generate a complete skill definition for performing {abstract_action} on a {target_object}.
+
+                First, determine the specific subtype of the action based on the object's visual characteristics.
+                The skill name should follow the format: action_targetobject_mechanism
+
+                Return a JSON object with the following structure:
+                {{
+                    "skill_name": "specific_action_name_with_mechanism",
+                    "primitive_sequence": [
+                        "list of primitive actions using only these commands:",
+                        "apply_force(direction, keywords)",
+                            "direction: one of [up, down, left, right, push, pull] relative to object surface",
+                            "keywords: list of descriptive words to identify the component (e.g., [handle, knob, button])",
+                        "apply_torque(axis, keywords)",
+                            "axis: one of [clockwise, counterclockwise] relative to object surface",
+                            "keywords: list of descriptive words to identify the component",
+                        "close_gripper()",
+                        "release()",
+                        "moveGripperToPose(keywords)",
+                            "keywords: list of descriptive words for the target pose location",
+                        "retractGripper()"
+                    ],
+                    "parameters": {{
+                        "force_threshold": "low/medium/high",
+                        "precision_required": "low/medium/high",
+                        "speed_requirement": "slow/medium/fast"
+                    }},
+                    "prerequisites": [
+                        "list of required conditions"
+                    ],
+                    "constraints": [
+                        "list of safety limits and constraints"
+                    ]
+                }}
+                
+                Base all values on the visual appearance of the object.
+                Return only the raw JSON object with no additional text."""},
+                {"role": "user", "content": [
+                    {"type": "text", "text": f"""
+                    Abstract Action: {abstract_action}
+                    Target Object: {target_object}
+                    
+                    Generate a complete skill definition for this task based on the object's visual appearance.
+                    First determine the specific subtype of action needed based on the object's
+                    characteristics, then generate the complete skill definition including
+                    primitive sequence, parameters, prerequisites, and constraints.
+                    """},
+                    {"type": "image_url", "image_url": {
+                        "url": f"data:image/png;base64,{self._encode_image(masked_image)}"
+                    }}
+                ]}
+            ]
+    '''
+
+
     async def generate_skill(self, 
                            image: np.ndarray,
                            mask: np.ndarray,
@@ -87,6 +168,13 @@ class SkillGenerator:
         Returns:
             Generated skill if successful, None otherwise
         """
+        # Create masked image
+        try:
+            self._validate_input_dimensions(image, mask)
+        except ValueError as e:
+            print(f"Input validation failed: {e}")
+            return None
+            
         # Create masked image
         masked_image = image.copy()
         masked_image[~mask] = 0
@@ -107,16 +195,14 @@ class SkillGenerator:
                 "skill_name": "specific_action_name_with_mechanism",
                 "primitive_sequence": [
                     "list of primitive actions using only these commands:",
-                    "apply_force(direction, keywords)",
-                        "direction: one of [up, down, left, right, push, pull] relative to object surface",
-                        "keywords: list of descriptive words to identify the component (e.g., [handle, knob, button])",
-                    "apply_torque(axis, keywords)",
-                        "axis: one of [clockwise, counterclockwise] relative to object surface",
-                        "keywords: list of descriptive words to identify the component",
+                    "push(distance)",
+                        "distance: approximate distance to push in meters",
+                    "pull(distance)",
+                        "distance: approximate distance to pull in meters",
                     "close_gripper()",
                     "release()",
                     "moveGripperToPose(keywords)",
-                        "keywords: list of descriptive words for the target pose location",
+                        "keywords: list of individual descriptive words for the target pose location",
                     "retractGripper()"
                 ],
                 "parameters": {{
@@ -131,7 +217,9 @@ class SkillGenerator:
                     "list of safety limits and constraints"
                 ]
             }}
-            
+            Note: - push and pull will always be applied directly outwards or inwards relative to the direction the gripper is currently pointing.
+                  - when grasping an object moveGripperToPose should be provided keywords indicating the tool center point positioning for the grasp.
+                  - keywords should be provided in the following format: ['keyword1', ...]
             Base all values on the visual appearance of the object.
             Return only the raw JSON object with no additional text."""},
             {"role": "user", "content": [

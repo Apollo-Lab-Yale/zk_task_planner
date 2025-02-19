@@ -15,26 +15,27 @@ from ultralytics.models.fastsam import FastSAMPredictor
 @dataclass
 class FastSAMConfig:
     """Configuration settings for FastSAM with CLIP filtering"""
-    model_type: str = "FastSAM-x"  # FastSAM-s or FastSAM-x
+    model_type: str = "FastSAM-x"  # FastSAM-x has better detection than FastSAM-s
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    
     # Memory management
     max_image_size: int = 640
     enable_memory_efficient_attention: bool = False
     
-    # FastSAM parameters
-    conf_threshold: float = 0.4
-    iou_threshold: float = 0.75
+    # FastSAM parameters - tuned for more detections
+    conf_threshold: float = 0.2  # Lowered from 0.4 to get more initial detections
+    iou_threshold: float = 0.5   # Lowered from 0.9 to allow more overlapping detections
     retina_masks: bool = True
     
     # CLIP parameters
     clip_model: str = "ViT-B-32"
-    clip_threshold: float = 0.85
+    clip_threshold: float = 0.7  # Lowered from 0.85 to accept more matches
     
     # Post-processing parameters
     remove_small_regions: bool = True
-    merge_overlapping: bool = False
+    merge_overlapping: bool = False  # Disabled merging to keep more separate detections
     overlap_threshold: float = 0.5
-    min_area: float = 10.0
+    min_area: float = 5.0  # Lowered from 10.0 to keep smaller regions
     draw_borders: bool = True
 
 class FastSAMWithCLIP:

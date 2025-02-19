@@ -114,8 +114,8 @@ class SkillHandler:
         return self._instantiate_skill(skill, object_info)
 
     def _identify_interaction_points(self, 
-                                  object_info: ObjectInfo,
-                                  keywords: List[str]) -> Dict[str, np.ndarray]:
+                                object_info: ObjectInfo,
+                                keywords: List[str]) -> Dict[str, np.ndarray]:
         """
         Identify 3D interaction points on the object for given keywords
         
@@ -131,30 +131,36 @@ class SkillHandler:
         # Get original mask shape for later resizing
         original_mask_shape = object_info.mask.shape
         
+        # Resize object image to match FastSAM input size
+        max_image_size = self.perception_system.segmenter.config.max_image_size
+        resized_image = cv2.resize(
+            object_info.image,
+            (max_image_size, max_image_size),
+            interpolation=cv2.INTER_LINEAR
+        )
+        
         # For each keyword, detect the relevant part using perception system
         for keyword in keywords:
             # Process image for specific part detection
             labeled_masks, metadata = self.perception_system.segmenter.process_image(
-                object_info.image,
+                resized_image,
                 query=f"a {keyword} of the object"
             )
             
-            # Find the mask with highest CLIP score that overlaps with object mask
+            # Find the mask with highest CLIP score
             best_score = 0
             best_point = None
             
             for mask_id, meta in metadata.items():
                 component_mask = labeled_masks == mask_id
                 
-                # Resize component mask to match object mask size if different
-                if component_mask.shape != original_mask_shape:
-                    component_mask = cv2.resize(
-                        component_mask.astype(np.uint8),
-                        (original_mask_shape[1], original_mask_shape[0]),
-                        interpolation=cv2.INTER_NEAREST
-                    ).astype(bool)
+                # Resize component mask to match original image dimensions
+                component_mask = cv2.resize(
+                    component_mask.astype(np.uint8),
+                    (original_mask_shape[1], original_mask_shape[0]),
+                    interpolation=cv2.INTER_NEAREST
+                ).astype(bool)
                 
-                # Now both masks should be the same size
                 if np.logical_and(component_mask, object_info.mask).any():
                     score = meta.get('clip_score', 0)
                     if score > best_score:
@@ -199,6 +205,7 @@ class SkillHandler:
         # Convert each parsed primitive to executable action
         action_sequence = []
         for primitive in parsed_primitives:
+            print(primitive)
             executable_action = self._convert_parsed_primitive_to_executable(
                 primitive,
                 object_pose,
@@ -233,7 +240,9 @@ class SkillHandler:
         """Convert parsed primitive to executable action"""
         action_type = parsed_primitive.action_type
         parameters = parsed_primitive.parameters
-        
+        if 'keywords' not in parameters:
+            parameters['keywords'] = []
+            
         if action_type == 'apply_force':
             return self._create_force_action(
                 direction=parameters['direction'],
@@ -256,7 +265,7 @@ class SkillHandler:
                 interaction_points=interaction_points,
                 skill_parameters=skill_parameters
             )
-        elif action_type == 'grasp':
+        elif action_type == 'close_gripper':
             return self._create_grasp_action(
                 keywords=parameters['keywords'],
                 interaction_points=interaction_points,
@@ -347,14 +356,14 @@ class SkillHandler:
                            interaction_points: Dict[str, np.ndarray],
                            skill_parameters: Dict[str, Any]) -> Optional[ExecutableAction]:
         """Create grasp action with parsed parameters"""
-        target_point = None
-        for keyword in keywords:
-            if keyword in interaction_points:
-                target_point = interaction_points[keyword]
-                break
+        # target_point = None
+        # for keyword in keywords:
+        #     if keyword in interaction_points:
+        #         target_point = interaction_points[keyword]
+        #         break
                 
-        if target_point is None:
-            return None
+        # if target_point is None:
+        #     return None
             
         return ExecutableAction(
             action_type='grasp',
