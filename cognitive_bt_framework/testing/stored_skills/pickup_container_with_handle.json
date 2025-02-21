@@ -1,0 +1,24 @@
+{
+  "name": "pickup_container_with_handle",
+  "abstract_action": "pickup",
+  "target_object": "container",
+  "primitive_sequence": [
+    "moveGripperToPose(['handle'], true)",
+    "close_gripper()",
+    "retractGripper()"
+  ],
+  "parameters": {
+    "force_threshold": "medium",
+    "precision_required": "high",
+    "speed_requirement": "slow"
+  },
+  "prerequisites": [
+    "Robot must be capable of precision grasping.",
+    "Robot must have a gripper that can adjust to different handle sizes."
+  ],
+  "constraints": [
+    "Ensure the gripper does not apply excessive force to avoid damaging the handle.",
+    "Avoid collision with nearby objects during the pickup maneuver."
+  ],
+  "image_id": "pickup_container_c3f1c4"
+}

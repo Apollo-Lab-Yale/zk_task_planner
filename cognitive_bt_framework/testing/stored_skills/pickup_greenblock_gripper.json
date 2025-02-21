@@ -1,0 +1,26 @@
+{
+  "name": "pickup_greenblock_gripper",
+  "abstract_action": "pickup",
+  "target_object": "green block",
+  "primitive_sequence": [
+    "moveGripperToPose(['green', 'block'], true)",
+    "close_gripper()",
+    "retractGripper()"
+  ],
+  "parameters": {
+    "force_threshold": "low",
+    "precision_required": "high",
+    "speed_requirement": "medium"
+  },
+  "prerequisites": [
+    "Robot arm must be calibrated and functional",
+    "Gripper must be operational and suitable for the size of the green block",
+    "The green block must be within reachable distance and not obstructed"
+  ],
+  "constraints": [
+    "Avoid collision with the surface or any nearby objects",
+    "Ensure stable grip to prevent dropping the block",
+    "Do not apply excessive force that could damage the green block"
+  ],
+  "image_id": "pickup_green block_2d0701"
+}

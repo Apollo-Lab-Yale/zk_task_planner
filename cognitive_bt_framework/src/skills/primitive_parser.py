@@ -14,21 +14,20 @@ class PrimitiveParser:
     
     # Regex patterns for different primitive types
     PATTERNS = {
-        'apply_force': re.compile(
-            r'apply_force\('
-            r'(?P<direction>up|down|left|right|push|pull)'
-            r',\s*\[(?P<keywords>[^\]]+)\]'
+        'push': re.compile(
+            r'push\('
+            r'(?P<distance>\d*\.?\d+)'
             r'\)'
         ),
-        'apply_torque': re.compile(
-            r'apply_torque\('
-            r'(?P<axis>clockwise|counterclockwise)'
-            r',\s*\[(?P<keywords>[^\]]+)\]'
+        'pull': re.compile(
+            r'pull\('
+            r'(?P<distance>\d*\.?\d+)'
             r'\)'
         ),
-        'go_to_obj': re.compile(
-            r'go_to_obj\('
+        'moveGripperToPose': re.compile(
+            r'moveGripperToPose\('
             r'\[(?P<keywords>[^\]]+)\]'
+            r'(?:,\s*(?P<is_grasp>true|false))?'
             r'\)'
         ),
         'close_gripper': re.compile(
@@ -36,11 +35,6 @@ class PrimitiveParser:
         ),
         'release': re.compile(
             r'release\(\)'
-        ),
-        'moveGripperToPose': re.compile(
-            r'moveGripperToPose\('
-            r'\[(?P<keywords>[^\]]+)\]'
-            r'\)'
         ),
         'retractGripper': re.compile(
             r'retractGripper\(\)'
@@ -60,9 +54,9 @@ class PrimitiveParser:
             
         Examples:
             >>> parser = PrimitiveParser()
-            >>> primitive = parser.parse_primitive("apply_force(push, [button])")
-            >>> print(primitive.action_type)  # 'apply_force'
-            >>> print(primitive.parameters)   # {'direction': 'push', 'keywords': ['button']}
+            >>> primitive = parser.parse_primitive("push(0.1)")
+            >>> print(primitive.action_type)  # 'push'
+            >>> print(primitive.parameters)   # {'distance': 0.1}
         """
         # Clean the input string
         primitive_str = primitive_str.strip()
@@ -87,14 +81,23 @@ class PrimitiveParser:
         # Process keywords if present
         if 'keywords' in match_dict:
             keywords_str = match_dict['keywords']
-            keywords = [k.strip() for k in keywords_str.split(',')]
+            # Handle both quoted and unquoted keywords
+            keywords = []
+            for k in keywords_str.split(','):
+                k = k.strip()
+                # Remove quotes if present
+                if (k.startswith("'") and k.endswith("'")) or (k.startswith('"') and k.endswith('"')):
+                    k = k[1:-1]
+                keywords.append(k)
             parameters['keywords'] = keywords
-        
-        # Add other parameters based on action type
-        if action_type == 'apply_force':
-            parameters['direction'] = match_dict['direction']
-        elif action_type == 'apply_torque':
-            parameters['axis'] = match_dict['axis']
+            
+        # Process distance for push/pull
+        if 'distance' in match_dict:
+            parameters['distance'] = float(match_dict['distance'])
+            
+        # Process is_grasp for moveGripperToPose
+        if 'is_grasp' in match_dict and match_dict['is_grasp'] is not None:
+            parameters['is_grasp'] = match_dict['is_grasp'].lower() == 'true'
             
         return ParsedPrimitive(
             action_type=action_type,
@@ -147,20 +150,22 @@ class PrimitiveParser:
             Formatted primitive string
             
         Examples:
-            >>> PrimitiveParser.format_primitive('apply_force', direction='push', keywords=['button'])
-            "apply_force(push, [button])"
+            >>> PrimitiveParser.format_primitive('push', distance=0.1)
+            "push(0.1)"
+            >>> PrimitiveParser.format_primitive('moveGripperToPose', keywords=['top', 'handle'], is_grasp=True)
+            "moveGripperToPose(['top', 'handle'], true)"
         """
         if action_type in ['close_gripper', 'release', 'retractGripper']:
             return f"{action_type}()"
             
-        if action_type == 'apply_force':
-            return f"{action_type}({kwargs['direction']}, [{', '.join(kwargs['keywords'])}])"
+        if action_type in ['push', 'pull']:
+            return f"{action_type}({kwargs['distance']})"
             
-        if action_type == 'apply_torque':
-            return f"{action_type}({kwargs['axis']}, [{', '.join(kwargs['keywords'])}])"
-            
-        if 'keywords' in kwargs:
-            return f"{action_type}([{', '.join(kwargs['keywords'])}])"
+        if action_type == 'moveGripperToPose':
+            base = f"{action_type}([{', '.join(kwargs['keywords'])}])"
+            if 'is_grasp' in kwargs:
+                base = base[:-1] + f", is_grasp={str(kwargs['is_grasp']).lower()})"
+            return base
             
         return f"{action_type}()"
 
@@ -170,11 +175,11 @@ def test_primitive_parser():
     
     # Test cases
     test_primitives = [
-        "apply_force(push, [button, switch])",
-        "apply_torque(clockwise, [knob])",
-        "go_to_obj([handle])",
-        "close_gripper()",
+        "push(0.1)",
+        "pull(0.05)",
+        "moveGripperToPose([top, handle], is_grasp=true)",
         "moveGripperToPose([approach_point])",
+        "close_gripper()",
         "release()",
         "retractGripper()"
     ]
@@ -200,11 +205,11 @@ def test_primitive_parser():
     # Test primitive formatting
     print("\nTesting primitive formatting...")
     test_cases = [
-        ('apply_force', {'direction': 'push', 'keywords': ['button']}),
-        ('apply_torque', {'axis': 'clockwise', 'keywords': ['knob']}),
-        ('go_to_obj', {'keywords': ['handle']}),
-        ('close_gripper', {}),
+        ('push', {'distance': 0.1}),
+        ('pull', {'distance': 0.05}),
+        ('moveGripperToPose', {'keywords': ['top', 'handle'], 'is_grasp': True}),
         ('moveGripperToPose', {'keywords': ['approach_point']}),
+        ('close_gripper', {}),
         ('release', {}),
         ('retractGripper', {})
     ]

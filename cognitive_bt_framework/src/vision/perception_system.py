@@ -17,6 +17,7 @@ class ObjectInfo:
     bbox: List[int]  # [x, y, w, h]
     confidence: float
     pose: Optional[np.ndarray] = None  # 6D pose [x, y, z, roll, pitch, yaw]
+    pixel_pose: Optional[np.ndarray] = None  # 2D pose corresponding to pixel in image [x, y]
     
 
 class PerceptionSystem:
@@ -165,8 +166,9 @@ class PerceptionSystem:
                         (original_width, original_height),
                         interpolation=cv2.INTER_NEAREST
                     )
-                pose = self._estimate_object_pose(mask, depth_image)
+                pose, pixel_pose = self._estimate_object_pose(mask, depth_image)
                 object_info.pose = pose
+                object_info.pixel_pose = pixel_pose
                 
             # Cache result
             self._object_cache[cache_key] = object_info
@@ -227,16 +229,18 @@ class PerceptionSystem:
         self,
         mask: np.ndarray,
         depth_image: np.ndarray
-    ) -> np.ndarray:
+    ) -> Tuple[np.ndarray, Tuple[int, int]]:
         """
-        Estimate 6D pose using depth information
+        Estimate 6D pose and 2D pixel location using depth information
         
         Args:
             mask: Binary mask of the object
             depth_image: Depth image aligned with RGB
             
         Returns:
-            6D pose array [x, y, z, roll, pitch, yaw]
+            Tuple containing:
+            - 6D pose array [x, y, z, roll, pitch, yaw]
+            - 2D pixel coordinates (x, y) in the camera frame
         """
         # Ensure mask and depth image have same dimensions
         if mask.shape != depth_image.shape:
@@ -250,7 +254,7 @@ class PerceptionSystem:
         # Get object points
         y_coords, x_coords = np.where(mask)
         if len(y_coords) == 0:
-            return np.zeros(6)
+            return np.zeros(6), (0, 0)
             
         # Get corresponding depth values
         try:
@@ -258,12 +262,12 @@ class PerceptionSystem:
         except IndexError as e:
             print(f"IndexError in _estimate_object_pose: mask shape {mask.shape}, "
                 f"depth shape {depth_image.shape}, coords max ({np.max(y_coords)}, {np.max(x_coords)})")
-            return np.zeros(6)
+            return np.zeros(6), (0, 0)
         
         # Filter out invalid depth values
         valid = depth_values > 0
         if not valid.any():
-            return np.zeros(6)
+            return np.zeros(6), (0, 0)
             
         x_coords = x_coords[valid]
         y_coords = y_coords[valid]
@@ -275,16 +279,23 @@ class PerceptionSystem:
         points_3d[:, 1] = (y_coords - self.camera_matrix[1, 2]) * depth_values / self.camera_matrix[1, 1]
         points_3d[:, 2] = depth_values
         
+        # Calculate centroid
+        centroid = np.mean(points_3d, axis=0)
+        
+        # Project 3D centroid back to 2D
+        pixel_x = int((centroid[0] * self.camera_matrix[0, 0]) / centroid[2] + self.camera_matrix[0, 2])
+        pixel_y = int((centroid[1] * self.camera_matrix[1, 1]) / centroid[2] + self.camera_matrix[1, 2])
+        
+        # Ensure pixels are within image bounds
+        pixel_x = max(0, min(pixel_x, depth_image.shape[1] - 1))
+        pixel_y = max(0, min(pixel_y, depth_image.shape[0] - 1))
+        
         # Handle case where we don't have enough points for PCA
         if len(points_3d) < 3:
             # Return position only with zero rotation
-            centroid = np.mean(points_3d, axis=0)
-            return np.array([centroid[0], centroid[1], centroid[2], 0.0, 0.0, 0.0])
+            return np.array([centroid[0], centroid[1], centroid[2], 0.0, 0.0, 0.0]), (pixel_x, pixel_y)
         
-        # Calculate centroid and orientation
-        centroid = np.mean(points_3d, axis=0)
-        
-        # Estimate orientation using PCA
+        # Calculate orientation using PCA
         centered_points = points_3d - centroid
         try:
             covariance_matrix = np.cov(centered_points.T)
@@ -302,7 +313,8 @@ class PerceptionSystem:
             # Fallback to zero rotation if PCA fails
             roll, pitch, yaw = 0.0, 0.0, 0.0
         
-        return np.array([centroid[0], centroid[1], centroid[2], roll, pitch, yaw])
+        pose_6d = np.array([centroid[0], centroid[1], centroid[2], roll, pitch, yaw])
+        return pose_6d, (pixel_x, pixel_y)
             
     def _estimate_basic_pose(self, mask: np.ndarray) -> np.ndarray:
         """

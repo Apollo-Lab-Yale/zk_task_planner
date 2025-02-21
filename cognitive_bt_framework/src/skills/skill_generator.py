@@ -201,8 +201,16 @@ class SkillGenerator:
                         "distance: approximate distance to pull in meters",
                     "close_gripper()",
                     "release()",
-                    "moveGripperToPose(keywords)",
-                        "keywords: list of individual descriptive words for the target pose location",
+                    "moveGripperToPose(keywords, is_grasp)",
+                        "keywords: List of descriptive terms identifying either:
+                                - The target object (e.g., ['cube', 'box', 'package'] for a box-shaped object)
+                                - A specific component of the object (e.g., ['toggle', 'switch'] for a light switch,
+                                    ['handle', 'knob', 'grip'] for a door handle)
+                                These terms are used to identify and locate the target for gripper positioning",
+                        "is_grasp: Boolean parameter indicating whether this movement is intended for grasping:
+                                - true: The system will plan a grasp-oriented approach to the target
+                                - false: The system will plan a general approach to interact with the target
+                                (When true, the grasp planner will sample appropriate grasp poses)"
                     "retractGripper()"
                 ],
                 "parameters": {{

@@ -1,0 +1,26 @@
+{
+  "name": "pickup_box_gripper",
+  "abstract_action": "pickup",
+  "target_object": "green box",
+  "primitive_sequence": [
+    "moveGripperToPose(['box', 'green'], true)",
+    "close_gripper()",
+    "retractGripper()"
+  ],
+  "parameters": {
+    "force_threshold": "medium",
+    "precision_required": "high",
+    "speed_requirement": "medium"
+  },
+  "prerequisites": [
+    "Gripper must be calibrated and functional",
+    "Robot must have sufficient workspace to reach the box",
+    "Box must be free of obstructions for successful gripping"
+  ],
+  "constraints": [
+    "Avoid collisions with other objects in the environment",
+    "Ensure the gripper force does not crush or deform the box",
+    "Maintain stable robot posture during the pickup to prevent tipping"
+  ],
+  "image_id": "pickup_green box_914bb7"
+}

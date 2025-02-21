@@ -1,0 +1,24 @@
+{
+  "name": "pickup_box_standard",
+  "abstract_action": "pickup",
+  "target_object": "box",
+  "primitive_sequence": [
+    "moveGripperToPose(['box'], true)",
+    "close_gripper()",
+    "retractGripper()"
+  ],
+  "parameters": {
+    "force_threshold": "medium",
+    "precision_required": "medium",
+    "speed_requirement": "medium"
+  },
+  "prerequisites": [
+    "Robot must be able to reach the box",
+    "Box must be free of obstructions for grasping"
+  ],
+  "constraints": [
+    "Ensure the gripper does not crush the box",
+    "Avoid collision with surrounding objects"
+  ],
+  "image_id": "pickup_box_5245fe"
+}

@@ -48,11 +48,23 @@ async def test_skill_handler():
         color_image, depth_image = frames
         
         action = 'pickup'
-        target_object = 'container'
+        target_object = 'green block'
 
         print("\nProcessing request...")
         print(f"Target: {target_object}")
         print(f"Action: {action}")
+        
+        # First detect the object
+        print("\nDetecting object...")
+        object_info = perception_system.detect_object(
+            target_object,
+            color_image,
+            depth_image
+        )
+        
+        if object_info is None:
+            print(f"\nFailed to detect {target_object}")
+            return
 
         # Try to instantiate skill
         try:
@@ -77,9 +89,15 @@ async def test_skill_handler():
                 print(f"  Position: {action.position}")
                 print(f"  Orientation: {action.orientation}")
                 print(f"  Parameters: {action.parameters}")
+                if hasattr(action, 'pixel_position'):
+                    print(f"  Pixel Position: {action.pixel_position}")
+
+            # Visualize object detection
+            object_vis = perception_system.visualize_detection(color_image, object_info)
+            cv2.imshow("Object Detection", object_vis)
 
             # Visualize the skill
-            vis_image = skill_handler.visualize_skill(skill, color_image)
+            vis_image = skill_handler.visualize_skill(skill, color_image, object_info)
             
             # Show visualization
             cv2.imshow("Skill Visualization", vis_image)
