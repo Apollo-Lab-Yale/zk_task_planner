@@ -37,7 +37,7 @@ def main():
         )
 
         # List of objects to detect
-        target_objects = ["container"]
+        target_objects = ["pen"]
         current_target_idx = 0
 
         while True:

@@ -1,0 +1,14 @@
+Performance data for query: pen
+Device: cuda
+Model: FastSAM-x
+
+Section                   Calls    Total(s)   Avg(ms)    Min(ms)    Max(ms)   
+--------------------------------------------------------------------------------
+total_processing          1        29.354     29353.8    29353.8    29353.8   
+fastsam_process           1        29.294     29294.5    29294.5    29294.5   
+fastsam_initialization    1        12.188     12188.2    12188.2    12188.2   
+camera_initialization     1        0.377      376.9      376.9      376.9     
+visualization             1        0.059      58.8       58.8       58.8      
+save_result               1        0.021      21.4       21.4       21.4      
+wait_for_valid_frame      1        0.000      0.1        0.1        0.1       
+camera_get_frames         1        0.000      0.1        0.1        0.1       

@@ -8,11 +8,11 @@ from typing import Optional, Tuple, Union
 
 
 class Camera:
-    def __init__(self, width: int = 640, height: int = 480, fps: int = 30):
+    def __init__(self, width: int = 640, height: int = 480, fps: int = 30, debug=False):
         self.width = width
         self.height = height
         self.fps = fps
-
+        self.debug=debug
         # Core RealSense components
         self.pipeline = rs.pipeline()
         self.config = rs.config()
@@ -75,7 +75,8 @@ class Camera:
                         pass
 
             except RuntimeError as e:
-                print(f"Frame acquisition error: {e}")
+                if self.debug:
+                    print(f"Frame acquisition error: {e}")
                 time.sleep(0.1)
 
     def get_frames(self) -> Optional[Tuple[np.ndarray, np.ndarray]]:

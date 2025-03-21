@@ -1,0 +1,38 @@
+Detailed Performance Report
+Query: pen
+Iterations: 1
+Device: cuda
+Model: FastSAM-x
+
+FastSAM Processing Statistics:
+  Average: 25594.33 ms
+  Min: 23182.66 ms
+  Max: 28006.01 ms
+  FPS: 0.04
+
+TEST SCRIPT TIMING SUMMARY:
+Section                        Calls    Total(s)   Avg(s)     Min(s)     Max(s)    
+-------------------------------------------------------------------------------------
+total_processing               1        23.189     25.608     23.189     28.028    
+fastsam_process                1        23.183     25.594     23.183     28.006    
+visualization                  1        0.006      0.014      0.006      0.022     
+depth_colormap                 1        0.001      0.004      0.001      0.007     
+blend_overlay                  1        0.001      0.002      0.001      0.004     
+stack_images                   1        0.000      0.001      0.000      0.001     
+
+
+FASTSAM INTERNAL TIMING SUMMARY:
+Section                        Calls    Total(s)   Avg(s)     Min(s)     Max(s)    
+-------------------------------------------------------------------------------------
+process_image                  1        23.182     25.593     23.182     28.004    
+process_results                1        23.118     23.702     23.118     24.285    
+_process_results               1        23.118     23.702     23.118     24.285    
+process_masks                  1        23.118     23.701     23.118     24.285    
+clip_filtering                 75       23.114     23.694     23.114     24.273    
+get_clip_score                 75       22.877     23.448     22.877     24.018    
+clip_inference                 75       22.418     22.998     22.418     23.578    
+fastsam_inference              1        0.064      1.891      0.064      3.719     
+prepare_image                  75       0.406      0.392      0.379      0.406     
+compute_bbox                   75       0.110      0.111      0.110      0.113     
+mask_to_numpy                  75       0.061      0.063      0.061      0.066     
+prepare_text                   75       0.045      0.048      0.045      0.052     
