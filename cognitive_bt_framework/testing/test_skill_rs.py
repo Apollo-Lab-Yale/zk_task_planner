@@ -20,9 +20,10 @@ async def test_skill_handler():
         config = FastSAMConfig(
             model_type="FastSAM-x",
             conf_threshold=0.25,
-            iou_threshold=0.25,
-            clip_threshold=0.6,
-            min_area=1.0
+            iou_threshold=0.5,
+            clip_threshold=0.5,
+            min_area=1.0,
+            debug=False
         )
         
         perception_system = PerceptionSystem(config)
@@ -48,7 +49,7 @@ async def test_skill_handler():
         color_image, depth_image = frames
         
         action = 'pickup'
-        target_object = 'green block'
+        target_object = 'pen'
 
         print("\nProcessing request...")
         print(f"Target: {target_object}")
@@ -59,7 +60,7 @@ async def test_skill_handler():
         object_info = perception_system.detect_object(
             target_object,
             color_image,
-            depth_image
+            depth_image=depth_image
         )
         
         if object_info is None:

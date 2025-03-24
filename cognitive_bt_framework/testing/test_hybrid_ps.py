@@ -38,7 +38,7 @@ def create_optimized_configs():
     fast_sam_config = FastSAMConfig(
         model_type="FastSAM-x",
         device="cuda" if torch.cuda.is_available() else "cpu",
-        clip_threshold=0.6,
+        clip_threshold=0.3,
         min_area=1.0,
         merge_overlapping=False,
         run_time_profile=False
@@ -367,7 +367,6 @@ def main():
                     segment=True,
                     depth_image=depth_image
                 )
-                
                 if object_info is not None:
                     objects = [object_info]
                     selected_object = object_info
@@ -449,7 +448,6 @@ def main():
             else:
                 # Use normal segmentation visualization
                 seg_vis = create_segmentation_visualization(color_image, objects)
-                
             # Add mode and status information
             # Add header text to main image
             mode_text = f"Mode: {detection_mode.capitalize()}"

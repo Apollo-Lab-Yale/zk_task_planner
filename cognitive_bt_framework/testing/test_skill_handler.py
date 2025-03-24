@@ -24,7 +24,7 @@ async def test_stove_interaction():
         model_type="FastSAM-x",
         conf_threshold=0.4,
         iou_threshold=0.75,
-        clip_threshold=0.85
+        clip_threshold=0.3
     )
     
     # Initialize perception system

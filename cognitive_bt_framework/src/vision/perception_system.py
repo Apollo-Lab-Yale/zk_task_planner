@@ -26,13 +26,14 @@ class ObjectInfo:
     pose: Optional[np.ndarray] = None  # 6D pose [x, y, z, roll, pitch, yaw]
     pixel_pose: Optional[np.ndarray] = None  # 2D pose corresponding to pixel in image [x, y]
     components: Dict[str, 'ObjectInfo'] = None  # Store detected components within this object
+    depth_image: Optional[np.ndarray] = None
     
 
 class PerceptionSystem:
     def __init__(
         self,
+        fast_sam_config: Optional[FastSAMConfig],
         yolo_model_path: str = 'yolov8x-worldv2.pt',
-        fast_sam_config: Optional[FastSAMConfig] = None,
         camera_matrix: Optional[np.ndarray] = None,
         depth_scale: float = 0.001,  # Default for most depth cameras (m/unit)
         default_conf: float = 0.5,
@@ -111,8 +112,8 @@ class PerceptionSystem:
         self,
         image: np.ndarray,
         classes: Optional[List[str]] = None,
-        conf: Optional[float] = None,
-        segment: bool = False,
+        conf: Optional[float] = 0.5,
+        segment: bool = True,
         depth_image: Optional[np.ndarray] = None,
     ) -> List[ObjectInfo]:
         """
@@ -176,20 +177,22 @@ class PerceptionSystem:
                     name=class_name,
                     bbox=bbox,
                     confidence=confidence,
-                    image=image
+                    image=image,
+                    depth_image=depth_image
                 )
                 
                 # Generate segmentation mask if requested
-                if segment and self.segmenter is not None:
-                    if self.debug:
-                        self.profiler.start(f"segment_obj_{i}")
-                        print(f"Generating segmentation for object {i} ({class_name})")
-                    
-                    mask = self._generate_segmentation(image, obj_info, class_name)
-                    obj_info.mask = mask
-                    
-                    if self.debug:
-                        self.profiler.stop(f"segment_obj_{i}")
+                if self.debug:
+                    self.profiler.start(f"segment_obj_{i}")
+                    print(f"Generating segmentation for object {i} ({class_name})")
+                
+                mask = self._generate_segmentation(image, obj_info, class_name)
+                if mask is None:
+                    raise Exception("Failed to generate mask for object.")
+                obj_info.mask = mask
+                
+                if self.debug:
+                    self.profiler.stop(f"segment_obj_{i}")
                 
                 # Estimate pose if depth image is provided
                 if depth_image is not None:
@@ -235,7 +238,7 @@ class PerceptionSystem:
         self,
         target_object: str,
         image: np.ndarray,
-        conf: Optional[float] = None,
+        conf: Optional[float] = 0.5,
         segment: bool = True,
         depth_image: Optional[np.ndarray] = None,
     ) -> Optional[ObjectInfo]:
@@ -344,7 +347,17 @@ class PerceptionSystem:
             if self.debug:
                 self.profiler.start("extract_roi")
                 
-            roi = object_info.image[y:y+h, x:x+w]
+            # Add a small padding around the object for better component detection
+            pad = int(max(w, h) * 0.05)  # 5% padding
+            x_roi = max(0, x - pad)
+            y_roi = max(0, y - pad)
+            w_roi = min(object_info.image.shape[1] - x_roi, w + 2*pad)
+            h_roi = min(object_info.image.shape[0] - y_roi, h + 2*pad)
+            
+            # Store ROI coordinates
+            roi_coords = (x_roi, y_roi, w_roi, h_roi)
+            
+            roi = object_info.image[y_roi:y_roi+h_roi, x_roi:x_roi+w_roi]
             if roi.size == 0:
                 if self.debug:
                     print(f"Invalid ROI with dimensions {roi.shape}")
@@ -358,7 +371,12 @@ class PerceptionSystem:
                 self.profiler.start("component_segmentation")
                 
             query = f"a {component_name}"
-            labeled_masks, metadata = self.segmenter.process_image(roi, query=query)
+            labeled_masks, metadata = self.segmenter.process_image(
+                roi, 
+                query=query,
+                roi_coords=roi_coords,
+                store_results=True
+            )
             
             if self.debug:
                 self.profiler.stop("component_segmentation")
@@ -402,7 +420,7 @@ class PerceptionSystem:
             component_full_mask = np.zeros(object_info.image.shape[:2], dtype=bool)
             
             # Place ROI mask in the correct position in the full image
-            component_full_mask[y:y+h, x:x+w] = component_roi_mask
+            component_full_mask[y_roi:y_roi+h_roi, x_roi:x_roi+w_roi] = component_roi_mask
             
             if self.debug:
                 self.profiler.stop("process_component_mask")
@@ -577,18 +595,78 @@ class PerceptionSystem:
             # Extract the region of interest
             x, y, w, h = obj_info.bbox
             
+            if self.debug:
+                print(f"Generating segmentation for '{prompt}' with bbox: x={x}, y={y}, w={w}, h={h}")
+            
+            # Check for invalid bounding box
+            if w <= 0 or h <= 0:
+                if self.debug:
+                    print(f"Invalid bounding box dimensions: w={w}, h={h}")
+                return None
+                
+            # Check if bbox is outside image bounds
+            if x >= image.shape[1] or y >= image.shape[0]:
+                if self.debug:
+                    print(f"Bounding box outside image bounds: x={x}, y={y}, image={image.shape}")
+                return None
+            
             # Expand the region slightly to ensure we capture the full object
             x_expand = max(0, x - int(w * 0.1))
             y_expand = max(0, y - int(h * 0.1))
             w_expand = min(image.shape[1] - x_expand, int(w * 1.2))
             h_expand = min(image.shape[0] - y_expand, int(h * 1.2))
             
+            # Store ROI coordinates for later use
+            roi_coords = (x_expand, y_expand, w_expand, h_expand)
+            
+            if self.debug:
+                print(f"Expanded ROI: x={x_expand}, y={y_expand}, w={w_expand}, h={h_expand}")
+            
             # Extract expanded ROI
-            roi = image[y_expand:y_expand+h_expand, x_expand:x_expand+w_expand]
+            try:
+                roi = image[y_expand:y_expand+h_expand, x_expand:x_expand+w_expand].copy()
+                
+                if roi.size == 0:
+                    if self.debug:
+                        print("Empty ROI after extraction")
+                    return None
+                    
+                if self.debug:
+                    print(f"ROI shape: {roi.shape}")
+            except Exception as e:
+                if self.debug:
+                    print(f"Error extracting ROI: {e}")
+                return None
+            
+            # Ensure ROI is at least 16x16 pixels for FastSAM (minimum size requirement)
+            min_size = 16
+            if roi.shape[0] < min_size or roi.shape[1] < min_size:
+                if self.debug:
+                    print(f"ROI too small ({roi.shape}), resizing to minimum size")
+                roi = cv2.resize(roi, (max(min_size, roi.shape[1]), max(min_size, roi.shape[0])))
             
             # Run FastSAM on the ROI
             query = f"a {prompt}"
-            labeled_masks, metadata = self.segmenter.process_image(roi, query=query)
+            if self.debug:
+                print(f"Running FastSAM with query: '{query}'")
+                
+            # Use try-except to catch potential errors in the segmentation process
+            try:
+                labeled_masks, metadata = self.segmenter.process_image(
+                    roi, 
+                    query=query,
+                    roi_coords=roi_coords,
+                    store_results=True
+                )
+                
+                if self.debug:
+                    print(f"FastSAM returned {len(metadata)} masks")
+            except Exception as e:
+                if self.debug:
+                    print(f"Error in FastSAM processing: {e}")
+                    import traceback
+                    traceback.print_exc()
+                return None
             
             # Find best matching mask
             best_mask_id = None
@@ -596,6 +674,8 @@ class PerceptionSystem:
             
             for mask_id, meta in metadata.items():
                 score = meta.get('clip_score', 0)
+                if self.debug:
+                    print(f"  Mask {mask_id} score: {score:.3f}, area: {meta.get('area', 0):.0f}")
                 if score > best_score:
                     best_score = score
                     best_mask_id = mask_id
@@ -603,24 +683,80 @@ class PerceptionSystem:
             if best_mask_id is None:
                 if self.debug:
                     print(f"No mask found for '{prompt}' in ROI")
-                return None
+                    
+                # Create a fallback mask from the bounding box
+                if self.debug:
+                    print("Creating fallback mask from bounding box")
+                full_mask = np.zeros(image.shape[:2], dtype=bool)
+                full_mask[y:y+h, x:x+w] = True
+                return full_mask
                 
             # Get ROI mask
             roi_mask = labeled_masks == best_mask_id
+            
+            # Check if mask is empty
+            if not np.any(roi_mask):
+                if self.debug:
+                    print(f"Empty mask for best match (ID: {best_mask_id})")
+                    
+                # Create a fallback mask from the bounding box
+                if self.debug:
+                    print("Creating fallback mask from bounding box")
+                full_mask = np.zeros(image.shape[:2], dtype=bool)
+                full_mask[y:y+h, x:x+w] = True
+                return full_mask
             
             # Create a full image mask
             full_mask = np.zeros(image.shape[:2], dtype=bool)
             
             # Place ROI mask in the correct position in the full image
-            full_mask[y_expand:y_expand+h_expand, x_expand:x_expand+w_expand] = roi_mask
+            try:
+                full_mask[y_expand:y_expand+h_expand, x_expand:x_expand+w_expand] = roi_mask
+                
+                if self.debug:
+                    print(f"Created full mask with {np.sum(full_mask)} pixels")
+            except ValueError as e:
+                if self.debug:
+                    print(f"Error placing mask in full image: {e}")
+                    print(f"ROI shape: {roi_mask.shape}, Expected: {(h_expand, w_expand)}")
+                    print(f"Full image shape: {full_mask.shape}")
+                    
+                # Try to resize the mask to fit
+                try:
+                    resized_mask = cv2.resize(
+                        roi_mask.astype(np.uint8), 
+                        (w_expand, h_expand), 
+                        interpolation=cv2.INTER_NEAREST
+                    ).astype(bool)
+                    
+                    full_mask[y_expand:y_expand+h_expand, x_expand:x_expand+w_expand] = resized_mask
+                    
+                    if self.debug:
+                        print(f"Resized mask to fit ROI: {resized_mask.shape}")
+                except Exception as resize_err:
+                    if self.debug:
+                        print(f"Failed to resize mask: {resize_err}")
+                    # Fallback to bounding box mask
+                    full_mask[y:y+h, x:x+w] = True
             
             return full_mask
             
         except Exception as e:
             if self.debug:
                 print(f"Error in _generate_segmentation: {str(e)}")
+                import traceback
                 traceback.print_exc()
-            return None
+            
+            # Create a fallback mask from the bounding box as a last resort
+            try:
+                if self.debug:
+                    print("Creating emergency fallback mask from bounding box")
+                x, y, w, h = obj_info.bbox
+                full_mask = np.zeros(image.shape[:2], dtype=bool)
+                full_mask[y:y+h, x:x+w] = True
+                return full_mask
+            except:
+                return None
     
     def _estimate_object_pose(
         self,

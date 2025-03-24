@@ -1,0 +1,24 @@
+{
+  "name": "pickup_pen_precisionGrip",
+  "abstract_action": "pickup",
+  "target_object": "pen",
+  "primitive_sequence": [
+    "moveGripperToPose(['pen'], true)",
+    "close_gripper()",
+    "retractGripper()"
+  ],
+  "parameters": {
+    "force_threshold": "low",
+    "precision_required": "high",
+    "speed_requirement": "slow"
+  },
+  "prerequisites": [
+    "Robot must have a precision gripper capable of handling small, cylindrical objects.",
+    "Robot must be equipped with a vision system to accurately locate and identify the pen."
+  ],
+  "constraints": [
+    "Avoid excessive force to prevent damage to the pen.",
+    "Ensure the gripper is aligned properly to grasp the pen without slipping."
+  ],
+  "image_id": "pickup_pen_b9399a"
+}
