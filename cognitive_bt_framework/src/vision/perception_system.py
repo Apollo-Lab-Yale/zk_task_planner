@@ -79,10 +79,9 @@ class PerceptionSystem:
             
             # Initialize camera parameters
             if camera_matrix is None:
-                # Default camera matrix for 640x480 resolution
                 self.camera_matrix = np.array([
-                    [525.0, 0.0, 319.5],
-                    [0.0, 525.0, 239.5],
+                    [429.92523193359375, 0.0, 431.7160339355469],
+                    [0.0, 429.92523193359375, 233.39739990234375],
                     [0.0, 0.0, 1.0]
                 ])
             else:

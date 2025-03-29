@@ -173,7 +173,7 @@ class SkillHandler:
                         # Convert to 3D point if we have depth image
                         if hasattr(object_info, 'depth_image') and object_info.depth_image is not None:
                             point_3d, px_pt = self.perception_system._estimate_object_pose(
-                                pixel_pos=pixel_pos,
+                                object_info.mask,
                                 depth_image=object_info.depth_image
                             )
                             interaction_points[keyword] = point_3d
@@ -242,7 +242,7 @@ class SkillHandler:
                                             # Convert to 3D point if we have depth image
                                             if hasattr(object_info, 'depth_image') and object_info.depth_image is not None:
                                                 point_3d, px_pt = self.perception_system._estimate_object_pose(
-                                                    pixel_pos=pixel_pos,
+                                                    object_info.mask,
                                                     depth_image=object_info.depth_image
                                                 )
                                             else:
@@ -304,7 +304,7 @@ class SkillHandler:
                         # Convert to 3D point if we have depth image
                         if hasattr(object_info, 'depth_image') and object_info.depth_image is not None:
                             point_3d, px_pt = self.perception_system._estimate_object_pose(
-                                pixel_pos=pixel_pos,
+                                object_info.mask,
                                 depth_image=object_info.depth_image
                             )
                         else:
