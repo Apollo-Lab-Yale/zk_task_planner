@@ -802,14 +802,40 @@ class PerceptionSystem:
                 return np.zeros(6), (0, 0)
             
             # Filter out invalid depth values
-            valid = depth_values > 0
-            if not valid.any():
-                return np.zeros(6), (0, 0)
-                
-            x_coords = x_coords[valid]
-            y_coords = y_coords[valid]
-            depth_values = depth_values[valid]
+            # Apply statistical outlier filtering
+            MAX_DEPTH = 2.0  # Maximum reasonable depth in meters
+            MIN_DEPTH = 0.05  # Minimum reasonable depth in meters
             
+            # Filter out invalid readings and obvious outliers
+            valid = (depth_values > MIN_DEPTH) & (depth_values < MAX_DEPTH)
+            
+            # If we have enough valid points, apply statistical filtering
+            if np.sum(valid) > 10:
+                # Get valid depth values
+                valid_depths = depth_values[valid]
+                
+                # Calculate statistics
+                depth_mean = np.mean(valid_depths)
+                depth_std = np.std(valid_depths)
+                
+                # Filter values within reasonable standard deviation range
+                valid_range = (depth_values > depth_mean - 2.0 * depth_std) & \
+                            (depth_values < depth_mean + 2.0 * depth_std) & \
+                            valid  # Keep previous valid filter
+            else:
+                valid_range = valid
+            
+            # Check if we have enough valid points after filtering
+            if np.sum(valid_range) < 3:
+                if self.debug:
+                    print(f"Too few valid depth points: {np.sum(valid_range)}/{len(depth_values)}")
+                return np.zeros(6), (0, 0)
+            
+            # Use filtered values for further processing
+            x_coords = x_coords[valid_range]
+            y_coords = y_coords[valid_range]
+            depth_values = depth_values[valid_range]
+                    
             # If we have too many points, sample a subset for efficiency
             MAX_POINTS = 1000
             if len(depth_values) > MAX_POINTS:

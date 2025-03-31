@@ -23,7 +23,7 @@ class Camera:
         self.config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
 
         # Threading components
-        self._frame_queue = queue.Queue(maxsize=50)
+        self._frame_queue = queue.Queue(maxsize=5)
         self._running = False
         self._thread: Optional[threading.Thread] = None
 

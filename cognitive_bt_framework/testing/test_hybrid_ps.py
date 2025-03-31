@@ -413,7 +413,7 @@ def main():
                 for i, obj in enumerate(objects):
                     status = " (selected)" if obj == selected_object else ""
                     print(f"{i}: {obj.name} - Conf: {obj.confidence:.3f}{status}")
-                    
+                    print(f"Object position: {obj.pose}")
                     # Show component info if available
                     if obj.components:
                         print(f"  Components:")
