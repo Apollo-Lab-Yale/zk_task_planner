@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 @dataclass
 class ParsedPrimitive:
-    """Data class to store parsed primitive information"""
+    """Data class to store parsed primitive information with action type and parameters"""
     action_type: str
     parameters: Dict[str, Any]
     raw_string: str
@@ -16,28 +16,37 @@ class PrimitiveParser:
     PATTERNS = {
         'push': re.compile(
             r'push\('
-            r'(?P<distance>\d*\.?\d+)'
+            r'\[(?P<surface_keywords>[^\]]+)\]'
+            r'(?:,\s*(?:is_parallel_surface=)?(?P<is_parallel_surface>true|false))?'
+            r'(?:,\s*(?:is_bottom=)?(?P<is_bottom>true|false))?'
+            r'(?:,\s*(?:has_pivot=)?(?P<has_pivot>true|false))?'
+            r'(?:,\s*(?:pivot_point=)?(?P<pivot_point>[^)]+))?'
             r'\)'
         ),
         'pull': re.compile(
             r'pull\('
-            r'(?P<distance>\d*\.?\d+)'
+            r'\[(?P<surface_keywords>[^\]]+)\]'
+            r'(?:,\s*(?:is_parallel_surface=)?(?P<is_parallel_surface>true|false))?'
+            r'(?:,\s*(?:is_bottom=)?(?P<is_bottom>true|false))?'
+            r'(?:,\s*(?:has_pivot=)?(?P<has_pivot>true|false))?'
+            r'(?:,\s*(?:pivot_point=)?(?P<pivot_point>[^)]+))?'
             r'\)'
         ),
-        'moveGripperToPose': re.compile(
-            r'moveGripperToPose\('
+        'move_gripper_to_pose': re.compile(
+            r'move_gripper_to_pose\('
             r'\[(?P<keywords>[^\]]+)\]'
-            r'(?:,\s*(?P<is_grasp>true|false))?'
+            r'(?:,\s*(?:is_top_down_grasp=)?(?P<is_top_down_grasp>true|false))?'
+            r'(?:,\s*(?:is_side_grasp=)?(?P<is_side_grasp>true|false))?'
             r'\)'
         ),
         'close_gripper': re.compile(
             r'close_gripper\(\)'
         ),
-        'release': re.compile(
-            r'release\(\)'
+        'open_gripper': re.compile(
+            r'open_gripper\(\)'
         ),
-        'retractGripper': re.compile(
-            r'retractGripper\(\)'
+        'retract_gripper': re.compile(
+            r'retract_gripper\(\)'
         )
     }
 
@@ -54,12 +63,16 @@ class PrimitiveParser:
             
         Examples:
             >>> parser = PrimitiveParser()
-            >>> primitive = parser.parse_primitive("push(0.1)")
+            >>> primitive = parser.parse_primitive("push([table_surface], is_parallel_surface=true, is_bottom=false)")
             >>> print(primitive.action_type)  # 'push'
-            >>> print(primitive.parameters)   # {'distance': 0.1}
+            >>> print(primitive.parameters)   # {'surface_keywords': ['table_surface'], ...}
         """
         # Clean the input string
         primitive_str = primitive_str.strip()
+        
+        # Remove leading dash or bullet point if present (common in YAML lists)
+        if primitive_str.startswith('-') or primitive_str.startswith('*'):
+            primitive_str = primitive_str[1:].strip()
         
         # Try each pattern
         for action_type, pattern in cls.PATTERNS.items():
@@ -78,26 +91,34 @@ class PrimitiveParser:
         # Get all named groups from the match
         match_dict = match.groupdict()
         
-        # Process keywords if present
-        if 'keywords' in match_dict:
-            keywords_str = match_dict['keywords']
-            # Handle both quoted and unquoted keywords
-            keywords = []
-            for k in keywords_str.split(','):
-                k = k.strip()
+        # Process keywords if present (for move_gripper_to_pose or surface_keywords)
+        for keyword_param in ['keywords', 'surface_keywords']:
+            if keyword_param in match_dict and match_dict[keyword_param] is not None:
+                keywords_str = match_dict[keyword_param]
+                # Handle both quoted and unquoted keywords
+                keywords = []
+                for k in keywords_str.split(','):
+                    k = k.strip()
+                    # Remove quotes if present
+                    if (k.startswith("'") and k.endswith("'")) or (k.startswith('"') and k.endswith('"')):
+                        k = k[1:-1]
+                    keywords.append(k)
+                parameters[keyword_param] = keywords
+        
+        # Process boolean parameters
+        for param in ['is_parallel_surface', 'is_bottom', 'has_pivot', 
+                      'is_top_down_grasp', 'is_side_grasp']:
+            if param in match_dict and match_dict[param] is not None:
+                parameters[param] = match_dict[param].lower() == 'true'
+        
+        # Process string parameters
+        for param in ['surface', 'pivot_point']:
+            if param in match_dict and match_dict[param] is not None:
+                parameters[param] = match_dict[param].strip()
                 # Remove quotes if present
-                if (k.startswith("'") and k.endswith("'")) or (k.startswith('"') and k.endswith('"')):
-                    k = k[1:-1]
-                keywords.append(k)
-            parameters['keywords'] = keywords
-            
-        # Process distance for push/pull
-        if 'distance' in match_dict:
-            parameters['distance'] = float(match_dict['distance'])
-            
-        # Process is_grasp for moveGripperToPose
-        if 'is_grasp' in match_dict and match_dict['is_grasp'] is not None:
-            parameters['is_grasp'] = match_dict['is_grasp'].lower() == 'true'
+                if ((parameters[param].startswith("'") and parameters[param].endswith("'")) or 
+                    (parameters[param].startswith('"') and parameters[param].endswith('"'))):
+                    parameters[param] = parameters[param][1:-1]
             
         return ParsedPrimitive(
             action_type=action_type,
@@ -150,22 +171,55 @@ class PrimitiveParser:
             Formatted primitive string
             
         Examples:
-            >>> PrimitiveParser.format_primitive('push', distance=0.1)
-            "push(0.1)"
-            >>> PrimitiveParser.format_primitive('moveGripperToPose', keywords=['top', 'handle'], is_grasp=True)
-            "moveGripperToPose(['top', 'handle'], true)"
+            >>> PrimitiveParser.format_primitive('push', surface_keywords=['table_surface'], is_parallel_surface=True)
+            "push([table_surface], is_parallel_surface=true)"
+            >>> PrimitiveParser.format_primitive('move_gripper_to_pose', keywords=['handle', 'knob'], is_top_down_grasp=False, is_side_grasp=True)
+            "move_gripper_to_pose(['handle', 'knob'], is_top_down_grasp=false, is_side_grasp=true)"
         """
-        if action_type in ['close_gripper', 'release', 'retractGripper']:
+        if action_type in ['close_gripper', 'open_gripper', 'retract_gripper']:
             return f"{action_type}()"
             
         if action_type in ['push', 'pull']:
-            return f"{action_type}({kwargs['distance']})"
+            # Format surface keywords array
+            surface_keywords_str = f"[{', '.join(f'{k}' for k in kwargs.get('surface_keywords', []))}]"
+            result = f"{action_type}({surface_keywords_str}"
             
-        if action_type == 'moveGripperToPose':
-            base = f"{action_type}([{', '.join(kwargs['keywords'])}])"
-            if 'is_grasp' in kwargs:
-                base = base[:-1] + f", is_grasp={str(kwargs['is_grasp']).lower()})"
-            return base
+            # Add optional parameters with names
+            optional_params = ['is_parallel_surface', 'is_bottom', 'has_pivot', 'pivot_point']
+            for param in optional_params:
+                if param in kwargs:
+                    # Add comma
+                    result += ', '
+                    
+                    # Add the parameter name and value
+                    if param in ['is_parallel_surface', 'is_bottom', 'has_pivot']:
+                        result += f"{param}={str(kwargs[param]).lower()}"
+                    else:
+                        result += f"{param}={str(kwargs[param])}"
+            
+            # Ensure the string ends with a closing parenthesis
+            result += ')'
+                
+            return result
+            
+        if action_type == 'move_gripper_to_pose':
+            # Format keywords array
+            keywords_str = f"[{', '.join(f'{k}' for k in kwargs.get('keywords', []))}]"
+            result = f"{action_type}({keywords_str}"
+            
+            # Add optional parameters with names
+            if 'is_top_down_grasp' in kwargs:
+                result += f", is_top_down_grasp={str(kwargs['is_top_down_grasp']).lower()}"
+                
+                # Add is_side_grasp if is_top_down_grasp is present
+                if 'is_side_grasp' in kwargs:
+                    result += f", is_side_grasp={str(kwargs['is_side_grasp']).lower()}"
+            elif 'is_side_grasp' in kwargs:
+                # If only is_side_grasp is present, add is_top_down_grasp first
+                result += f", is_top_down_grasp=false, is_side_grasp={str(kwargs['is_side_grasp']).lower()}"
+                
+            result += ")"
+            return result
             
         return f"{action_type}()"
 
@@ -173,15 +227,20 @@ def test_primitive_parser():
     """Test the PrimitiveParser with various primitive strings"""
     parser = PrimitiveParser()
     
-    # Test cases
+    # Test cases with both named and unnamed parameters
     test_primitives = [
-        "push(0.1)",
-        "pull(0.05)",
-        "moveGripperToPose([top, handle], is_grasp=true)",
-        "moveGripperToPose([approach_point])",
+        "push([table, surface], is_parallel_surface=true, is_bottom=false, has_pivot=false)",
+        "push([table, surface], true, false, false)",
+        "pull([drawer, handle], is_parallel_surface=false, is_bottom=true, has_pivot=true, pivot_point=top_edge)",
+        "pull([drawer, handle], false, true, true, top_edge)",
+        "move_gripper_to_pose([handle, knob, grip], is_top_down_grasp=true, is_side_grasp=false)",
+        "move_gripper_to_pose([handle, knob, grip], true, false)",
+        "move_gripper_to_pose([toggle, switch])",
+        "- move_gripper_to_pose(['duck', 'toy'], is_top_down_grasp=true, is_side_grasp=false)",
+        "- move_gripper_to_pose(['destination'], is_top_down_grasp=false, is_side_grasp=false)",
         "close_gripper()",
-        "release()",
-        "retractGripper()"
+        "open_gripper()",
+        "retract_gripper()"
     ]
     
     print("Testing primitive parser...")
@@ -205,13 +264,13 @@ def test_primitive_parser():
     # Test primitive formatting
     print("\nTesting primitive formatting...")
     test_cases = [
-        ('push', {'distance': 0.1}),
-        ('pull', {'distance': 0.05}),
-        ('moveGripperToPose', {'keywords': ['top', 'handle'], 'is_grasp': True}),
-        ('moveGripperToPose', {'keywords': ['approach_point']}),
+        ('push', {'surface_keywords': ['table', 'surface'], 'is_parallel_surface': True, 'is_bottom': False}),
+        ('pull', {'surface_keywords': ['drawer', 'handle'], 'is_parallel_surface': False, 'is_bottom': True, 'has_pivot': True, 'pivot_point': 'top_edge'}),
+        ('move_gripper_to_pose', {'keywords': ['handle', 'knob', 'grip'], 'is_top_down_grasp': True, 'is_side_grasp': False}),
+        ('move_gripper_to_pose', {'keywords': ['toggle', 'switch']}),
         ('close_gripper', {}),
-        ('release', {}),
-        ('retractGripper', {})
+        ('open_gripper', {}),
+        ('retract_gripper', {})
     ]
     
     for action_type, params in test_cases:

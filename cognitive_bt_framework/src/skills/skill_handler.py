@@ -18,6 +18,8 @@ class ExecutableAction:
     orientation: np.ndarray  # 3D orientation [roll, pitch, yaw]
     pixel_position: Optional[Tuple[int, int]]  # 2D pixel coordinates [x, y]
     parameters: Dict[str, Any]  # Additional parameters like force magnitude, speed, etc.
+    is_top_down_grasp: bool
+    is_side_grasp: bool
     
 @dataclass
 class InstantiatedSkill:
@@ -394,14 +396,17 @@ class SkillHandler:
                 distance=parameters['distance'],
                 object_pose=object_pose,
                 object_pixel_pose=object_pixel_pose,
-                skill_parameters=skill_parameters
+                skill_parameters=skill_parameters,
+                is_top_down_grasp=False,
+                is_side_grasp=False,
             )
             
         # Handle gripper movement with potential grasp
-        elif action_type == 'moveGripperToPose':
+        elif action_type == 'move_gripper_to_pose':
             return self._create_gripper_pose_action(
                 keywords=parameters.get('keywords', []),
-                is_grasp=parameters.get('is_grasp', False),
+                is_side_grasp=parameters.get('is_side_grasp', False),
+                is_top_down_grasp=parameters.get('is_top_down_grasp', False),
                 interaction_points=interaction_points,
                 interaction_pixel_points=interaction_pixel_points,
                 skill_parameters=skill_parameters
@@ -413,24 +418,30 @@ class SkillHandler:
                 action_type='close_gripper',
                 position=np.zeros(3),
                 orientation=np.zeros(3),
+                is_top_down_grasp=False,
+                is_side_grasp=False,
                 pixel_position=object_pixel_pose,  # Use object center for visualization
                 parameters={'force': self._get_force_magnitude(skill_parameters.get('force_threshold', 'medium'))}
             )
             
-        elif action_type == 'release':
+        elif action_type == 'open_gripper':
             return ExecutableAction(
                 action_type='release',
                 position=np.zeros(3),
                 orientation=np.zeros(3),
+                is_top_down_grasp=False,
+                is_side_grasp=False,
                 pixel_position=object_pixel_pose,  # Use object center for visualization
                 parameters={}
             )
             
-        elif action_type == 'retractGripper':
+        elif action_type == 'retract_gripper':
             return ExecutableAction(
-                action_type='retractGripper',
+                action_type='retract_gripper',
                 position=np.zeros(3),
                 orientation=np.zeros(3),
+                is_top_down_grasp=False,
+                is_side_grasp=False,
                 pixel_position=object_pixel_pose,  # Use object center for visualization
                 parameters={'speed': self._get_speed_value(skill_parameters.get('speed_requirement', 'medium'))}
             )
@@ -452,6 +463,8 @@ class SkillHandler:
             position=np.zeros(3),  # Will use current position
             orientation=np.zeros(3),  # Will use current orientation
             pixel_position=object_pixel_pose,  # Store pixel location for visualization
+            is_top_down_grasp=False,
+            is_side_grasp=False,
             parameters={
                 'distance': distance,
                 'force_magnitude': force_magnitude,
@@ -462,7 +475,8 @@ class SkillHandler:
 
     def _create_gripper_pose_action(self,
                               keywords: List[str],
-                              is_grasp: bool,
+                              is_side_grasp: bool,
+                              is_top_down_grasp: bool,
                               interaction_points: Dict[str, np.ndarray],
                               interaction_pixel_points: Dict[str, Tuple[int, int]],
                               skill_parameters: Dict[str, Any]) -> Optional[ExecutableAction]:
@@ -484,20 +498,23 @@ class SkillHandler:
             'speed': self._get_speed_value(skill_parameters.get('speed_requirement', 'medium')),
             'precision': skill_parameters.get('precision_required', 'medium'),
             'keywords': keywords,
-            'is_grasp': is_grasp
+            'is_side_grasp': is_side_grasp,
+            'is_top_down_grasp': is_top_down_grasp
         }
         
-        if is_grasp:
+        if is_top_down_grasp or is_side_grasp:
             parameters.update({
                 'force': self._get_force_magnitude(skill_parameters.get('force_threshold', 'medium')),
                 'grasp_planning_required': True
             })
         
         return ExecutableAction(
-            action_type='moveGripperToPose',
+            action_type='move_gripper_to_pose',
             position=target_point,
             orientation=np.zeros(3),  # Will be determined by pose/grasp planner
             pixel_position=target_pixel,
+            is_top_down_grasp=False,
+            is_side_grasp=False,
             parameters=parameters
         )
 
@@ -608,10 +625,10 @@ class SkillHandler:
         COLOR_MAP = {
             'push': (0, 255, 0),      # Green
             'pull': (0, 200, 0),      # Darker green
-            'moveGripperToPose': (255, 0, 0),  # Red
+            'move_gripper_to_pose': (255, 0, 0),  # Red
             'close_gripper': (0, 0, 255),      # Blue
             'release': (255, 165, 0),          # Orange
-            'retractGripper': (128, 0, 128)    # Purple
+            'retract_gripper': (128, 0, 128)    # Purple
         }
         
         # Draw object center and pose axes
@@ -646,15 +663,15 @@ class SkillHandler:
                 # Draw action point
                 cv2.circle(vis_image, pos_2d, 5, color, -1)
                 
-                # Draw connection line to object center for moveGripperToPose
-                if action.action_type == 'moveGripperToPose':
+                # Draw connection line to object center for move_gripper_to_pose
+                if action.action_type == 'move_gripper_to_pose':
                     cv2.line(vis_image, object_center, pos_2d, color, 1, cv2.LINE_AA)
                 
                 # Draw action type and parameters
                 label = f"{i+1}. {action.action_type}"
                 
                 # Add specific parameters based on action type
-                if action.action_type == 'moveGripperToPose':
+                if action.action_type == 'move_gripper_to_pose':
                     if action.parameters.get('is_grasp', False):
                         label += " (grasp)"
                         # Draw gripper fingers
@@ -735,7 +752,7 @@ class SkillHandler:
                     )
             
             else:
-                # For actions without position (close_gripper, release, retractGripper)
+                # For actions without position (close_gripper, release, retract_gripper)
                 cv2.putText(
                     vis_image,
                     f"{i+1}. {action.action_type}",

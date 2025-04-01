@@ -17,7 +17,8 @@ import colorsys
 from cognitive_bt_framework.src.vision.sam.fast_sam_clip import FastSAMConfig, FastSAMWithCLIP
 from cognitive_bt_framework.src.vision.realsense import Camera
 from cognitive_bt_framework.src.vision.perception_system import PerceptionSystem
-
+import torch
+torch.cuda.set_device(1)  # Set default CUDA device to GPU 1
 def wait_for_valid_frame(camera, max_attempts=30):
     """Wait for a valid frame from the camera with timeout"""
     print("Waiting for valid frame...")

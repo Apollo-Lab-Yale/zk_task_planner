@@ -7,7 +7,8 @@ from cognitive_bt_framework.src.skills.skill_generator import SkillGenerator
 from cognitive_bt_framework.src.llm_interface.llm_interface_openai import LLMInterfaceOpenAI
 from cognitive_bt_framework.src.vision.sam.fast_sam_clip import FastSAMWithCLIP
 from cognitive_bt_framework.src.skills.skill_handler import SkillHandler
-
+import torch
+torch.cuda.set_device(1)  # Set default CUDA device to GPU 1
 async def test_skill_handler():
     # Initialize camera
     camera = Camera(width=640, height=480)
@@ -48,8 +49,8 @@ async def test_skill_handler():
 
         color_image, depth_image = frames
         
-        action = 'pickup'
-        target_object = 'pen'
+        action = 'move'
+        target_object = 'duck toy'
 
         print("\nProcessing request...")
         print(f"Target: {target_object}")

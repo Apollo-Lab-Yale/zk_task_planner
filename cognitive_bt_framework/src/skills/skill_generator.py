@@ -92,65 +92,6 @@ class SkillGenerator:
         return True
 
 
-    '''
-    OLD SKILL GEN PROMPT
-
-    combined_prompt = [
-                {"role": "system", "content": f"""Analyze the object visually and generate a complete skill definition for performing {abstract_action} on a {target_object}.
-
-                First, determine the specific subtype of the action based on the object's visual characteristics.
-                The skill name should follow the format: action_targetobject_mechanism
-
-                Return a JSON object with the following structure:
-                {{
-                    "skill_name": "specific_action_name_with_mechanism",
-                    "primitive_sequence": [
-                        "list of primitive actions using only these commands:",
-                        "apply_force(direction, keywords)",
-                            "direction: one of [up, down, left, right, push, pull] relative to object surface",
-                            "keywords: list of descriptive words to identify the component (e.g., [handle, knob, button])",
-                        "apply_torque(axis, keywords)",
-                            "axis: one of [clockwise, counterclockwise] relative to object surface",
-                            "keywords: list of descriptive words to identify the component",
-                        "close_gripper()",
-                        "release()",
-                        "moveGripperToPose(keywords)",
-                            "keywords: list of descriptive words for the target pose location",
-                        "retractGripper()"
-                    ],
-                    "parameters": {{
-                        "force_threshold": "low/medium/high",
-                        "precision_required": "low/medium/high",
-                        "speed_requirement": "slow/medium/fast"
-                    }},
-                    "prerequisites": [
-                        "list of required conditions"
-                    ],
-                    "constraints": [
-                        "list of safety limits and constraints"
-                    ]
-                }}
-                
-                Base all values on the visual appearance of the object.
-                Return only the raw JSON object with no additional text."""},
-                {"role": "user", "content": [
-                    {"type": "text", "text": f"""
-                    Abstract Action: {abstract_action}
-                    Target Object: {target_object}
-                    
-                    Generate a complete skill definition for this task based on the object's visual appearance.
-                    First determine the specific subtype of action needed based on the object's
-                    characteristics, then generate the complete skill definition including
-                    primitive sequence, parameters, prerequisites, and constraints.
-                    """},
-                    {"type": "image_url", "image_url": {
-                        "url": f"data:image/png;base64,{self._encode_image(masked_image)}"
-                    }}
-                ]}
-            ]
-    '''
-
-
     async def generate_skill(self, 
                            image: np.ndarray,
                            mask: np.ndarray,
@@ -195,23 +136,40 @@ class SkillGenerator:
                 "skill_name": "specific_action_name_with_mechanism",
                 "primitive_sequence": [
                     "list of primitive actions using only these commands:",
-                    "push(distance)",
-                        "distance: approximate distance to push in meters",
-                    "pull(distance)",
-                        "distance: approximate distance to pull in meters",
+                    "push(surface_keywords, is_parallel_surface, is_bottom, has_pivot, pivot_point)",
+                        "surface_keywords: List of descriptive terms identifying the target surface to apply pushing force against, similar to the keywords in move_gripper_to_pose",
+                        "is_parallel_surface: Boolean indicating if the gripper should push parallel to the surface (true) or perpendicular to it (false)",
+                        "is_bottom: Boolean indicating if the push should be applied to the bottom part of the surface (true) or the top part (false)",
+                        "has_pivot: Boolean indicating if the surface has a pivot point (true) or is fixed/freely movable (false)",
+                        "pivot_point: If has_pivot is true, specifies the location of the pivot point relative to the surface",
+                    "pull(surface_keywords, is_parallel_surface, is_bottom, has_pivot, pivot_point)",
+                        "surface_keywords: List of descriptive terms identifying the target surface to apply pulling force against, similar to the keywords in move_gripper_to_pose",
+                        "is_parallel_surface: Boolean indicating if the gripper should pull parallel to the surface (true) or perpendicular to it (false)",
+                        "is_bottom: Boolean indicating if the pull should be applied to the bottom part of the surface (true) or the top part (false)",
+                        "has_pivot: Boolean indicating if the surface has a pivot point (true) or is fixed/freely movable (false)",
+                        "pivot_point: If has_pivot is true, specifies the location of the pivot point relative to the surface",
                     "close_gripper()",
-                    "release()",
-                    "moveGripperToPose(keywords, is_grasp)",
+                        "Closes the gripper fingers to grasp an object. Takes no parameters as it operates on the current gripper state.",
+                    "open_gripper()",
+                        "Opens the gripper fingers to release an object. Takes no parameters as it operates on the current gripper state.",
+                    "move_gripper_to_pose(keywords, is_top_down_grasp, is_side_grasp)",
                         "keywords: List of descriptive terms identifying either:
                                 - The target object (e.g., ['cube', 'box', 'package'] for a box-shaped object)
                                 - A specific component of the object (e.g., ['toggle', 'switch'] for a light switch,
                                     ['handle', 'knob', 'grip'] for a door handle)
                                 These terms are used to identify and locate the target for gripper positioning",
-                        "is_grasp: Boolean parameter indicating whether this movement is intended for grasping:
-                                - true: The system will plan a grasp-oriented approach to the target
+                        "is_top_down_grasp: Boolean parameter indicating whether this movement is intended for grasping
+                                and that the grasp should be top down:
+                                - true: The system will plan a top down grasp-oriented approach to the target
                                 - false: The system will plan a general approach to interact with the target
-                                (When true, the grasp planner will sample appropriate grasp poses)"
-                    "retractGripper()"
+                                (When true, the grasp planner will sample appropriate grasp poses)",
+                        "is_side_grasp: Boolean parameter indicating whether this movement is intended for grasping
+                                and that the grasp should be from the side:
+                                - true: The system will plan a side grasp-oriented approach to the target
+                                - false: The system will plan a general approach to interact with the target
+                                (When true, the grasp planner will sample appropriate grasp poses)",
+                    "retract_gripper()",
+                        "Moves the gripper away from its current position along the approach vector. Takes no parameters as it retracts from the current position."
                 ],
                 "parameters": {{
                     "force_threshold": "low/medium/high",
@@ -226,7 +184,7 @@ class SkillGenerator:
                 ]
             }}
             Note: - push and pull will always be applied directly outwards or inwards relative to the direction the gripper is currently pointing.
-                  - when grasping an object moveGripperToPose should be provided keywords indicating the tool center point positioning for the grasp.
+                  - when grasping an object move_gripper_to_pose should be provided keywords indicating the tool center point positioning for the grasp.
                   - keywords should be provided in the following format: ['keyword1', ...]
             Base all values on the visual appearance of the object.
             Return only the raw JSON object with no additional text."""},
