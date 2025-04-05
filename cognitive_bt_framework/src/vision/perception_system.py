@@ -1,7 +1,7 @@
 from typing import Dict, List, Optional, Any, Tuple, Union
 import numpy as np
 import cv2
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import torch
 from PIL import Image
 import time
@@ -9,7 +9,9 @@ import functools
 from collections import defaultdict
 import traceback
 
-from cognitive_bt_framework.src.vision.sam.fast_sam_clip import FastSAMWithCLIP, FastSAMConfig
+# Import the FastSAMMaskGenerator and FastSAMConfig instead of FastSAMWithCLIP
+from cognitive_bt_framework.src.vision.sam.fast_sam import FastSAMMaskGenerator, FastSAMConfig
+from cognitive_bt_framework.src.vision.realsense import Camera
 from cognitive_bt_framework.utils.time_profiler import IterationTimeProfiler
 from ultralytics import YOLOWorld
 
@@ -27,7 +29,24 @@ class ObjectInfo:
     pixel_pose: Optional[np.ndarray] = None  # 2D pose corresponding to pixel in image [x, y]
     components: Dict[str, 'ObjectInfo'] = None  # Store detected components within this object
     depth_image: Optional[np.ndarray] = None
+    alpha_id: Optional[str] = None  # Alphabetical ID for user-friendly identification
     
+
+def get_alpha_id(num):
+    """
+    Convert a numerical ID to an alphabetical ID (a, b, c, ... aa, ab, ...)
+    For example:
+    1 -> a, 2 -> b, ..., 26 -> z, 27 -> aa, 28 -> ab, ...
+    """
+    if num <= 0:
+        return ""
+    
+    letters = ""
+    while num > 0:
+        num, remainder = divmod(num - 1, 26)
+        letters = chr(97 + remainder) + letters  # 97 is ASCII for 'a'
+    
+    return letters
 
 class PerceptionSystem:
     def __init__(
@@ -41,7 +60,7 @@ class PerceptionSystem:
         debug: bool = True
     ):
         """
-        Initialize hybrid perception system with YOLO-World and FastSAM models
+        Initialize perception system with YOLO-World and FastSAM models
         
         Args:
             yolo_model_path: Path to YOLO-World model weights
@@ -73,7 +92,7 @@ class PerceptionSystem:
             self.segmenter = None
             if fast_sam_config is not None:
                 # Initialize segmenter
-                self.segmenter = FastSAMWithCLIP(fast_sam_config)
+                self.segmenter = FastSAMMaskGenerator(fast_sam_config)
                 if self.debug:
                     print("FastSAM segmenter initialized")
             
@@ -97,13 +116,14 @@ class PerceptionSystem:
             
             self.depth_scale = depth_scale
             self._object_cache = {}  # Cache for detected objects
+            self._next_mask_id = 1  # Counter for assigning IDs to masks
             
             if self.debug:
-                print(f"HybridPerceptionSystem initialized with debug={debug}")
+                print(f"PerceptionSystem initialized with debug={debug}")
                 
         except Exception as e:
             if self.debug:
-                print(f"Error in HybridPerceptionSystem initialization: {str(e)}")
+                print(f"Error in PerceptionSystem initialization: {str(e)}")
                 traceback.print_exc()
             raise  # Re-raise the exception to not silence initialization errors
     
@@ -170,6 +190,10 @@ class PerceptionSystem:
                 confidence = float(detection.boxes.conf.cpu().numpy()[0])
                 class_name = detection.names[cls_id]
                 
+                # Create alphabetical ID
+                alpha_id = get_alpha_id(self._next_mask_id)
+                self._next_mask_id += 1
+                
                 # Create ObjectInfo
                 obj_info = ObjectInfo(
                     id=i,
@@ -177,21 +201,22 @@ class PerceptionSystem:
                     bbox=bbox,
                     confidence=confidence,
                     image=image,
-                    depth_image=depth_image
+                    depth_image=depth_image,
+                    alpha_id=alpha_id
                 )
                 
                 # Generate segmentation mask if requested
-                if self.debug:
-                    self.profiler.start(f"segment_obj_{i}")
-                    print(f"Generating segmentation for object {i} ({class_name})")
-                
-                mask = self._generate_segmentation(image, obj_info, class_name)
-                if mask is None:
-                    raise Exception("Failed to generate mask for object.")
-                obj_info.mask = mask
-                
-                if self.debug:
-                    self.profiler.stop(f"segment_obj_{i}")
+                if segment and self.segmenter is not None:
+                    if self.debug:
+                        self.profiler.start(f"segment_obj_{i}")
+                        print(f"Generating segmentation for object {i} ({class_name})")
+                    
+                    mask = self._generate_segmentation(image, obj_info)
+                    if mask is not None:
+                        obj_info.mask = mask
+                    
+                    if self.debug:
+                        self.profiler.stop(f"segment_obj_{i}")
                 
                 # Estimate pose if depth image is provided
                 if depth_image is not None:
@@ -304,286 +329,191 @@ class PerceptionSystem:
             if self.debug:
                 self.profiler.stop("detect_object")
                 self.profiler.end_iteration(preserve_current=True)
-    
-    def detect_object_component(
+
+    def detect_object_parts(
         self,
-        object_info: ObjectInfo,
-        component_name: str,
-        conf_threshold: float = 0.5,
+        image: np.ndarray,
+        bbox: List[int],
+        conf_threshold: float = 0.4,
         depth_image: Optional[np.ndarray] = None
-    ) -> Optional[ObjectInfo]:
+    ) -> Dict[int, ObjectInfo]:
         """
-        Detect a specific component within an object using FastSAM-CLIP
+        Detect parts within a region of interest using FastSAM
         
         Args:
-            object_info: Parent object information
-            component_name: Name of the component to detect
-            conf_threshold: Confidence threshold for component detection
-            depth_image: Optional depth image aligned with RGB
+            image: Input image
+            bbox: Bounding box of the region of interest [x, y, w, h]
+            conf_threshold: Confidence threshold for part detection
+            depth_image: Optional depth image
             
         Returns:
-            ObjectInfo for the component if found, None otherwise
+            Dictionary mapping mask IDs to ObjectInfo objects
         """
         if self.segmenter is None:
             if self.debug:
-                print("Cannot detect components: FastSAM segmenter not initialized")
-            return None
-        
+                print("Cannot detect parts: FastSAM segmenter not initialized")
+            return {}
+            
         if self.debug:
             self.profiler.start_iteration()
-            self.profiler.start("detect_component")
-            print(f"Detecting component '{component_name}' within object '{object_info.name}'")
+            self.profiler.start("detect_parts")
         
         try:
-            # Extract object region from image
-            x, y, w, h = object_info.bbox
-            if object_info.image is None:
-                if self.debug:
-                    print("Cannot detect component: object image is None")
-                return None
-            
-            # Extract region of interest
-            if self.debug:
-                self.profiler.start("extract_roi")
-                
-            # Add a small padding around the object for better component detection
+            # Extract region of interest with padding
+            x, y, w, h = bbox
             pad = int(max(w, h) * 0.05)  # 5% padding
+            
+            # Ensure coordinates are within image bounds
             x_roi = max(0, x - pad)
             y_roi = max(0, y - pad)
-            w_roi = min(object_info.image.shape[1] - x_roi, w + 2*pad)
-            h_roi = min(object_info.image.shape[0] - y_roi, h + 2*pad)
+            w_roi = min(image.shape[1] - x_roi, w + 2*pad)
+            h_roi = min(image.shape[0] - y_roi, h + 2*pad)
             
-            # Store ROI coordinates
+            # Store ROI coordinates for later use
             roi_coords = (x_roi, y_roi, w_roi, h_roi)
             
-            roi = object_info.image[y_roi:y_roi+h_roi, x_roi:x_roi+w_roi]
+            # Extract ROI
+            roi = image[y_roi:y_roi+h_roi, x_roi:x_roi+w_roi]
+            
             if roi.size == 0:
                 if self.debug:
                     print(f"Invalid ROI with dimensions {roi.shape}")
-                return None
-                
+                return {}
+            
+            # Generate masks for everything in the ROI
             if self.debug:
-                self.profiler.stop("extract_roi")
+                self.profiler.start("generate_masks")
                 
-            # Run FastSAM-CLIP on the ROI to find the component
-            if self.debug:
-                self.profiler.start("component_segmentation")
-                
-            query = f"a {component_name}"
-            labeled_masks, metadata = self.segmenter.process_image(
-                roi, 
-                query=query,
-                roi_coords=roi_coords,
-                store_results=True
-            )
-            
-            if self.debug:
-                self.profiler.stop("component_segmentation")
-                print(f"FastSAM returned {len(metadata)} potential component masks")
-            
-            # Find best matching mask
-            if self.debug:
-                self.profiler.start("find_best_component")
-                
-            best_mask_id = None
-            best_score = 0
-            
-            for mask_id, meta in metadata.items():
-                score = meta.get('clip_score', 0)
-                if self.debug:
-                    print(f"  Component mask {mask_id} score: {score:.3f}")
-                if score > best_score and score >= conf_threshold:
-                    best_score = score
-                    best_mask_id = mask_id
-                    
-            if best_mask_id is None:
-                if self.debug:
-                    print(f"No component '{component_name}' found with confidence >= {conf_threshold}")
-                    self.profiler.stop("find_best_component")
-                    self.profiler.stop("detect_component")
-                    self.profiler.end_iteration(preserve_current=True)
-                return None
-            
-            if self.debug:
-                print(f"Best component mask for '{component_name}': {best_mask_id} with score {best_score:.3f}")
-                self.profiler.stop("find_best_component")
-                
-            # Extract mask and convert to full image coordinates
-            if self.debug:
-                self.profiler.start("process_component_mask")
-                
-            # Get component mask from ROI segmentation
-            component_roi_mask = labeled_masks == best_mask_id
-            
-            # Create a full image mask (initialized to all False)
-            component_full_mask = np.zeros(object_info.image.shape[:2], dtype=bool)
-            
-            # Place ROI mask in the correct position in the full image
-            component_full_mask[y_roi:y_roi+h_roi, x_roi:x_roi+w_roi] = component_roi_mask
-            
-            if self.debug:
-                self.profiler.stop("process_component_mask")
-                
-            # Get component bounding box in full image coordinates
-            if self.debug:
-                self.profiler.start("compute_component_bbox")
-                
-            y_coords, x_coords = np.where(component_full_mask)
-            if len(y_coords) == 0:
-                if self.debug:
-                    print(f"Empty component mask for '{component_name}'")
-                    self.profiler.stop("compute_component_bbox")
-                    self.profiler.stop("detect_component")
-                    self.profiler.end_iteration(preserve_current=True)
-                return None
-                
-            x1, y1 = int(x_coords.min()), int(y_coords.min())
-            x2, y2 = int(x_coords.max()), int(y_coords.max())
-            component_bbox = [x1, y1, x2 - x1, y2 - y1]
-            
-            if self.debug:
-                self.profiler.stop("compute_component_bbox")
-                
-            # Create component ObjectInfo
-            if self.debug:
-                self.profiler.start("create_component_info")
-                
-            # Use a different ID scheme for components to avoid confusion with parent objects
-            component_id = hash(f"{object_info.id}_{component_name}") % 10000
-            
-            component_info = ObjectInfo(
-                id=component_id,
-                name=component_name,
-                mask=component_full_mask,
-                image=object_info.image,
-                bbox=component_bbox,
-                confidence=best_score
-            )
-            
-            if self.debug:
-                self.profiler.stop("create_component_info")
-                
-            # Estimate component pose if depth image is available
-            if depth_image is not None:
-                if self.debug:
-                    self.profiler.start("estimate_component_pose")
-                    
-                # Ensure depth image matches RGB dimensions
-                if depth_image.shape[:2] != object_info.image.shape[:2]:
-                    if self.debug:
-                        print("Resizing depth image to match RGB dimensions")
-                    depth_image = cv2.resize(
-                        depth_image,
-                        (object_info.image.shape[1], object_info.image.shape[0]),
-                        interpolation=cv2.INTER_NEAREST
-                    )
-                    
-                pose, pixel_pose = self._estimate_object_pose(component_full_mask, depth_image)
-                component_info.pose = pose
-                component_info.pixel_pose = pixel_pose
-                
-                if self.debug:
-                    self.profiler.stop("estimate_component_pose")
-                    
-            # Store this component in the parent object if components dict exists
-            if object_info.components is None:
-                object_info.components = {}
-            object_info.components[component_name] = component_info
-            
-            if self.debug:
-                print(f"Successfully detected component '{component_name}' with confidence {best_score:.3f}")
-                
-            return component_info
-            
-        except Exception as e:
-            if self.debug:
-                print(f"Error in detect_object_component: {str(e)}")
-                traceback.print_exc()
-            return None
-            
-        finally:
-            if self.debug:
-                self.profiler.stop("detect_component")
-                self.profiler.end_iteration(preserve_current=True)
-
-    def detect_multiple_components(
-        self,
-        object_info: ObjectInfo,
-        component_names: List[str],
-        conf_threshold: float = 0.5,
-        depth_image: Optional[np.ndarray] = None
-    ) -> Dict[str, ObjectInfo]:
-        """
-        Detect multiple components within an object
-        
-        Args:
-            object_info: Parent object information
-            component_names: List of component names to detect
-            conf_threshold: Confidence threshold for component detection
-            depth_image: Optional depth image aligned with RGB
-            
-        Returns:
-            Dictionary mapping component names to ObjectInfo objects
-        """
-        if self.debug:
-            self.profiler.start_iteration()
-            self.profiler.start("detect_multiple_components")
-            print(f"Detecting {len(component_names)} components within object '{object_info.name}'")
-        
-        try:
-            # Initialize results dictionary
-            component_results = {}
-            
-            # Detect each component
-            for component_name in component_names:
-                if self.debug:
-                    self.profiler.start(f"detect_{component_name}")
-                    
-                component = self.detect_object_component(
-                    object_info=object_info,
-                    component_name=component_name,
-                    conf_threshold=conf_threshold,
-                    depth_image=depth_image
+            try:
+                # Use "everything" prompt to segment all parts
+                labeled_masks, metadata = self.segmenter.generate_masks(
+                    roi,
+                    prompt_type="everything"
                 )
                 
-                if component is not None:
-                    component_results[component_name] = component
-                    
                 if self.debug:
-                    self.profiler.stop(f"detect_{component_name}")
-                    
+                    print(f"FastSAM returned {len(metadata)} potential parts in object region")
+                    self.profiler.stop("generate_masks")
+            except Exception as e:
+                if self.debug:
+                    print(f"Error generating masks: {e}")
+                    self.profiler.stop("generate_masks")
+                return {}
+            
+            # Process the masks to create ObjectInfo objects
             if self.debug:
-                print(f"Successfully detected {len(component_results)}/{len(component_names)} components")
+                self.profiler.start("process_parts")
                 
-            return component_results
+            parts = {}
+            
+            # Implement filtering to remove very small masks and masks that are too large 
+            # (likely the whole object rather than a part)
+            total_roi_area = w_roi * h_roi
+            min_part_area = total_roi_area * 0.01  # Parts should be at least 1% of ROI
+            max_part_area = total_roi_area * 0.8   # Parts shouldn't be more than 80% of ROI
+                
+            for mask_id, meta in metadata.items():
+                # Skip parts that are too small or too large
+                area = meta.get('area', 0)
+                if area < min_part_area or area > max_part_area:
+                    if self.debug:
+                        print(f"Skipping mask {mask_id}: area={area:.0f} (outside range [{min_part_area:.0f}, {max_part_area:.0f}])")
+                    continue
+
+                # Create a full image mask
+                full_mask = np.zeros(image.shape[:2], dtype=bool)
+                
+                # Get the mask from labeled masks
+                roi_mask = labeled_masks == mask_id
+                
+                # Try to place ROI mask in the correct position in the full image
+                try:
+                    full_mask[y_roi:y_roi+h_roi, x_roi:x_roi+w_roi] = roi_mask
+                except ValueError as e:
+                    # Handle potential size mismatch
+                    if self.debug:
+                        print(f"Error placing mask in full image: {e}")
+                        
+                    try:
+                        # Resize mask to match ROI dimensions
+                        resized_mask = cv2.resize(
+                            roi_mask.astype(np.uint8), 
+                            (w_roi, h_roi), 
+                            interpolation=cv2.INTER_NEAREST
+                        ).astype(bool)
+                        
+                        full_mask[y_roi:y_roi+h_roi, x_roi:x_roi+w_roi] = resized_mask
+                    except Exception as resize_err:
+                        if self.debug:
+                            print(f"Failed to resize mask: {resize_err}")
+                        continue  # Skip this mask if we can't resize it properly
+                
+                # Convert bounding box to image coordinates
+                part_bbox = meta['bbox']
+                img_bbox = [
+                    part_bbox[0] + x_roi,
+                    part_bbox[1] + y_roi,
+                    part_bbox[2],
+                    part_bbox[3]
+                ]
+                
+                # Create a new ID and alpha ID for this part
+                part_id = self._next_mask_id
+                self._next_mask_id += 1
+                alpha_id = get_alpha_id(part_id)
+                
+                # Create ObjectInfo for this part
+                part_info = ObjectInfo(
+                    id=part_id,
+                    name=f"part_{alpha_id}",
+                    bbox=img_bbox,
+                    confidence=conf_threshold,  # Default confidence
+                    image=image,
+                    mask=full_mask,
+                    depth_image=depth_image,
+                    alpha_id=alpha_id
+                )
+                
+                # Estimate pose if depth image is provided
+                if depth_image is not None:
+                    pose, pixel_pose = self._estimate_object_pose(full_mask, depth_image)
+                    part_info.pose = pose
+                    part_info.pixel_pose = pixel_pose
+                
+                parts[part_id] = part_info
+            
+            if self.debug:
+                self.profiler.stop("process_parts")
+                print(f"Processed {len(parts)} parts")
+            
+            return parts
             
         except Exception as e:
             if self.debug:
-                print(f"Error in detect_multiple_components: {str(e)}")
+                print(f"Error in detect_object_parts: {str(e)}")
                 traceback.print_exc()
             return {}
             
         finally:
             if self.debug:
-                self.profiler.stop("detect_multiple_components")
+                self.profiler.stop("detect_parts")
                 self.profiler.end_iteration(preserve_current=True)
-    
+            
     def _generate_segmentation(
         self,
         image: np.ndarray,
-        obj_info: ObjectInfo,
-        prompt: str
+        obj_info: ObjectInfo
     ) -> np.ndarray:
         """
-        Generate segmentation mask for detected object using FastSAM
+        Generate segmentation mask for detected object using FastSAM, focusing only within
+        the object's bounding box
         
         Args:
             image: Original image
             obj_info: Object information with bounding box
-            prompt: Text prompt describing the object
             
         Returns:
-            Binary mask array
+            Binary mask array for the full image with mask only in the detected region
         """
         if self.segmenter is None:
             if self.debug:
@@ -591,18 +521,18 @@ class PerceptionSystem:
             return None
             
         try:
-            # Extract the region of interest
+            # Extract the region of interest from the bounding box
             x, y, w, h = obj_info.bbox
             
             if self.debug:
-                print(f"Generating segmentation for '{prompt}' with bbox: x={x}, y={y}, w={w}, h={h}")
+                print(f"Generating segmentation for '{obj_info.name}' with bbox: x={x}, y={y}, w={w}, h={h}")
             
             # Check for invalid bounding box
             if w <= 0 or h <= 0:
                 if self.debug:
                     print(f"Invalid bounding box dimensions: w={w}, h={h}")
                 return None
-                
+                    
             # Check if bbox is outside image bounds
             if x >= image.shape[1] or y >= image.shape[0]:
                 if self.debug:
@@ -610,13 +540,11 @@ class PerceptionSystem:
                 return None
             
             # Expand the region slightly to ensure we capture the full object
-            x_expand = max(0, x - int(w * 0.1))
-            y_expand = max(0, y - int(h * 0.1))
-            w_expand = min(image.shape[1] - x_expand, int(w * 1.2))
-            h_expand = min(image.shape[0] - y_expand, int(h * 1.2))
-            
-            # Store ROI coordinates for later use
-            roi_coords = (x_expand, y_expand, w_expand, h_expand)
+            pad = int(max(w, h) * 0.1)  # Add 10% padding around the object
+            x_expand = max(0, x - pad)
+            y_expand = max(0, y - pad)
+            w_expand = min(image.shape[1] - x_expand, w + 2*pad)
+            h_expand = min(image.shape[0] - y_expand, h + 2*pad)
             
             if self.debug:
                 print(f"Expanded ROI: x={x_expand}, y={y_expand}, w={w_expand}, h={h_expand}")
@@ -644,18 +572,20 @@ class PerceptionSystem:
                     print(f"ROI too small ({roi.shape}), resizing to minimum size")
                 roi = cv2.resize(roi, (max(min_size, roi.shape[1]), max(min_size, roi.shape[0])))
             
-            # Run FastSAM on the ROI
-            query = f"a {prompt}"
+            # Create a box prompt that focuses on the central part of the ROI
+            roi_h, roi_w = roi.shape[:2]
+            center_box = [0, 0, roi.shape[1], roi.shape[0]]
+            
+            # Run FastSAM on the ROI with box prompt
             if self.debug:
-                print(f"Running FastSAM with query: '{query}'")
+                print(f"Running FastSAM with box prompt")
                 
-            # Use try-except to catch potential errors in the segmentation process
             try:
-                labeled_masks, metadata = self.segmenter.process_image(
-                    roi, 
-                    query=query,
-                    roi_coords=roi_coords,
-                    store_results=True
+                # Use the box prompt to focus segmentation within ROI
+                labeled_masks, metadata = self.segmenter.generate_masks(
+                    roi,
+                    prompt_type="boxes",
+                    boxes=[center_box]
                 )
                 
                 if self.debug:
@@ -665,23 +595,53 @@ class PerceptionSystem:
                     print(f"Error in FastSAM processing: {e}")
                     import traceback
                     traceback.print_exc()
-                return None
+                    
+                # Fallback to "everything" prompt if box prompt fails
+                try:
+                    if self.debug:
+                        print("Falling back to 'everything' prompt")
+                    labeled_masks, metadata = self.segmenter.generate_masks(
+                        roi,
+                        prompt_type="everything"
+                    )
+                    if self.debug:
+                        print(f"FastSAM fallback returned {len(metadata)} masks")
+                except Exception as e2:
+                    if self.debug:
+                        print(f"Fallback also failed: {e2}")
+                    return None
             
-            # Find best matching mask
+            # Find largest mask or mask with highest area overlapping the central box
             best_mask_id = None
-            best_score = 0
+            largest_area = 0
+            
+            # Calculate the central box region as a numpy mask
+            central_mask = np.zeros((roi_h, roi_w), dtype=bool)
+            x1, y1, x2, y2 = [int(v) for v in center_box]
+            central_mask[y1:y2, x1:x2] = True
             
             for mask_id, meta in metadata.items():
-                score = meta.get('clip_score', 0)
+                # Get current mask
+                mask = labeled_masks == mask_id
+                
+                # Calculate overlap with central box region
+                overlap = np.logical_and(mask, central_mask).sum()
+                
+                # Use a scoring function that favors masks with good central overlap
+                area = meta.get('area', 0)
+                central_score = overlap / max(1, central_mask.sum())  # What percentage of center is covered
+                score = area * (0.5 + 0.5 * central_score)  # Weighted score
+                
                 if self.debug:
-                    print(f"  Mask {mask_id} score: {score:.3f}, area: {meta.get('area', 0):.0f}")
-                if score > best_score:
-                    best_score = score
+                    print(f"  Mask {mask_id} ({meta.get('alpha_id', '')}): area={area:.0f}, overlap={central_score:.2f}, score={score:.0f}")
+                
+                if score > largest_area:
+                    largest_area = score
                     best_mask_id = mask_id
-                    
+                        
             if best_mask_id is None:
                 if self.debug:
-                    print(f"No mask found for '{prompt}' in ROI")
+                    print(f"No suitable mask found for '{obj_info.name}' in ROI")
                     
                 # Create a fallback mask from the bounding box
                 if self.debug:
@@ -689,7 +649,7 @@ class PerceptionSystem:
                 full_mask = np.zeros(image.shape[:2], dtype=bool)
                 full_mask[y:y+h, x:x+w] = True
                 return full_mask
-                
+                    
             # Get ROI mask
             roi_mask = labeled_masks == best_mask_id
             
@@ -705,7 +665,7 @@ class PerceptionSystem:
                 full_mask[y:y+h, x:x+w] = True
                 return full_mask
             
-            # Create a full image mask
+            # Create a full image mask (initialized to all False)
             full_mask = np.zeros(image.shape[:2], dtype=bool)
             
             # Place ROI mask in the correct position in the full image
@@ -717,7 +677,7 @@ class PerceptionSystem:
             except ValueError as e:
                 if self.debug:
                     print(f"Error placing mask in full image: {e}")
-                    print(f"ROI shape: {roi_mask.shape}, Expected: {(h_expand, w_expand)}")
+                    print(f"ROI mask shape: {roi_mask.shape}, Expected: {(h_expand, w_expand)}")
                     print(f"Full image shape: {full_mask.shape}")
                     
                 # Try to resize the mask to fit
@@ -750,7 +710,6 @@ class PerceptionSystem:
             try:
                 if self.debug:
                     print("Creating emergency fallback mask from bounding box")
-                x, y, w, h = obj_info.bbox
                 full_mask = np.zeros(image.shape[:2], dtype=bool)
                 full_mask[y:y+h, x:x+w] = True
                 return full_mask
@@ -869,7 +828,7 @@ class PerceptionSystem:
             # Calculate orientation using PCA
             centered_points = points_3d - centroid
             try:
-                # Compute covariance directly instead of using np.cov (more efficient)
+                # Compute covariance directly
                 covariance_matrix = np.dot(centered_points.T, centered_points) / centered_points.shape[0]
                 eigenvalues, eigenvectors = np.linalg.eigh(covariance_matrix)
                 
@@ -898,22 +857,449 @@ class PerceptionSystem:
             if self.debug:
                 self.profiler.stop("_estimate_object_pose")
     
+    
+    def visualize_interest_points(
+        self,
+        image: np.ndarray,
+        obj_info: 'ObjectInfo',
+        keypoints: List[cv2.KeyPoint],
+        scores: List[float] = None,
+        method: str = "Unknown",
+        max_points: int = 100
+    ) -> np.ndarray:
+        """
+        Create a visualization of interest points on an object with alphabetical labels.
+        
+        Args:
+            image: Original RGB image
+            obj_info: ObjectInfo with object details including mask
+            keypoints: List of cv2.KeyPoint objects
+            scores: Optional list of scores for each keypoint
+            method: Point detection method used
+            max_points: Maximum points parameter used
+            
+        Returns:
+            Visualization image showing points of interest with alphabetical labels
+        """
+        # Create a copy of the image
+        vis_img = image.copy()
+        
+        # If no scores provided, use response from keypoints or default to 1.0
+        if scores is None:
+            scores = [kp.response if hasattr(kp, 'response') and kp.response is not None else 1.0 
+                    for kp in keypoints]
+        
+        # Ensure we have at least one keypoint
+        if not keypoints:
+            # Add a "no points detected" message
+            cv2.putText(
+                vis_img,
+                f"No interest points detected with {method}",
+                (int(image.shape[1]/2 - 200), int(image.shape[0]/2)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 0, 255),
+                2
+            )
+            return vis_img
+        
+        # Draw object bounding box and mask
+        if obj_info.bbox is not None:
+            x, y, w, h = obj_info.bbox
+            cv2.rectangle(vis_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        
+        # Draw semi-transparent mask if available
+        if obj_info.mask is not None:
+            mask_overlay = np.zeros_like(vis_img, dtype=np.uint8)
+            mask_overlay[obj_info.mask] = [0, 100, 0]  # Light green
+            vis_img = cv2.addWeighted(vis_img, 1.0, mask_overlay, 0.3, 0)
+        
+        # Calculate score range for coloring
+        min_score = min(scores) if scores else 0
+        max_score = max(scores) if scores else 1
+        score_range = max_score - min_score if max_score > min_score else 1
+        
+        # Create a list of keypoints with their scores for sorting
+        keypoints_with_scores = [(kp, score) for kp, score in zip(keypoints, scores)]
+        
+        # Sort by score (highest first)
+        keypoints_with_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        # Limit to the maximum number of points
+        keypoints_with_scores = keypoints_with_scores[:max_points]
+        
+        # Draw keypoints with colors based on score and alphabetical labels
+        for i, (kp, score) in enumerate(keypoints_with_scores):
+            # Normalize score to [0, 1]
+            norm_score = (score - min_score) / score_range if score_range > 0 else 0.5
+            
+            # Map to color (blue to red based on score)
+            color = (
+                int(255 * (1 - norm_score)),  # B
+                0,                           # G
+                int(255 * norm_score)         # R
+            )
+            
+            # Draw circle for keypoint
+            cv2.circle(
+                vis_img, 
+                (int(kp.pt[0]), int(kp.pt[1])), 
+                radius=3, 
+                color=color, 
+                thickness=-1
+            )
+            
+            # Generate alphabetical label (a-z, then aa, ab, etc.)
+            alpha_id = get_alpha_id(i + 1)
+            
+            # Draw label
+            cv2.putText(
+                vis_img,
+                alpha_id,
+                (int(kp.pt[0]) + 5, int(kp.pt[1]) + 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                (255, 255, 255),
+                1
+            )
+        
+        # Add title with method and point count
+        cv2.putText(
+            vis_img,
+            f"{method.upper()} Interest Points: {len(keypoints_with_scores)}",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 255),
+            2
+        )
+        
+        # Add object name
+        alpha_id = obj_info.alpha_id if obj_info.alpha_id else ""
+        obj_text = f"Object: {alpha_id} {obj_info.name}"
+        cv2.putText(
+            vis_img,
+            obj_text,
+            (10, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 255),
+            2
+        )
+        
+        # Add method and max points info at the bottom
+        method_text = f"Method: {method.upper()}, Max Points: {max_points}"
+        cv2.putText(
+            vis_img,
+            method_text,
+            (10, vis_img.shape[0] - 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 255),
+            2
+        )
+        
+        return vis_img
+    
+    def detect_regions_of_interest(
+        self,
+        image: np.ndarray,
+        obj_info: ObjectInfo,
+        method: str = 'harris',
+        max_points: int = 100,
+        quality_level: float = 0.01,
+        min_distance: int = 50,
+        visualize: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Detect points of interest within a specific object mask.
+        
+        Args:
+            image: RGB input image
+            obj_info: ObjectInfo containing the object mask
+            method: Feature detection method ('harris', 'shi_tomasi', 'sift', 'orb', 'fast')
+            max_points: Maximum number of points to detect
+            quality_level: Quality level parameter for some detectors (0.0-1.0)
+            min_distance: Minimum distance between detected points
+            visualize: Whether to generate visualization
+            
+        Returns:
+            Dictionary containing:
+                - 'keypoints': List of cv2.KeyPoint objects
+                - 'descriptors': Descriptors if available (None for some methods)
+                - 'pixel_coords': List of (x,y) pixel coordinates
+                - 'scores': Confidence scores for each point (if available)
+                - 'visualization': Visualization image (if visualize=True)
+        """
+        if self.debug:
+            self.profiler.start_iteration()
+            self.profiler.start("detect_regions_of_interest")
+        
+        try:
+            # Check if the object has a mask
+            if obj_info.mask is None:
+                if self.debug:
+                    print(f"No mask available for object '{obj_info.name}', generating one...")
+                
+                # Generate a mask if not available
+                mask = self._generate_segmentation(image, obj_info)
+                if mask is None:
+                    # Fallback to bounding box mask
+                    if self.debug:
+                        print("Using bounding box as fallback mask")
+                    x, y, w, h = obj_info.bbox
+                    mask = np.zeros(image.shape[:2], dtype=bool)
+                    mask[y:y+h, x:x+w] = True
+            else:
+                mask = obj_info.mask
+            
+            # Convert image to grayscale
+            if len(image.shape) == 3:
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = image.copy()
+            
+            # Apply mask to gray image (mask everything outside object)
+            masked_gray = np.zeros_like(gray)
+            masked_gray[mask] = gray[mask]
+            
+            # Select feature detection method
+            keypoints = []
+            descriptors = None
+            
+            if self.debug:
+                self.profiler.start(f"feature_detection_{method}")
+            
+            if method.lower() == 'harris':
+                # Harris corner detector
+                # Convert mask to uint8 for cornerHarris
+                mask_uint8 = mask.astype(np.uint8) * 255
+                
+                # Detect corners
+                corner_response = cv2.cornerHarris(masked_gray, blockSize=3, ksize=3, k=0.04)
+                
+                # Normalize response
+                cv2.normalize(corner_response, corner_response, 0, 255, cv2.NORM_MINMAX)
+                corner_response = np.uint8(corner_response)
+                
+                # Threshold and find centroids
+                threshold = 0.01 * corner_response.max()
+                corner_mask = corner_response > threshold
+                
+                # Additional filtering with mask
+                corner_mask = np.logical_and(corner_mask, mask)
+                
+                # Get corner coordinates
+                corners = np.where(corner_mask)
+                
+                # Create KeyPoint objects
+                for y, x in zip(corners[0], corners[1]):
+                    response = corner_response[y, x]
+                    keypoints.append(cv2.KeyPoint(float(x), float(y), size=3, response=float(response)))
+                
+                # Sort by response and limit to max_points
+                keypoints = sorted(keypoints, key=lambda kp: kp.response, reverse=True)[:max_points]
+                
+            elif method.lower() == 'shi_tomasi':
+                # Shi-Tomasi corner detector (goodFeaturesToTrack)
+                mask_uint8 = mask.astype(np.uint8) * 255
+                corners = cv2.goodFeaturesToTrack(
+                    masked_gray, 
+                    maxCorners=max_points,
+                    qualityLevel=quality_level,
+                    minDistance=min_distance,
+                    mask=mask_uint8
+                )
+                
+                if corners is not None:
+                    for corner in corners:
+                        x, y = corner.ravel()
+                        keypoints.append(cv2.KeyPoint(float(x), float(y), size=3))
+                        
+            elif method.lower() == 'sift':
+                # SIFT detector
+                try:
+                    sift = cv2.SIFT_create(nfeatures=max_points)
+                    
+                    # Apply mask to limit detection region
+                    mask_uint8 = mask.astype(np.uint8) * 255
+                    keypoints, descriptors = sift.detectAndCompute(gray, mask=mask_uint8)
+                    
+                    # Filter out keypoints outside the mask (just to be sure)
+                    valid_keypoints = []
+                    valid_descriptors = []
+                    
+                    for i, kp in enumerate(keypoints):
+                        x, y = int(kp.pt[0]), int(kp.pt[1])
+                        if 0 <= x < mask.shape[1] and 0 <= y < mask.shape[0] and mask[y, x]:
+                            valid_keypoints.append(kp)
+                            if descriptors is not None:
+                                valid_descriptors.append(descriptors[i])
+                    
+                    keypoints = valid_keypoints
+                    if descriptors is not None and len(valid_descriptors) > 0:
+                        descriptors = np.array(valid_descriptors)
+                    else:
+                        descriptors = None
+                        
+                except Exception as e:
+                    if self.debug:
+                        print(f"SIFT detection error: {e}")
+                    # Fallback to Shi-Tomasi
+                    return self.detect_regions_of_interest(
+                        image, obj_info, method='shi_tomasi', 
+                        max_points=max_points, quality_level=quality_level, 
+                        min_distance=min_distance, visualize=visualize
+                    )
+                    
+            elif method.lower() == 'orb':
+                # ORB detector
+                try:
+                    orb = cv2.ORB_create(nfeatures=max_points)
+                    
+                    # Apply mask to limit detection region
+                    mask_uint8 = mask.astype(np.uint8) * 255
+                    keypoints, descriptors = orb.detectAndCompute(gray, mask=mask_uint8)
+                    
+                    # Filter out keypoints outside the mask
+                    valid_keypoints = []
+                    valid_descriptors = []
+                    
+                    for i, kp in enumerate(keypoints):
+                        x, y = int(kp.pt[0]), int(kp.pt[1])
+                        if 0 <= x < mask.shape[1] and 0 <= y < mask.shape[0] and mask[y, x]:
+                            valid_keypoints.append(kp)
+                            if descriptors is not None:
+                                valid_descriptors.append(descriptors[i])
+                    
+                    keypoints = valid_keypoints
+                    if descriptors is not None and len(valid_descriptors) > 0:
+                        descriptors = np.array(valid_descriptors)
+                    else:
+                        descriptors = None
+                        
+                except Exception as e:
+                    if self.debug:
+                        print(f"ORB detection error: {e}")
+                    # Fallback to Shi-Tomasi
+                    return self.detect_regions_of_interest(
+                        image, obj_info, method='shi_tomasi', 
+                        max_points=max_points, quality_level=quality_level, 
+                        min_distance=min_distance, visualize=visualize
+                    )
+                    
+            elif method.lower() == 'fast':
+                # FAST corner detector
+                try:
+                    fast = cv2.FastFeatureDetector_create(threshold=10)
+                    
+                    # Detect points in masked image
+                    keypoints = fast.detect(masked_gray, None)
+                    
+                    # Keep only points within mask (redundant but helps ensure correctness)
+                    valid_keypoints = []
+                    for kp in keypoints:
+                        x, y = int(kp.pt[0]), int(kp.pt[1])
+                        if 0 <= x < mask.shape[1] and 0 <= y < mask.shape[0] and mask[y, x]:
+                            valid_keypoints.append(kp)
+                    
+                    keypoints = valid_keypoints[:max_points]
+                    
+                    # Compute descriptors using ORB if needed
+                    if len(keypoints) > 0:
+                        orb = cv2.ORB_create()
+                        _, descriptors = orb.compute(gray, keypoints)
+                        
+                except Exception as e:
+                    if self.debug:
+                        print(f"FAST detection error: {e}")
+                    # Fallback to Shi-Tomasi
+                    return self.detect_regions_of_interest(
+                        image, obj_info, method='shi_tomasi', 
+                        max_points=max_points, quality_level=quality_level, 
+                        min_distance=min_distance, visualize=visualize
+                    )
+            else:
+                raise ValueError(f"Unsupported method: {method}")
+            
+            if self.debug:
+                self.profiler.stop(f"feature_detection_{method}")
+                print(f"Detected {len(keypoints)} keypoints using {method} method")
+            
+            # Extract pixel coordinates
+            pixel_coords = [(int(kp.pt[0]), int(kp.pt[1])) for kp in keypoints]
+            
+            # Extract scores if available
+            scores = [kp.response if hasattr(kp, 'response') else 1.0 for kp in keypoints]
+            
+            # Create visualization if requested
+            visualization = None
+            if visualize:
+                if self.debug:
+                    self.profiler.start("roi_visualization")
+                
+                # Use the dedicated visualization function
+                visualization = self.visualize_interest_points(
+                    image=image,
+                    obj_info=obj_info,
+                    keypoints=keypoints,
+                    scores=scores,
+                    method=method,
+                    max_points=max_points
+                )
+                
+                if self.debug:
+                    self.profiler.stop("roi_visualization")
+            
+            # Create results dictionary
+            results = {
+                'keypoints': keypoints,
+                'descriptors': descriptors,
+                'pixel_coords': pixel_coords,
+                'scores': scores,
+                'object_name': obj_info.name,
+                'method': method,
+                'mask_area': np.sum(mask),
+            }
+            
+            if visualize:
+                results['visualization'] = visualization
+                
+            return results
+            
+        except Exception as e:
+            if self.debug:
+                print(f"Error in detect_regions_of_interest: {str(e)}")
+                traceback.print_exc()
+            return {
+                'keypoints': [],
+                'descriptors': None,
+                'pixel_coords': [],
+                'scores': [],
+                'error': str(e)
+            }
+            
+        finally:
+            if self.debug:
+                self.profiler.stop("detect_regions_of_interest")
+                self.profiler.end_iteration(preserve_current=True)
+    
     def visualize_detections(
         self,
         image: np.ndarray,
         objects: List[ObjectInfo],
         show_masks: bool = True,
-        show_components: bool = True,
+        show_parts: bool = True,
         show_poses: bool = True
     ) -> np.ndarray:
         """
-        Visualize detected objects with masks, components, and poses
+        Visualize detected objects with masks, parts, and poses
         
         Args:
             image: Original RGB image
             objects: List of ObjectInfo objects to visualize
             show_masks: Whether to show segmentation masks
-            show_components: Whether to show object components
+            show_parts: Whether to show object parts
             show_poses: Whether to show object poses
             
         Returns:
@@ -936,8 +1322,9 @@ class PerceptionSystem:
                 x, y, w, h = obj.bbox
                 cv2.rectangle(vis_image, (x, y), (x + w, y + h), (0, 255, 0), 2)
                 
-                # Add label with confidence
-                label = f"{obj.name} ({obj.confidence:.2f})"
+                # Add label with confidence and alpha_id
+                alpha_id = obj.alpha_id if obj.alpha_id else ""
+                label = f"{alpha_id}: {obj.name} ({obj.confidence:.2f})"
                 cv2.putText(
                     vis_image,
                     label,
@@ -977,15 +1364,16 @@ class PerceptionSystem:
                     cv2.arrowedLine(vis_image, origin, end_y, (0, 255, 0), 2)
                 
                 # Draw components if available and requested
-                if show_components and obj.components is not None and len(obj.components) > 0:
+                if show_parts and obj.components is not None and len(obj.components) > 0:
                     # Process each component
                     for comp_name, comp_info in obj.components.items():
                         # Draw component bounding box in a different color (blue)
                         cx, cy, cw, ch = comp_info.bbox
                         cv2.rectangle(vis_image, (cx, cy), (cx + cw, cy + ch), (255, 0, 0), 2)
                         
-                        # Add component label
-                        comp_label = f"{comp_name} ({comp_info.confidence:.2f})"
+                        # Add component label with alpha_id
+                        alpha_id = comp_info.alpha_id if comp_info.alpha_id else ""
+                        comp_label = f"{alpha_id}: {comp_name} ({comp_info.confidence:.2f})"
                         cv2.putText(
                             vis_image,
                             comp_label,
@@ -1052,6 +1440,34 @@ class PerceptionSystem:
             if self.debug:
                 self.profiler.stop("visualize_detections")
     
+    def visualize_segmentation(
+        self,
+        image: np.ndarray,
+        masks: np.ndarray,
+        metadata: Dict
+    ) -> np.ndarray:
+        """
+        Visualize segmentation masks using the FastSAMMaskGenerator visualization
+        
+        Args:
+            image: Original RGB image
+            masks: Labeled mask array from FastSAM
+            metadata: Metadata dictionary from FastSAM
+            
+        Returns:
+            Visualization image
+        """
+        if self.segmenter is None:
+            return image.copy()
+            
+        try:
+            # Use the segmenter's visualization method
+            return self.segmenter.visualize_masks(image, masks, metadata, alpha=0.5)
+        except Exception as e:
+            if self.debug:
+                print(f"Error in visualize_segmentation: {str(e)}")
+            return image.copy()
+    
     def set_detector_classes(self, classes: List[str]):
         """
         Update YOLO-World detector classes
@@ -1075,7 +1491,7 @@ class PerceptionSystem:
         if self.debug:
             self.profiler.print_summary(sort_by=sort_by, top_n=top_n, compact=compact)
         else:
-            print("Performance profiling is disabled. Create HybridPerceptionSystem with debug=True to enable.")
+            print("Performance profiling is disabled. Create PerceptionSystem with debug=True to enable.")
             
     def reset_profiler(self):
         """Reset the profiler timings"""
@@ -1151,8 +1567,9 @@ class PerceptionSystem:
         """Release resources used by the perception system"""
         # Free any resources if needed
         if self.debug:
-            print("HybridPerceptionSystem resources released")
+            print("PerceptionSystem resources released")
             
             # Print final performance summary
             print("\nFinal performance summary:")
             self.print_performance_summary(sort_by="total", top_n=10)
+            

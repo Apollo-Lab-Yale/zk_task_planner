@@ -17,7 +17,7 @@ class Camera:
         self.pipeline = rs.pipeline()
         self.config = rs.config()
         self.align = rs.align(rs.stream.color)
-
+        self.point_cloud = rs.pointcloud()
         # Configure streams
         self.config.enable_stream(rs.stream.depth, width, height, rs.format.z16, fps)
         self.config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
@@ -78,7 +78,16 @@ class Camera:
                 if self.debug:
                     print(f"Frame acquisition error: {e}")
                 time.sleep(0.1)
+    
+    def get_point_cloud(self, depth_frame):
+        aligned_frames = self._frame_queue.get(timeout=1.0)
 
+        depth_frame = aligned_frames.get_depth_frame()
+        points =  self.point_cloud.calculate(depth_frame)
+        
+        return points
+
+    
     def get_frames(self) -> Optional[Tuple[np.ndarray, np.ndarray]]:
         """Get latest color and depth frames."""
         try:

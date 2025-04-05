@@ -392,14 +392,19 @@ class SkillHandler:
         # Handle push/pull actions
         if action_type in ['push', 'pull']:
             return self._create_push_pull_action(
-                action_type=action_type,
-                distance=parameters['distance'],
-                object_pose=object_pose,
-                object_pixel_pose=object_pixel_pose,
-                skill_parameters=skill_parameters,
-                is_top_down_grasp=False,
-                is_side_grasp=False,
-            )
+            action_type=action_type,
+            surface_keywords=parameters.get('surface_keywords', []),
+            is_parallel_surface=parameters.get('is_parallel_surface', False),
+            is_bottom=parameters.get('is_bottom', False),
+            has_pivot=parameters.get('has_pivot', False),
+            pivot_point=parameters.get('pivot_point', None),
+            distance=parameters.get('distance', 0.1),
+            object_pose=object_pose,
+            object_pixel_pose=object_pixel_pose,
+            interaction_points=interaction_points,
+            interaction_pixel_points=interaction_pixel_points,
+            skill_parameters=skill_parameters,
+        )
             
         # Handle gripper movement with potential grasp
         elif action_type == 'move_gripper_to_pose':
@@ -449,28 +454,137 @@ class SkillHandler:
         return None
 
     def _create_push_pull_action(self,
-                           action_type: str,
-                           distance: float,
-                           object_pose: np.ndarray,
-                           object_pixel_pose: Tuple[int, int],
-                           skill_parameters: Dict[str, Any]) -> ExecutableAction:
-        """Create push or pull action with specified distance"""
+                       action_type: str,
+                       surface_keywords: List[str],
+                       is_parallel_surface: bool,
+                       is_bottom: bool,
+                       has_pivot: bool,
+                       pivot_point: Optional[str],
+                       distance: float,
+                       object_pose: np.ndarray,
+                       object_pixel_pose: Tuple[int, int],
+                       interaction_points: Dict[str, np.ndarray],
+                       interaction_pixel_points: Dict[str, Tuple[int, int]],
+                       skill_parameters: Dict[str, Any]) -> ExecutableAction:
+        """Create push or pull action with specified parameters"""
         # Calculate force based on distance and skill parameters
         force_magnitude = self._get_force_magnitude(skill_parameters.get('force_threshold', 'medium'))
         
+        # Find target interaction point for the surface
+        target_point = np.zeros(3)
+        target_pixel = object_pixel_pose  # Default to object center
+        
+        for keyword in surface_keywords:
+            if keyword in interaction_points:
+                target_point = interaction_points[keyword]
+                target_pixel = interaction_pixel_points[keyword]
+                break
+        
+        # Determine the orientation based on surface relationship
+        orientation = np.zeros(3)
+        
+        # If we have surface information, use it to determine approach angle
+        if len(surface_keywords) > 0:
+            # Calculate surface normal vector (simplified)
+            # In a real system, this would be based on point cloud analysis or depth image
+            surface_normal = np.array([0, 0, 1])  # Default points towards camera
+            
+            # Adjust based on object pose
+            if object_pose is not None and len(object_pose) >= 6:
+                # Apply rotation from object pose to surface normal
+                # This is a simplified approach; in reality would use rotation matrices
+                roll, pitch, yaw = object_pose[3:6]
+                # Simple rotation transformation - in production would use proper 3D rotation
+                surface_normal = np.array([
+                    np.sin(pitch) * np.cos(yaw),
+                    np.sin(pitch) * np.sin(yaw),
+                    np.cos(pitch)
+                ])
+            
+            # Adjust based on is_parallel_surface
+            if is_parallel_surface:
+                # For parallel approach, we want to move along the surface
+                # This requires computing a vector parallel to the surface
+                # For simplicity, we'll use a perpendicular vector to the normal
+                if abs(surface_normal[2]) < 0.9:  # If normal is not too vertical
+                    parallel_vector = np.cross(surface_normal, np.array([0, 0, 1]))
+                else:
+                    parallel_vector = np.cross(surface_normal, np.array([1, 0, 0]))
+                    
+                # Normalize
+                parallel_vector = parallel_vector / np.linalg.norm(parallel_vector)
+                
+                # Set approach direction to be along this parallel vector
+                approach_vector = parallel_vector
+            else:
+                # For perpendicular approach, just use the surface normal
+                approach_vector = surface_normal
+            
+            # Adjust for push vs pull direction
+            if action_type == 'pull':
+                approach_vector = -approach_vector
+                
+            # Adjust for top vs bottom surface
+            if is_bottom:
+                # For bottom surface, we typically approach from below
+                approach_vector[2] = -abs(approach_vector[2])
+            else:
+                # For top surface, we typically approach from above
+                approach_vector[2] = abs(approach_vector[2])
+            
+            # Calculate orientation from approach vector
+            # This is a simplified conversion from vector to Euler angles
+            # In production, would use proper vector to rotation matrix conversion
+            pitch = np.arctan2(approach_vector[2], np.sqrt(approach_vector[0]**2 + approach_vector[1]**2))
+            yaw = np.arctan2(approach_vector[1], approach_vector[0])
+            orientation = np.array([0, pitch, yaw])  # Roll is set to 0 for simplicity
+        
+        # Handle pivot points if specified
+        pivot_position = None
+        if has_pivot and pivot_point:
+            # Try to find the pivot point location
+            if pivot_point in interaction_points:
+                pivot_position = interaction_points[pivot_point]
+            else:
+                # If pivot point isn't explicitly provided, make an estimate
+                # This is a simplified approach - in production would use more sophisticated estimation
+                if pivot_point.lower() in ['top', 'upper']:
+                    # Estimate pivot at top of object
+                    pivot_position = object_pose[:3] + np.array([0, 0, 0.1])  # 10cm above object center
+                elif pivot_point.lower() in ['bottom', 'lower']:
+                    # Estimate pivot at bottom of object
+                    pivot_position = object_pose[:3] + np.array([0, 0, -0.1])  # 10cm below object center
+                elif pivot_point.lower() in ['left']:
+                    # Estimate pivot at left of object
+                    pivot_position = object_pose[:3] + np.array([-0.1, 0, 0])  # 10cm left of object center
+                elif pivot_point.lower() in ['right']:
+                    # Estimate pivot at right of object
+                    pivot_position = object_pose[:3] + np.array([0.1, 0, 0])  # 10cm right of object center
+        
+        # Create the parameters for the executable action
+        action_params = {
+            'distance': distance,
+            'force_magnitude': force_magnitude,
+            'speed': self._get_speed_value(skill_parameters.get('speed_requirement', 'medium')),
+            'precision': skill_parameters.get('precision_required', 'medium'),
+            'is_parallel_surface': is_parallel_surface,
+            'is_bottom': is_bottom,
+            'has_pivot': has_pivot,
+            'surface_keywords': surface_keywords
+        }
+        
+        # Add pivot information if available
+        if pivot_position is not None:
+            action_params['pivot_position'] = pivot_position
+        
         return ExecutableAction(
             action_type=action_type,
-            position=np.zeros(3),  # Will use current position
-            orientation=np.zeros(3),  # Will use current orientation
-            pixel_position=object_pixel_pose,  # Store pixel location for visualization
-            is_top_down_grasp=False,
-            is_side_grasp=False,
-            parameters={
-                'distance': distance,
-                'force_magnitude': force_magnitude,
-                'speed': self._get_speed_value(skill_parameters.get('speed_requirement', 'medium')),
-                'precision': skill_parameters.get('precision_required', 'medium')
-            }
+            position=target_point,  # Use the identified surface point
+            orientation=orientation,  # Orientation calculated based on surface relationship
+            pixel_position=target_pixel,  # Store pixel location for visualization
+            is_top_down_grasp=False,  # Not a grasp action
+            is_side_grasp=False,  # Not a grasp action
+            parameters=action_params
         )
 
     def _create_gripper_pose_action(self,
@@ -720,15 +834,32 @@ class SkillHandler:
                     # Scale distance for visualization (20 pixels per 0.1m)
                     arrow_length = int(distance * 200)
                     
-                    # Calculate push/pull direction relative to object center
-                    angle = np.arctan2(pos_2d[1] - object_center[1], 
-                                    pos_2d[0] - object_center[0])
+                    # Get approach orientation
+                    orientation = action.orientation
+                    if not np.all(orientation == 0):
+                        # Convert orientation to direction vector
+                        # Simplified - in production would use proper rotation matrix
+                        pitch, yaw = orientation[1], orientation[2]
+                        direction = np.array([
+                            np.cos(pitch) * np.cos(yaw),
+                            np.cos(pitch) * np.sin(yaw),
+                            np.sin(pitch)
+                        ])
+                        
+                        # Project 3D direction to 2D image plane (simplified)
+                        angle = np.arctan2(direction[1], direction[0])
+                    else:
+                        # Fallback to simple direction from object center
+                        angle = np.arctan2(pos_2d[1] - object_center[1], 
+                                        pos_2d[0] - object_center[0])
+                    
+                    # Adjust direction based on push/pull
+                    if action.action_type == 'pull':
+                        angle += np.pi  # Reverse direction for pull
                     
                     end_point = (
-                        int(pos_2d[0] + (arrow_length * np.cos(angle) if action.action_type == 'push' 
-                                    else -arrow_length * np.cos(angle))),
-                        int(pos_2d[1] + (arrow_length * np.sin(angle) if action.action_type == 'push'
-                                    else -arrow_length * np.sin(angle)))
+                        int(pos_2d[0] + arrow_length * np.cos(angle)),
+                        int(pos_2d[1] + arrow_length * np.sin(angle))
                     )
                     
                     cv2.arrowedLine(
@@ -750,6 +881,63 @@ class SkillHandler:
                         color,
                         1
                     )
+                    
+                    # Add surface information
+                    if 'surface_keywords' in action.parameters and action.parameters['surface_keywords']:
+                        surface_info = f"Surface: {', '.join(action.parameters['surface_keywords'])}"
+                        cv2.putText(
+                            vis_image,
+                            surface_info,
+                            (pos_2d[0] + 10, pos_2d[1] + 25),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.4,
+                            color,
+                            1
+                        )
+                    
+                    # Show parallel/perpendicular indication
+                    if 'is_parallel_surface' in action.parameters:
+                        approach_type = "Parallel" if action.parameters['is_parallel_surface'] else "Perpendicular"
+                        cv2.putText(
+                            vis_image,
+                            approach_type,
+                            (pos_2d[0] + 10, pos_2d[1] + 40),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.4,
+                            color,
+                            1
+                        )
+                    
+                    # Draw pivot point if available
+                    if action.parameters.get('has_pivot', False) and 'pivot_position' in action.parameters:
+                        pivot_pos = action.parameters['pivot_position']
+                        
+                        # Convert 3D position to 2D pixel coordinates (simplified)
+                        pivot_pixel = (
+                            int(object_center[0] + pivot_pos[0] * image.shape[1]),
+                            int(object_center[1] + pivot_pos[1] * image.shape[0])
+                        )
+                        
+                        # Ensure within image bounds
+                        pivot_pixel = (
+                            max(0, min(pivot_pixel[0], image.shape[1] - 1)),
+                            max(0, min(pivot_pixel[1], image.shape[0] - 1))
+                        )
+                        
+                        # Draw pivot point
+                        cv2.circle(vis_image, pivot_pixel, 5, (0, 255, 255), -1)  # Yellow for pivot
+                        cv2.putText(
+                            vis_image,
+                            "Pivot",
+                            (pivot_pixel[0] + 5, pivot_pixel[1] + 5),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.4,
+                            (0, 255, 255),
+                            1
+                        )
+                        
+                        # Draw line from interaction point to pivot
+                        cv2.line(vis_image, pos_2d, pivot_pixel, (0, 255, 255), 1, cv2.LINE_AA)
             
             else:
                 # For actions without position (close_gripper, release, retract_gripper)

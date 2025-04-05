@@ -16,10 +16,26 @@ def overlaps(box1, box2):
                     box1[3] < box2[1] or 
                     box1[1] > box2[3])
 
+def get_alpha_id(num):
+    """
+    Convert a numerical ID to an alphabetical ID (a, b, c, ... aa, ab, ...)
+    For example:
+    1 -> a, 2 -> b, ..., 26 -> z, 27 -> aa, 28 -> ab, ...
+    """
+    if num <= 0:
+        return ""
+    
+    letters = ""
+    while num > 0:
+        num, remainder = divmod(num - 1, 26)
+        letters = chr(97 + remainder) + letters  # 97 is ASCII for 'a'
+    
+    return letters
+
 @dataclass
 class FastSAMConfig:
     """Configuration settings for Ultralytics FastSAM-based mask generation"""
-    model_type: str = "FastSAM-s"  # FastSAM-s or FastSAM-x
+    model_type: str = "FastSAM-x"  # FastSAM-s or FastSAM-x
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     
     # Memory management
@@ -27,15 +43,15 @@ class FastSAMConfig:
     enable_memory_efficient_attention: bool = False
     
     # Mask generation parameters
-    conf_threshold: float = 0.6  # Confidence threshold for detection
-    iou_threshold: float = 0.9   # IoU threshold for NMS
+    conf_threshold: float = 0.4  # Confidence threshold for detection
+    iou_threshold: float = 0.7   # IoU threshold for NMS
     retina_masks: bool = True    # Use high-quality mask output
     
     # Post-processing parameters
-    remove_small_regions: bool = True
-    merge_overlapping: bool = True
+    remove_small_regions: bool = False
+    merge_overlapping: bool = False
     overlap_threshold: float = 0.5
-    min_area: float = 25.0  # Minimum area for mask retention
+    min_area: float = 10.0  # Minimum area for mask retention
     draw_borders: bool = True
 
 class FastSAMMaskGenerator:
@@ -50,6 +66,7 @@ class FastSAMMaskGenerator:
         self._setup_memory_config()
         self._setup_model()
         self._next_mask_id = 1
+        self.debug = False
 
     def _setup_memory_config(self):
         """Configure memory management settings"""
@@ -111,10 +128,40 @@ class FastSAMMaskGenerator:
             Tuple[np.ndarray, Dict]: Labeled mask array and metadata dictionary
         """
         try:
+            # Store original image dimensions
+            if isinstance(image, np.ndarray):
+                original_height, original_width = image.shape[:2]
+            else:
+                # If it's a path, we'll get dimensions later
+                original_height, original_width = None, None
+            
+            # Check if image needs to be resized
+            if isinstance(image, np.ndarray) and (original_height > self.config.max_image_size or 
+                                                original_width > self.config.max_image_size):
+                # Calculate new dimensions
+                if original_width > original_height:
+                    new_width = self.config.max_image_size
+                    new_height = int(original_height * (self.config.max_image_size / original_width))
+                else:
+                    new_height = self.config.max_image_size
+                    new_width = int(original_width * (self.config.max_image_size / original_height))
+                
+                # Resize image for processing
+                resized_image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)
+                print(f"Resized image from {image.shape[:2]} to {resized_image.shape[:2]}")
+                input_image = resized_image
+            else:
+                input_image = image
+                
             # Get initial results
             start = time.time()
-            everything_results = self.predictor(image)
+            everything_results = self.predictor(input_image)
             print(f"Inference time: {time.time() - start:.2f}s")
+            
+            # If we got dimensions from a file, store them now
+            if original_height is None and original_width is None:
+                original_height, original_width = everything_results[0].orig_shape
+                
             # Apply specific prompt if needed
             if prompt_type != "everything":
                 if prompt_type == "points" and "points" in prompt_args:
@@ -129,7 +176,62 @@ class FastSAMMaskGenerator:
                 results = everything_results
 
             # Convert results to labeled masks and metadata
-            return self._process_results(results)
+            labeled_masks, metadata = self._process_results(results)
+
+            # If the image was resized, resize the masks back to original dimensions
+            if isinstance(image, np.ndarray) and (original_height != labeled_masks.shape[0] or 
+                                                original_width != labeled_masks.shape[1]):
+                # Create a new labeled mask array of the original size
+                original_labeled_masks = np.zeros((original_height, original_width), dtype=np.int32)
+                
+                # Update metadata bounding boxes and resize to original dimensions
+                for mask_id in list(metadata.keys()):
+                    # Create a binary mask for this ID
+                    binary_mask = labeled_masks == mask_id
+                    
+                    # Resize binary mask to original dimensions
+                    resized_binary_mask = cv2.resize(
+                        binary_mask.astype(np.uint8), 
+                        (original_width, original_height), 
+                        interpolation=cv2.INTER_NEAREST
+                    ).astype(bool)
+                    
+                    # Skip if the mask disappeared during resizing
+                    if not np.any(resized_binary_mask):
+                        del metadata[mask_id]
+                        continue
+                    
+                    # Update the labeled mask
+                    original_labeled_masks[resized_binary_mask] = mask_id
+                    
+                    # Update the bounding box in metadata
+                    y_indices, x_indices = np.where(resized_binary_mask)
+                    bbox = [
+                        int(x_indices.min()),
+                        int(y_indices.min()),
+                        int(x_indices.max() - x_indices.min()),
+                        int(y_indices.max() - y_indices.min())
+                    ]
+                    metadata[mask_id]['bbox'] = bbox
+                    
+                    # Update the area
+                    metadata[mask_id]['area'] = float(resized_binary_mask.sum())
+                    
+                    # Recalculate contours if needed
+                    if self.config.draw_borders:
+                        contours, _ = cv2.findContours(
+                            resized_binary_mask.astype(np.uint8),
+                            cv2.RETR_EXTERNAL,
+                            cv2.CHAIN_APPROX_SIMPLE
+                        )
+                        metadata[mask_id]['contours'] = [
+                            cv2.approxPolyDP(c, epsilon=0.01, closed=True).tolist()
+                            for c in contours
+                        ]
+                
+                return original_labeled_masks, metadata
+            else:
+                return labeled_masks, metadata
 
         except RuntimeError as e:
             if "out of memory" in str(e):
@@ -155,7 +257,20 @@ class FastSAMMaskGenerator:
         for i, mask_data in enumerate(results[0].masks, 1):
             # Convert mask tensor to boolean numpy array
             mask = mask_data.data.cpu().numpy()[0]
-            mask = (mask > 0.5).astype(bool)  # Convert to boolean mask
+            original_shape = mask.shape
+            
+            # Resize mask to match original image dimensions if needed
+            if mask.shape[0] != height or mask.shape[1] != width:
+                if self.debug:
+                    print(f"Resizing mask from {mask.shape} to {(height, width)}")
+                mask = cv2.resize(
+                    mask.astype(np.float32), 
+                    (width, height), 
+                    interpolation=cv2.INTER_LINEAR
+                )
+            
+            # Convert to boolean mask after resizing
+            mask = (mask > 0.5).astype(bool)
             
             # Skip if mask is empty
             if not mask.any():
@@ -185,10 +300,12 @@ class FastSAMMaskGenerator:
             ]
             
             # Store metadata
-            # print(results[0].probs)
+            alpha_id = get_alpha_id(mask_id)  # Convert numeric ID to alphabetical ID
             metadata[mask_id] = {
                 'area': area,
                 'bbox': bbox,
+                'alpha_id': alpha_id,  # Store alphabetical ID in metadata
+                'original_shape': original_shape,
                 # 'confidence': float(results[0].probs[i-1]) if len(results[0].probs) > 0 else 1.0,
             }
             
@@ -237,16 +354,21 @@ class FastSAMMaskGenerator:
                     iou = intersection / union
                     
                     if iou > self.config.overlap_threshold:
-                        # Keep mask with higher confidence
-                        conf1 = new_metadata[id1]['confidence']
-                        conf2 = new_metadata[id2]['confidence']
-                        
-                        if conf1 >= conf2:
+                        # Keep mask with higher confidence if available
+                        if 'confidence' in new_metadata[id1] and 'confidence' in new_metadata[id2]:
+                            conf1 = new_metadata[id1]['confidence']
+                            conf2 = new_metadata[id2]['confidence']
+                            
+                            if conf1 >= conf2:
+                                new_masks[mask2] = id1
+                                del new_metadata[id2]
+                            else:
+                                new_masks[mask1] = id2
+                                del new_metadata[id1]
+                        else:
+                            # If no confidence scores, keep the first mask
                             new_masks[mask2] = id1
                             del new_metadata[id2]
-                        else:
-                            new_masks[mask1] = id2
-                            del new_metadata[id1]
                         
         return new_masks, new_metadata
 
@@ -275,7 +397,10 @@ class FastSAMMaskGenerator:
                 x_center = int(np.mean(x_coords))
                 y_center = int(np.mean(y_coords))
                 
-                region_id = f"r{mask_id}"
+                # Use alphabetical ID instead of numeric ID
+                alpha_id = metadata[mask_id].get('alpha_id', get_alpha_id(mask_id))
+                region_id = alpha_id
+                
                 text_size = cv2.getTextSize(region_id, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
                 
                 text_x = x_center - text_size[0]//2
@@ -371,10 +496,13 @@ class FastSAMMaskGenerator:
                 cx = bbox[0] + bbox[2] / 2
                 cy = bbox[1] + bbox[3] / 2
             
+            # Use alphabetical ID instead of numeric ID
+            alpha_id = metadata[mask_id].get('alpha_id', get_alpha_id(mask_id))
+            
             # Add ID label
             plt.text(
                 cx, cy,
-                str(mask_id),
+                alpha_id,
                 color='white',
                 fontsize=font_size,
                 bbox=dict(
