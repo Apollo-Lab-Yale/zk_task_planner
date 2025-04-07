@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 import asyncio
 import json
 from dataclasses import dataclass, asdict
@@ -11,7 +11,15 @@ import base64
 import time
 
 from cognitive_bt_framework.src.llm_interface import LLMInterfaceOpenAI
+from cognitive_bt_framework.src.vision.perception_system import ObjectInfo
 
+@dataclass
+class PointOfInterest:
+    """Data class to store labeled point of interest"""
+    label: str  # Alphabetical label (a, b, c, etc.)
+    position: Tuple[float, float]  # Normalized (x, y) coordinates
+    description: str = ""  # Optional description of the point
+    
 @dataclass
 class Skill:
     """Data class to store skill information"""
@@ -23,6 +31,7 @@ class Skill:
     prerequisites: List[str]
     constraints: List[str]
     image_id: str
+    points_of_interest: Dict[str, PointOfInterest]  # Dictionary of labeled points
 
 class SkillGenerator:
     def __init__(self, llm_interface, skills_dir: str = "stored_skills"):
@@ -47,8 +56,23 @@ class SkillGenerator:
             try:
                 with open(skill_file, 'r') as f:
                     skill_data = json.load(f)
+                    
+                    # Convert points_of_interest dict to PointOfInterest objects
+                    if "points_of_interest" in skill_data:
+                        points = {}
+                        for label, point_data in skill_data["points_of_interest"].items():
+                            points[label] = PointOfInterest(
+                                label=point_data["label"],
+                                position=tuple(point_data["position"]),
+                                description=point_data.get("description", "")
+                            )
+                        skill_data["points_of_interest"] = points
+                    else:
+                        skill_data["points_of_interest"] = {}
+                        
                     skill = Skill(**skill_data)
                     self.skills_cache[skill.name] = skill
+                    
             except Exception as e:
                 print(f"Error loading skill from {skill_file}: {e}")
 
@@ -70,124 +94,133 @@ class SkillGenerator:
             return cv2.imread(str(image_path))
         return None
 
-    def _validate_input_dimensions(self, image: np.ndarray, mask: np.ndarray) -> bool:
+    def _visualize_points_of_interest(self, image: np.ndarray, points: Dict[str, PointOfInterest]) -> np.ndarray:
         """
-        Validate that image and mask dimensions match
+        Create a visualization of the image with labeled points of interest
         
         Args:
-            image: Input image array
-            mask: Input mask array
+            image: Input image
+            points: Dictionary of points of interest
             
         Returns:
-            True if dimensions match, False otherwise
-            
-        Raises:
-            ValueError: If dimensions don't match with detailed information
+            Image with visualized points of interest
         """
-        if mask.shape[:2] != image.shape[:2]:
-            raise ValueError(
-                f"Mask dimensions {mask.shape[:2]} do not match image dimensions {image.shape[:2]}. "
-                "Please ensure mask and image have the same height and width."
+        vis_img = image.copy()
+        h, w = image.shape[:2]
+        
+        # Draw labeled points
+        for label, point in points.items():
+            # Convert normalized coordinates to pixel coordinates
+            px, py = int(point.position[0] * w), int(point.position[1] * h)
+            
+            # Draw circle for point
+            cv2.circle(vis_img, (px, py), 5, (0, 0, 255), -1)
+            
+            # Draw label
+            cv2.putText(
+                vis_img,
+                label,
+                (px + 10, py + 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2
             )
-        return True
-
+        
+        return vis_img
 
     async def generate_skill(self, 
                            image: np.ndarray,
-                           mask: np.ndarray,
+                           points_of_interest: Dict[str, PointOfInterest],
                            abstract_action: str,
-                           target_object: str) -> Optional[Skill]:
+                           target_object: str,
+                           object_info: Optional[ObjectInfo] = None) -> Optional[Skill]:
         """
-        Generate a new skill using the LLM interface based on image input
+        Generate a new skill using the LLM interface based on image input with labeled points
         
         Args:
             image: Input image of the object
-            mask: Binary mask of the target object
+            points_of_interest: Dictionary of labeled points of interest
             abstract_action: The abstract action to perform
             target_object: The object to perform the action on
+            object_info: Optional ObjectInfo containing additional object data
         
         Returns:
             Generated skill if successful, None otherwise
         """
-        # Create masked image
-        try:
-            self._validate_input_dimensions(image, mask)
-        except ValueError as e:
-            print(f"Input validation failed: {e}")
-            return None
-            
-        # Create masked image
-        masked_image = image.copy()
-        masked_image[~mask] = 0
+        # Create visualization of image with labeled points
+        vis_img = self._visualize_points_of_interest(image, points_of_interest)
         
         # Generate unique ID for this image
-        image_id = f"{abstract_action}_{target_object}_{hash(mask.tobytes()) & 0xFFFFFF:06x}"
-        self._save_image(masked_image, image_id)
+        point_hash = hash(str([(p.label, p.position) for p in points_of_interest.values()])) & 0xFFFFFF
+        image_id = f"{abstract_action}_{target_object}_{point_hash:06x}"
+        self._save_image(vis_img, image_id)
+        
+        # Create descriptions for prompt
+        point_descriptions = []
+        for label, point in points_of_interest.items():
+            x, y = point.position
+            desc = f"Point {label}: {point.description}" if point.description else f"Point {label}: Located at normalized coordinates ({x:.2f}, {y:.2f})"
+            point_descriptions.append(desc)
         
         # Create prompt for skill definition
         combined_prompt = [
             {"role": "system", "content": f"""Analyze the object visually and generate a complete skill definition for performing {abstract_action} on a {target_object}.
 
-            First, determine the specific subtype of the action based on the object's visual characteristics.
-            The skill name should follow the format: action_targetobject_mechanism
+                    The image contains an object with labeled points of interest (red circles with alphabetical labels).
 
-            Return a JSON object with the following structure:
-            {{
-                "skill_name": "specific_action_name_with_mechanism",
-                "primitive_sequence": [
-                    "list of primitive actions using only these commands:",
-                    "push(surface_keywords, is_parallel_surface, is_bottom, has_pivot, pivot_point)",
-                        "surface_keywords: List of descriptive terms identifying the surface used to calculate the normal vector associated with the push force, similar to the keywords in move_gripper_to_pose",
-                        "is_parallel_surface: Boolean indicating if the gripper should push parallel to the surface (true) or perpendicular to it (false)",
-                        "is_button: Boolean indicating if the push is being applied to press a button",
-                        "has_pivot: Boolean indicating if the surface has a pivot point (true) or is fixed/freely movable (false)",
-                        "pivot_point: If has_pivot is true, specifies the location of the pivot point relative to the surface",
-                    "pull(surface_keywords, is_parallel_surface, is_bottom, has_pivot, pivot_point)",
-                        "surface_keywords: List of descriptive terms identifying the surface used to calculate the normal vector associated with the pull force, similar to the keywords in move_gripper_to_pose",
-                        "is_parallel_surface: Boolean indicating if the gripper should pull parallel to the surface (true) or perpendicular to it (false)",
-                        "is_button: Boolean indicating if the pull is being applied to a button",
-                        "has_pivot: Boolean indicating if the surface has a pivot point (true) or is fixed/freely movable (false)",
-                        "pivot_point: If has_pivot is true, specifies the location of the pivot point relative to the surface",
-                    "close_gripper()",
-                        "Closes the gripper fingers to grasp an object. Takes no parameters as it operates on the current gripper state.",
-                    "open_gripper()",
-                        "Opens the gripper fingers to release an object. Takes no parameters as it operates on the current gripper state.",
-                    "move_gripper_to_pose(keywords, is_top_down_grasp, is_side_grasp)",
-                        "keywords: List of descriptive terms identifying either:
-                                - The target object (e.g., ['cube', 'box', 'package'] for a box-shaped object)
-                                - A specific component of the object (e.g., ['toggle', 'switch'] for a light switch,
-                                    ['handle', 'knob', 'grip'] for a door handle)
-                                These terms are used to identify and locate the target for gripper positioning",
-                        "is_top_down_grasp: Boolean parameter indicating whether this movement is intended for grasping
-                                and that the grasp should be top down:
-                                - true: The system will plan a top down grasp-oriented approach to the target
-                                - false: The system will plan a general approach to interact with the target
-                                (When true, the grasp planner will sample appropriate grasp poses)",
-                        "is_side_grasp: Boolean parameter indicating whether this movement is intended for grasping
-                                and that the grasp should be from the side:
-                                - true: The system will plan a side grasp-oriented approach to the target
-                                - false: The system will plan a general approach to interact with the target
-                                (When true, the grasp planner will sample appropriate grasp poses)",
-                    "retract_gripper()",
-                        "Moves the gripper away from its current position along the approach vector. Takes no parameters as it retracts from the current position."
-                ],
-                "parameters": {{
-                    "force_threshold": "low/medium/high",
-                    "precision_required": "low/medium/high",
-                    "speed_requirement": "slow/medium/fast"
-                }},
-                "prerequisites": [
-                    "list of required conditions"
-                ],
-                "constraints": [
-                    "list of safety limits and constraints"
-                ]
-            }}
-            Note: - push and pull will always be applied directly outwards or inwards relative to the direction the gripper is currently pointing.
-                  - when grasping an object move_gripper_to_pose should be provided keywords indicating the tool center point positioning for the grasp.
-                  - keywords should be provided in the following format: ['keyword1', ...]
-            Base all values on the visual appearance of the object.
-            Return only the raw JSON object with no additional text."""},
+                    Points of interest:
+                    {chr(10).join(point_descriptions)}
+
+                    First, determine the specific subtype of the action based on the object's visual characteristics.
+                    The skill name should follow the format: action_targetobject_mechanism
+
+                    IMPORTANT: You must output ONLY a valid JSON object with the following structure:
+
+                    {{{{
+                        "skill_name": "specific_action_name_with_mechanism",
+                        "primitive_sequence": [
+                            "EACH PRIMITIVE MUST USE EXACTLY ONE OF THESE FORMATS:",
+                            "move_gripper_to_pose('point_label', is_top_down_grasp, is_side_grasp)",
+                            "push('point_label', 'force_direction', is_button, has_pivot, 'pivot_point_label')",
+                            "pull('point_label', 'force_direction', is_button, has_pivot, 'pivot_point_label')",
+                            "close_gripper()",
+                            "open_gripper()",
+                            "retract_gripper()"
+                        ],
+                        "parameters": {{{{
+                            "force_threshold": "low/medium/high",
+                            "precision_required": "low/medium/high",
+                            "speed_requirement": "slow/medium/fast"
+                        }}}},
+                        "prerequisites": [
+                            "list of required conditions"
+                        ],
+                        "constraints": [
+                            "list of safety limits and constraints"
+                        ]
+                    }}}}
+
+                    CRITICAL FORMATTING RULES:
+                    1. All point labels MUST be in single quotes (e.g., 'a', 'b', etc.)
+                    2. force_direction MUST be in single quotes and be either 'parallel' or 'perpendicular'
+                    3. is_button, has_pivot, is_top_down_grasp, is_side_grasp MUST be boolean values (true or false) WITHOUT quotes
+                    4. pivot_point_label MUST be in single quotes, even if empty (e.g., '', 'c')
+                    5. The syntax must match EXACTLY one of these patterns:
+                    - move_gripper_to_pose('a', true, false)
+                    - push('b', 'perpendicular', true, false, '')
+                    - pull('c', 'parallel', false, true, 'd')
+                    - close_gripper()
+                    - open_gripper()
+                    - retract_gripper()
+
+                    Note:
+                    - push and pull will always be applied directly outwards or inwards relative to the direction the gripper is currently pointing.
+                    - when grasping an object move_gripper_to_pose should specify the point label for positioning.
+                    - all references to locations should use the labeled points (a, b, c, etc.)
+
+                    Base all values on the visual appearance of the object.
+                    Return only the raw JSON object with no additional text."""},
             {"role": "user", "content": [
                 {"type": "text", "text": f"""
                 Abstract Action: {abstract_action}
@@ -197,9 +230,11 @@ class SkillGenerator:
                 First determine the specific subtype of action needed based on the object's
                 characteristics, then generate the complete skill definition including
                 primitive sequence, parameters, prerequisites, and constraints.
+                
+                Use the labeled points (a, b, c, etc.) to reference specific locations on the object.
                 """},
                 {"type": "image_url", "image_url": {
-                    "url": f"data:image/png;base64,{self._encode_image(masked_image)}"
+                    "url": f"data:image/png;base64,{self._encode_image(vis_img)}"
                 }}
             ]}
         ]
@@ -221,23 +256,24 @@ class SkillGenerator:
             parameters=skill_data.get('parameters', {}),
             prerequisites=skill_data.get('prerequisites', []),
             constraints=skill_data.get('constraints', []),
-            image_id=image_id
+            image_id=image_id,
+            points_of_interest=points_of_interest
         )
         
         self._store_skill(skill)
         return skill
 
     async def find_similar_skill(self, 
-                               image: np.ndarray,
-                               mask: np.ndarray,
-                               abstract_action: str,
-                               target_object: str) -> Optional[Skill]:
+                          image: np.ndarray,
+                          points_of_interest: Dict[str, PointOfInterest],
+                          abstract_action: str,
+                          target_object: str) -> Optional[Skill]:
         """
-        Find a similar existing skill based on image
+        Find a similar existing skill based on points of interest by comparing against all eligible skills at once
         
         Args:
             image: Input image of the object
-            mask: Binary mask of the target object
+            points_of_interest: Dictionary of labeled points of interest
             abstract_action: The abstract action to perform
             target_object: The object to perform the action on
         
@@ -247,93 +283,145 @@ class SkillGenerator:
         if not self.skills_cache:
             return None
             
-        masked_image = image.copy()
-        masked_image[~mask] = 0
+        # Create visualization for comparison
+        vis_img = self._visualize_points_of_interest(image, points_of_interest)
         
-        similarity_prompt = [
-            {"role": "system", "content": """Compare the given object visually with the existing skill.
-            Return a similarity score between 0 and 1, where 1 means identical and 0 means completely different.
-            Consider visual similarity of the mechanism and interaction points.
-            Return only the numeric score."""},
+        # Filter relevant skills by action and object type
+        relevant_skills = []
+        for skill in self.skills_cache.values():
+            if skill.abstract_action == abstract_action and skill.target_object == target_object:
+                existing_image = self._load_image(skill.image_id)
+                if existing_image is not None:
+                    relevant_skills.append((skill, existing_image))
+        
+        # If no relevant skills, return early
+        if not relevant_skills:
+            return None
+        
+        # Prepare skill images for batch comparison
+        skill_images = []
+        for _, img in relevant_skills:
+            skill_images.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/png;base64,{self._encode_image(img)}"
+                }
+            })
+        
+        # Create comparison prompt with all skills
+        comparison_prompt = [
+            {"role": "system", "content": f"""Compare the first image (new object) with the {len(relevant_skills)} following images (existing skills).
+            For each comparison, provide a similarity score between 0 and 1, where 1 means identical and 0 means completely different.
+            Consider visual similarity of the mechanism, interaction points, and their spatial relationships.
+            Focus particularly on the positions of the labeled points relative to each other.
+            The action to perform is "{abstract_action}" on a "{target_object}".
+            
+            Return ONLY a raw JSON object with scores in this format with NO additional formatting:
+            {{
+                "scores": [0.75, 0.42, 0.91, ...],
+                "best_match_index": 2,  // Index of the image with highest score (0-based)
+                "best_match_score": 0.91  // The highest score value
+            }}"""},
             {"role": "user", "content": [
                 {"type": "text", "text": f"""
-                New Task:
-                Abstract Action: {abstract_action}
-                Target Object: {target_object}
+                Compare this new object with the {len(relevant_skills)} existing skills below.
+                Return the similarity scores for each, and identify the best match if any are similar enough.
                 """},
                 {"type": "image_url", "image_url": {
-                    "url": f"data:image/png;base64,{self._encode_image(masked_image)}"
+                    "url": f"data:image/png;base64,{self._encode_image(vis_img)}"
                 }}
             ]}
         ]
-
-        best_score = 0
-        best_skill = None
         
-        for skill in self.skills_cache.values():
-            if skill.abstract_action != abstract_action or skill.target_object != target_object:
-                continue
-                
-            existing_image = self._load_image(skill.image_id)
-            if existing_image is None:
-                continue
-                
-            similarity_prompt[1]["content"].append({
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/png;base64,{self._encode_image(existing_image)}"
-                }
-            })
+        # Add all skill images to the prompt
+        for img_data in skill_images:
+            comparison_prompt[1]["content"].append(img_data)
+        
+        # Query LLM for all comparisons at once
+        comparison_response = await self.llm.query_llm(comparison_prompt)
+        
+        try:
+            # Parse the JSON response
+            result = json.loads(comparison_response)
             
-            score_response = await self.llm.query_llm(similarity_prompt)
-            try:
-                score = float(score_response)
-                if score > best_score:
-                    best_score = score
-                    best_skill = skill
-            except ValueError:
-                continue
-
-        return best_skill if best_score > 0.8 else None
+            # Validate response format
+            if "scores" not in result or "best_match_index" not in result or "best_match_score" not in result:
+                print("Invalid comparison response format")
+                return None
+            
+            # Get best score and corresponding skill
+            best_score = result["best_match_score"]
+            best_index = result["best_match_index"]
+            
+            # Ensure index is valid
+            if best_index < 0 or best_index >= len(relevant_skills):
+                print(f"Invalid best match index: {best_index}")
+                return None
+            
+            # Return the best skill if score is high enough
+            if best_score > 0.8:
+                return relevant_skills[best_index][0]
+            else:
+                return None
+                
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            print(f"Error parsing comparison response: {e}")
+            print(f"Response: {comparison_response}")
+            return None
 
     async def adapt_skill(self, 
                          base_skill: Skill,
                          new_image: np.ndarray,
-                         new_mask: np.ndarray) -> Optional[Skill]:
+                         new_points: Dict[str, PointOfInterest]) -> Optional[Skill]:
         """
-        Adapt an existing skill based on new image
+        Adapt an existing skill based on new image with different points of interest
         
         Args:
             base_skill: The skill to adapt
             new_image: Image of the new object
-            new_mask: Mask of the new object
+            new_points: Dictionary of labeled points of interest for the new object
         
         Returns:
             Adapted skill if successful, None otherwise
         """
-        masked_image = new_image.copy()
-        masked_image[~new_mask] = 0
+        # Create visualization for the new object
+        new_vis_img = self._visualize_points_of_interest(new_image, new_points)
         base_image = self._load_image(base_skill.image_id)
         
         if base_image is None:
             return None
             
+        # Extract point descriptions for prompt
+        new_point_descriptions = []
+        for label, point in new_points.items():
+            x, y = point.position
+            desc = f"Point {label}: {point.description}" if point.description else f"Point {label}: Located at normalized coordinates ({x:.2f}, {y:.2f})"
+            new_point_descriptions.append(desc)
+            
         adaptation_prompt = [
-            {"role": "system", "content": """Adapt the existing skill's primitive sequence and parameters for the new object.
+            {"role": "system", "content": f"""Adapt the existing skill's primitive sequence and parameters for the new object based on the new labeled points.
+            
+            The new image contains an object with labeled points of interest (red circles with alphabetical labels).
+            
+            New points of interest:
+            {chr(10).join(new_point_descriptions)}
+            
             Consider visual differences in the mechanism and interaction points.
+            Make sure to update the point labels in the primitive sequence to match the new object's labeled points.
+            
             Return ONLY a JSON object with 'primitive_sequence' and 'parameters' fields. Return nothing else."""},
             {"role": "user", "content": [
                 {"type": "text", "text": f"""
                 Original Skill:
                 {json.dumps(asdict(base_skill), indent=2)}
                 
-                Adapt the skill based on visual differences.
+                Adapt the skill based on visual differences and the new labeled points.
                 """},
                 {"type": "image_url", "image_url": {
                     "url": f"data:image/png;base64,{self._encode_image(base_image)}"
                 }},
                 {"type": "image_url", "image_url": {
-                    "url": f"data:image/png;base64,{self._encode_image(masked_image)}"
+                    "url": f"data:image/png;base64,{self._encode_image(new_vis_img)}"
                 }}
             ]}
         ]
@@ -343,8 +431,9 @@ class SkillGenerator:
             adapted_data = json.loads(adaptation_response)
             
             # Generate new image ID and save
-            new_image_id = f"{base_skill.abstract_action}_{base_skill.target_object}_{hash(new_mask.tobytes()) & 0xFFFFFF:06x}"
-            self._save_image(masked_image, new_image_id)
+            point_hash = hash(str([(p.label, p.position) for p in new_points.values()])) & 0xFFFFFF
+            new_image_id = f"{base_skill.abstract_action}_{base_skill.target_object}_{point_hash:06x}"
+            self._save_image(new_vis_img, new_image_id)
             
             adapted_skill = Skill(
                 name=f"{base_skill.name}_adapted_{hash(new_image_id) & 0xFFFFFF:06x}",
@@ -354,7 +443,8 @@ class SkillGenerator:
                 parameters=adapted_data['parameters'],
                 prerequisites=base_skill.prerequisites,
                 constraints=base_skill.constraints,
-                image_id=new_image_id
+                image_id=new_image_id,
+                points_of_interest=new_points
             )
             
             self._store_skill(adapted_skill)
@@ -389,164 +479,3 @@ class SkillGenerator:
     def get_skill(self, skill_name: str) -> Optional[Skill]:
         """Retrieve a skill by name"""
         return self.skills_cache.get(skill_name)
-
-async def test_skill_generator():
-    """
-    Test function to demonstrate SkillGenerator functionality with different switch-on actions
-    """
-    # Initialize LLM interface and skill generator
-    llm = LLMInterfaceOpenAI(model_name="gpt-4-turbo")
-    generator = SkillGenerator(llm, skills_dir="test_skills")
-    IMAGE_SIZE = 640
-
-    # Test Case 1: Wall Light Switch (Toggle mechanism)
-    print("\nTest Case 1: Wall Light Switch")
-    print("-----------------------------------------")
-    
-    # Create wall switch image and mask
-    switch_image = np.zeros((IMAGE_SIZE, IMAGE_SIZE, 3), dtype=np.uint8)
-    # Draw a rectangular switch plate
-    cv2.rectangle(switch_image, (295, 270), (345, 370), (200, 200, 200), -1)  # Grey plate
-    # Draw the switch lever
-    cv2.rectangle(switch_image, (305, 300), (335, 340), (240, 240, 240), -1)  # White switch
-    # Add texture to make it look like a toggle
-    cv2.circle(switch_image, (320, 320), 5, (180, 180, 180), -1)  # Switch detail
-    
-    switch_mask = np.zeros((IMAGE_SIZE, IMAGE_SIZE), dtype=bool)
-    switch_mask[270:370, 295:345] = True
-    
-    start = time.time()
-    switch_skill = await generator.generate_skill(
-        image=switch_image,
-        mask=switch_mask,
-        abstract_action="SwitchOn",
-        target_object="light"
-    )
-    print(f"Time to generate skill: {time.time() - start}")
-
-    if switch_skill:
-        print(f"Generated Skill Name: {switch_skill.name}")
-        print("Primitive Sequence:")
-        for primitive in switch_skill.primitive_sequence:
-            print(f"  - {primitive}")
-        print(f"Parameters: {json.dumps(switch_skill.parameters, indent=2)}")
-
-    # Test Case 2: Stove Burner (Rotary Knob)
-    print("\nTest Case 2: Stove Burner Control")
-    print("-------------------------------------------------")
-    
-    # Create stove knob image and mask
-    stove_image = np.zeros((IMAGE_SIZE, IMAGE_SIZE, 3), dtype=np.uint8)
-    # Draw circular knob
-    cv2.circle(stove_image, (320, 320), 30, (50, 50, 50), -1)  # Dark grey knob
-    # Add indicator line and markings
-    cv2.line(stove_image, (320, 320), (320, 300), (255, 255, 255), 2)
-    # Add control markings
-    for angle in range(0, 271, 90):
-        pt1 = (int(320 + 25 * np.cos(np.radians(angle))), 
-               int(320 + 25 * np.sin(np.radians(angle))))
-        cv2.circle(stove_image, pt1, 2, (200, 200, 200), -1)
-    
-    stove_mask = np.zeros((IMAGE_SIZE, IMAGE_SIZE), dtype=bool)
-    cv2.circle(stove_mask.astype(np.uint8), (320, 320), 30, 1, -1)
-    stove_mask = stove_mask.astype(bool)
-    
-    stove_skill = await generator.generate_skill(
-        image=stove_image,
-        mask=stove_mask,
-        abstract_action="SwitchOn",
-        target_object="stove"
-    )
-    
-    if stove_skill:
-        print(f"Generated Skill Name: {stove_skill.name}")
-        print("Primitive Sequence:")
-        for primitive in stove_skill.primitive_sequence:
-            print(f"  - {primitive}")
-        print(f"Parameters: {json.dumps(stove_skill.parameters, indent=2)}")
-
-    # Test Case 3: Push Button Lamp
-    print("\nTest Case 3: Push Button Lamp")
-    print("--------------------------------")
-    
-    # Create lamp with push button image and mask
-    lamp_image = np.zeros((IMAGE_SIZE, IMAGE_SIZE, 3), dtype=np.uint8)
-    # Draw lamp base
-    cv2.rectangle(lamp_image, (280, 300), (360, 340), (200, 200, 200), -1)
-    # Draw push button with more detail
-    cv2.circle(lamp_image, (320, 320), 12, (180, 180, 180), -1)  # Button surround
-    cv2.circle(lamp_image, (320, 320), 10, (255, 0, 0), -1)      # Red button
-    # Add button detail
-    cv2.circle(lamp_image, (320, 320), 5, (220, 0, 0), -1)       # Button center
-    
-    lamp_mask = np.zeros((IMAGE_SIZE, IMAGE_SIZE), dtype=bool)
-    lamp_mask[300:340, 280:360] = True
-    
-    
-    lamp_skill = await generator.generate_skill(
-        image=lamp_image,
-        mask=lamp_mask,
-        abstract_action="SwitchOn",
-        target_object="lamp"
-    )
-    
-    if lamp_skill:
-        print(f"Generated Skill Name: {lamp_skill.name}")
-        print("Primitive Sequence:")
-        for primitive in lamp_skill.primitive_sequence:
-            print(f"  - {primitive}")
-        print(f"Parameters: {json.dumps(lamp_skill.parameters, indent=2)}")
-
-    # Test Case 4: Touch-Sensitive Lamp (Adaptation)
-    print("\nTest Case 4: Adapt Push Button to Touch Lamp")
-    print("--------------------------------------------")
-    if lamp_skill:
-        # Create touch-sensitive lamp image
-        touch_lamp_image = np.zeros((IMAGE_SIZE, IMAGE_SIZE, 3), dtype=np.uint8)
-        # Draw lamp base with touch-sensitive surface
-        cv2.rectangle(touch_lamp_image, (280, 300), (360, 340), (220, 220, 220), -1)
-        # Add touch sensor indication
-        cv2.circle(touch_lamp_image, (320, 320), 15, (180, 180, 180), 2)
-        cv2.circle(touch_lamp_image, (320, 320), 12, (160, 160, 160), -1)
-        # Add touch symbol
-        cv2.line(touch_lamp_image, (315, 315), (325, 325), (100, 100, 100), 2)
-        cv2.line(touch_lamp_image, (315, 325), (325, 315), (100, 100, 100), 2)
-        
-        touch_lamp_mask = lamp_mask.copy()
-        
-        touch_lamp_states = lamp_states.copy()
-        touch_lamp_states["pose"] = [0.6, 0.3, 0.7]
-        
-        adapted_skill = await generator.adapt_skill(
-            lamp_skill,
-            touch_lamp_image,
-            touch_lamp_mask,
-            touch_lamp_states
-        )
-        
-        if adapted_skill:
-            print(f"Adapted Skill Name: {adapted_skill.name}")
-            print("\nOriginal Push Button Sequence:")
-            for primitive in lamp_skill.primitive_sequence:
-                print(f"  - {primitive}")
-            print("\nAdapted Touch Lamp Sequence:")
-            for primitive in adapted_skill.primitive_sequence:
-                print(f"  - {primitive}")
-            print(f"Parameters: {json.dumps(adapted_skill.parameters, indent=2)}")
-
-    # Test Case 5: Skill Management
-    print("\nTest Case 5: Skill Management")
-    print("-----------------------------")
-    print("Available Skills:", generator.list_skills())
-    
-    if switch_skill:
-        retrieved_skill = generator.get_skill_details(switch_skill.name)
-        if retrieved_skill:
-            print(f"\nRetrieved Skill Details for {switch_skill.name}:")
-            # Print everything except the image data
-            details = {k: v for k, v in retrieved_skill.items() if k != 'image'}
-            print(json.dumps(details, indent=2))
-
-if __name__ == "__main__":
-    # Run the test
-    asyncio.run(test_skill_generator())

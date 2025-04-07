@@ -284,15 +284,6 @@ class PerceptionSystem:
             self.profiler.start("detect_object")
         
         try:
-            # Check cache first
-            cache_key = f"{target_object}_{hash(image.tobytes())}"
-            if cache_key in self._object_cache:
-                if self.debug:
-                    print(f"Cache hit for '{target_object}'")
-                    self.profiler.stop("detect_object")
-                    self.profiler.end_iteration(preserve_current=True)
-                return self._object_cache[cache_key]
-            
             # Set single class for detection
             objects = self.detect_objects(
                 image=image,
@@ -312,7 +303,6 @@ class PerceptionSystem:
             best_object = max(objects, key=lambda obj: obj.confidence)
             
             # Cache the result
-            self._object_cache[cache_key] = best_object
             
             if self.debug:
                 print(f"Found '{target_object}' with confidence {best_object.confidence:.3f}")
@@ -856,6 +846,104 @@ class PerceptionSystem:
         finally:
             if self.debug:
                 self.profiler.stop("_estimate_object_pose")
+                
+                
+    def _estimate_point_pose(
+        self,
+        point: Tuple[int, int],  # (x, y) pixel coordinates
+        depth_image: np.ndarray,
+        region_size: int = 5  # Size of region around point to sample (half-width)
+    ) -> Tuple[np.ndarray, float]:
+        """
+        Estimate 3D position of a specific point using depth information
+        
+        Args:
+            point: (x, y) pixel coordinates of the point
+            depth_image: Depth image aligned with RGB
+            region_size: Half-width of the square region to sample around the point
+            
+        Returns:
+            Tuple containing:
+            - 3D position array [x, y, z]
+            - Confidence value (0-1) based on depth validity
+        """
+        if self.debug:
+            self.profiler.start("_estimate_point_pose")
+        
+        try:
+            # Extract pixel coordinates
+            pixel_x, pixel_y = point
+            
+            # Check if point is within image bounds
+            if (pixel_x < 0 or pixel_x >= depth_image.shape[1] or
+                pixel_y < 0 or pixel_y >= depth_image.shape[0]):
+                if self.debug:
+                    print(f"Point ({pixel_x}, {pixel_y}) is outside image bounds")
+                return np.zeros(3), 0.0
+            
+            # Define region around point to sample (clipped to image boundaries)
+            x_min = max(0, pixel_x - region_size)
+            x_max = min(depth_image.shape[1] - 1, pixel_x + region_size)
+            y_min = max(0, pixel_y - region_size)
+            y_max = min(depth_image.shape[0] - 1, pixel_y + region_size)
+            
+            # Extract depth values in the region
+            region_depths = depth_image[y_min:y_max+1, x_min:x_max+1] * self.depth_scale
+            
+            # Filter valid depth values (non-zero and within reasonable range)
+            MAX_DEPTH = 2.0  # Maximum reasonable depth in meters
+            MIN_DEPTH = 0.05  # Minimum reasonable depth in meters
+            
+            valid_depths = region_depths[(region_depths > MIN_DEPTH) & (region_depths < MAX_DEPTH)]
+            
+            # Check if we have enough valid depth values
+            if len(valid_depths) < 3:
+                # If exact point has valid depth, use it despite few valid neighbors
+                center_depth = depth_image[pixel_y, pixel_x] * self.depth_scale
+                if MIN_DEPTH < center_depth < MAX_DEPTH:
+                    valid_depths = np.array([center_depth])
+                else:
+                    if self.debug:
+                        print(f"Too few valid depth points for ({pixel_x}, {pixel_y}): {len(valid_depths)}")
+                    return np.zeros(3), 0.0
+            
+            # Calculate robust depth estimate using median (more robust to outliers than mean)
+            depth = np.median(valid_depths)
+            
+            # Calculate confidence based on percentage of valid points and depth variance
+            confidence_valid_ratio = len(valid_depths) / region_depths.size
+            
+            # Add variance component to confidence if we have enough points
+            if len(valid_depths) >= 3:
+                # Lower variance = higher confidence
+                depth_std = np.std(valid_depths)
+                # Normalize std dev into [0, 1] range (higher is better)
+                # 0.1m std dev is considered high, 0.001m is excellent
+                confidence_variance = max(0, 1.0 - (depth_std / 0.1))
+                # Combine both confidence metrics
+                confidence = 0.7 * confidence_valid_ratio + 0.3 * confidence_variance
+            else:
+                confidence = confidence_valid_ratio
+            
+            # Convert pixel coordinates to 3D using pinhole camera model
+            x_3d = (pixel_x - self.cx) * depth / self.fx
+            y_3d = (pixel_y - self.cy) * depth / self.fy
+            z_3d = depth
+            
+            # Create 3D position array
+            position_3d = np.array([x_3d, y_3d, z_3d])
+            
+            return position_3d, confidence
+            
+        except Exception as e:
+            if self.debug:
+                print(f"Error in _estimate_point_pose: {str(e)}")
+                traceback.print_exc()
+            return np.zeros(3), 0.0
+            
+        finally:
+            if self.debug:
+                self.profiler.stop("_estimate_point_pose")
     
     
     def visualize_interest_points(
@@ -1005,7 +1093,7 @@ class PerceptionSystem:
         self,
         image: np.ndarray,
         obj_info: ObjectInfo,
-        method: str = 'harris',
+        method: str = 'shi_tomasi',
         max_points: int = 100,
         quality_level: float = 0.01,
         min_distance: int = 50,

@@ -8,7 +8,7 @@ from typing import Optional, Tuple, Union
 
 
 class Camera:
-    def __init__(self, width: int = 640, height: int = 480, fps: int = 30, debug=False):
+    def __init__(self, width: int = 640, height: int = 480, fps: int = 30, debug=True):
         self.width = width
         self.height = height
         self.fps = fps

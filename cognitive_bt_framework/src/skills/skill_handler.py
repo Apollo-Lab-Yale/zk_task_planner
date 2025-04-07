@@ -7,7 +7,7 @@ from pathlib import Path
 import traceback
 from cognitive_bt_framework.src.vision import PerceptionSystem, FastSAMConfig, ObjectInfo
 from cognitive_bt_framework.src.skills.primitive_parser import PrimitiveParser, ParsedPrimitive
-from cognitive_bt_framework.src.skills.skill_generator import SkillGenerator
+from cognitive_bt_framework.src.skills.skill_generator import SkillGenerator, PointOfInterest, Skill
 from cognitive_bt_framework.src.llm_interface.llm_interface_openai import LLMInterfaceOpenAI
 
 @dataclass
@@ -66,6 +66,21 @@ class SkillHandler:
         self.perception_system = perception_system
         self.primitive_parser = PrimitiveParser()
         
+    @staticmethod
+    def _get_alpha_id(num):
+        """
+        Convert a number to an alphabetical ID (a, b, c, ... aa, ab, ...)
+        """
+        if num <= 0:
+            return ""
+        
+        letters = ""
+        while num > 0:
+            num, remainder = divmod(num - 1, 26)
+            letters = chr(97 + remainder) + letters  # 97 is ASCII for 'a'
+        
+        return letters
+        
     async def instantiate_skill(
         self, 
         abstract_action: str, 
@@ -95,21 +110,48 @@ class SkillHandler:
         if object_info is None:
             print(f"Could not detect object: {target_object}")
             return None
-            
-        # Get or generate skill using SkillGenerator
-        skill = await self.skill_generator.find_similar_skill(
-            image=object_info.image,
-            mask=object_info.mask,
-            abstract_action=abstract_action,
-            target_object=target_object
+        
+        # Detect regions of interest on the object
+        roi_results = self.perception_system.detect_regions_of_interest(
+            image=image,
+            obj_info=object_info,
+            method='shi_tomasi',  # Use SIFT for better feature detection
+            max_points=20,  # Limit to 10 key points to avoid clutter
+            visualize=True
         )
         
+        # Create points of interest dictionary
+        points_of_interest = {}
+        for i, (pixel_x, pixel_y) in enumerate(roi_results['pixel_coords']):
+            # Create uppercase alphabetical label
+            label = self._get_alpha_id(i + 1)  # A, B, C, ...
+            
+            # Convert to normalized coordinates
+            norm_x = pixel_x / image.shape[1]
+            norm_y = pixel_y / image.shape[0]
+            
+            # Store in dictionary
+            points_of_interest[label] = PointOfInterest(
+                label=label,
+                position=(norm_x, norm_y),
+                description=f"Interest point {label}"
+            )
+        
+        # Get or generate skill using SkillGenerator
+        # skill = await self.skill_generator.find_similar_skill(
+        #     image=object_info.image,
+        #     points_of_interest=points_of_interest,
+        #     abstract_action=abstract_action,
+        #     target_object=target_object
+        # )
+        skill = None
         if skill is None:
             skill = await self.skill_generator.generate_skill(
                 image=object_info.image,
-                mask=object_info.mask,
+                points_of_interest=points_of_interest,
                 abstract_action=abstract_action,
-                target_object=target_object
+                target_object=target_object,
+                object_info=object_info
             )
             
         if skill is None:
@@ -119,205 +161,6 @@ class SkillHandler:
         # Instantiate the skill with concrete parameters
         return self._instantiate_skill(skill, object_info)
 
-    def _identify_interaction_points(self, 
-                             object_info: ObjectInfo,
-                             keywords: List[str]) -> Tuple[Dict[str, np.ndarray], Dict[str, Tuple[int, int]]]:
-        """
-        Identify 3D and 2D interaction points on the object for given keywords
-        
-        Args:
-            object_info: Object information from perception system
-            keywords: List of keywords to identify
-            
-        Returns:
-            Tuple containing:
-            - Dictionary mapping keywords to 3D positions
-            - Dictionary mapping keywords to 2D pixel positions
-        """
-        interaction_points = {}
-        pixel_points = {}
-        
-        # Check if we have the object mask
-        if object_info.mask is None:
-            print(f"Warning: Object has no mask, using bounding box for interaction point detection")
-            # Create a simple mask from the bounding box
-            x, y, w, h = object_info.bbox
-            temp_mask = np.zeros(object_info.image.shape[:2], dtype=bool)
-            temp_mask[y:y+h, x:x+w] = True
-            object_info.mask = temp_mask
-        
-        # Get object bounding box
-        x, y, w, h = object_info.bbox
-        
-        # For each keyword, detect the relevant part
-        for keyword in keywords:
-            # Try to detect the component within the object
-            component = self.perception_system.detect_object_component(
-                object_info=object_info,
-                component_name=keyword,
-                conf_threshold=0.3,  # Use lower threshold for keywords
-                depth_image=object_info.depth_image if hasattr(object_info, 'depth_image') else None
-            )
-            
-            if component is not None and component.confidence > 0.3:
-                # We found a good component match
-                if component.pose is not None and component.pixel_pose is not None:
-                    # Use the component's 3D pose and pixel position
-                    interaction_points[keyword] = component.pose[:3]  # Use just the position part
-                    pixel_points[keyword] = component.pixel_pose
-                    print(f"Found component '{keyword}' with confidence {component.confidence:.2f}")
-                else:
-                    # Component without pose, use centroid of mask
-                    if component.mask is not None and np.any(component.mask):
-                        y_coords, x_coords = np.where(component.mask)
-                        pixel_pos = (int(np.mean(x_coords)), int(np.mean(y_coords)))
-                        
-                        # Convert to 3D point if we have depth image
-                        if hasattr(object_info, 'depth_image') and object_info.depth_image is not None:
-                            point_3d, px_pt = self.perception_system._estimate_object_pose(
-                                object_info.mask,
-                                depth_image=object_info.depth_image
-                            )
-                            interaction_points[keyword] = point_3d
-                        else:
-                            # Without depth, use object's pose with adjusted x,y
-                            point_3d = object_info.pose[:3] if object_info.pose is not None else np.zeros(3)
-                            interaction_points[keyword] = point_3d
-                            
-                        pixel_points[keyword] = pixel_pos
-                        print(f"Using mask centroid for component '{keyword}'")
-            else:
-                # Try alternative approach by using specific prompts
-                # Extract region of interest around the object
-                # Expand the region slightly to ensure we capture the full object
-                x_expand = max(0, x - int(w * 0.1))
-                y_expand = max(0, y - int(h * 0.1))
-                w_expand = min(object_info.image.shape[1] - x_expand, int(w * 1.2))
-                h_expand = min(object_info.image.shape[0] - y_expand, int(h * 1.2))
-                
-                # Extract expanded ROI
-                roi = object_info.image[y_expand:y_expand+h_expand, x_expand:x_expand+w_expand]
-                
-                # Try multiple prompts for robustness
-                prompts = [
-                    f"a {keyword} of the object",
-                    f"the {keyword}",
-                    f"part of the object that is the {keyword}",
-                    f"region of the object that looks like a {keyword}"
-                ]
-                
-                best_score = 0
-                best_point = None
-                best_pixel = None
-                
-                # Only process with segmenter if it's available
-                if self.perception_system.segmenter is not None:
-                    for prompt in prompts:
-                        try:
-                            labeled_masks, metadata = self.perception_system.segmenter.process_image(
-                                roi, 
-                                query=prompt
-                            )
-                            
-                            for mask_id, meta in metadata.items():
-                                # Create component mask in ROI coordinates
-                                component_roi_mask = labeled_masks == mask_id
-                                
-                                # Create full image mask
-                                component_mask = np.zeros(object_info.image.shape[:2], dtype=bool)
-                                component_mask[y_expand:y_expand+h_expand, x_expand:x_expand+w_expand] = component_roi_mask
-                                
-                                # Check if component intersects with object mask
-                                if np.logical_and(component_mask, object_info.mask).any():
-                                    score = meta.get('clip_score', 0)
-                                    if score > best_score:
-                                        best_score = score
-                                        # Get centroid of the intersection
-                                        intersection = np.logical_and(component_mask, object_info.mask)
-                                        mask_y_coords, mask_x_coords = np.where(intersection)
-                                        if len(mask_x_coords) > 0 and len(mask_y_coords) > 0:
-                                            pixel_pos = (
-                                                int(np.mean(mask_x_coords)),
-                                                int(np.mean(mask_y_coords))
-                                            )
-                                            
-                                            # Convert to 3D point if we have depth image
-                                            if hasattr(object_info, 'depth_image') and object_info.depth_image is not None:
-                                                point_3d, px_pt = self.perception_system._estimate_object_pose(
-                                                    object_info.mask,
-                                                    depth_image=object_info.depth_image
-                                                )
-                                            else:
-                                                # Without depth, get pose from mask
-                                                pose, pixel_pose = self.perception_system._estimate_object_pose(
-                                                    intersection,
-                                                    np.ones(object_info.image.shape[:2], dtype=np.float32) * 0.5  # Default depth
-                                                )
-                                                point_3d = pose[:3]
-                                                pixel_pos = pixel_pose
-                                                
-                                            best_point = point_3d
-                                            best_pixel = pixel_pos
-                        except Exception as e:
-                            print(f"Error processing prompt '{prompt}': {e}")
-                            continue
-                
-                # Use lower threshold for keywords that might be harder to detect
-                min_score_threshold = 0.3
-                if best_point is not None and best_score > min_score_threshold:
-                    interaction_points[keyword] = best_point
-                    pixel_points[keyword] = best_pixel
-                    print(f"Found '{keyword}' with score {best_score:.2f} using segmentation")
-                else:
-                    # Fallback: use object center or appropriate region
-                    if np.any(object_info.mask):
-                        mask_y_coords, mask_x_coords = np.where(object_info.mask)
-                        pixel_pos = (
-                            int(np.mean(mask_x_coords)),
-                            int(np.mean(mask_y_coords))
-                        )
-                        
-                        # For specific keywords, adjust the point based on semantic understanding
-                        if keyword.lower() in ['handle', 'knob', 'grip', 'top']:
-                            # For handles and tops, try the top region
-                            pixel_pos = (
-                                pixel_pos[0],
-                                int(np.min(mask_y_coords) + (np.max(mask_y_coords) - np.min(mask_y_coords)) * 0.2)
-                            )
-                        elif keyword.lower() in ['bottom', 'base']:
-                            # For bottoms and bases, try the bottom region
-                            pixel_pos = (
-                                pixel_pos[0],
-                                int(np.min(mask_y_coords) + (np.max(mask_y_coords) - np.min(mask_y_coords)) * 0.8)
-                            )
-                        elif keyword.lower() in ['left', 'left_side']:
-                            # For left side
-                            pixel_pos = (
-                                int(np.min(mask_x_coords) + (np.max(mask_x_coords) - np.min(mask_x_coords)) * 0.2),
-                                pixel_pos[1]
-                            )
-                        elif keyword.lower() in ['right', 'right_side']:
-                            # For right side
-                            pixel_pos = (
-                                int(np.min(mask_x_coords) + (np.max(mask_x_coords) - np.min(mask_x_coords)) * 0.8),
-                                pixel_pos[1]
-                            )
-                        
-                        # Convert to 3D point if we have depth image
-                        if hasattr(object_info, 'depth_image') and object_info.depth_image is not None:
-                            point_3d, px_pt = self.perception_system._estimate_object_pose(
-                                object_info.mask,
-                                depth_image=object_info.depth_image
-                            )
-                        else:
-                            # Without depth, use object's pose
-                            point_3d = object_info.pose[:3] if object_info.pose is not None else np.zeros(3)
-                        
-                        interaction_points[keyword] = point_3d
-                        pixel_points[keyword] = pixel_pos
-                        print(f"Using fallback position for '{keyword}'")
-
-        return interaction_points, pixel_points
         
     def _instantiate_skill(self, skill, object_info: ObjectInfo) -> Optional[InstantiatedSkill]:
         """Convert abstract skill to concrete executable actions"""
@@ -328,45 +171,67 @@ class SkillHandler:
         except ValueError as e:
             print(f"Failed to parse skill primitives: {e}")
             return None
-            
+        
         # Get 3D and pixel information about the object
         object_pose = object_info.pose if object_info.pose is not None else np.zeros(6)
         object_pixel_pose = object_info.pixel_pose
         
-        # Get all unique keywords from parsed primitives
-        all_keywords = set()
-        for primitive in parsed_primitives:
-            if 'keywords' in primitive.parameters:
-                all_keywords.update(primitive.parameters['keywords'])
-                
-        # Identify interaction points for all keywords at once
-        interaction_points, pixel_points = self._identify_interaction_points(
-            object_info, 
-            list(all_keywords)
-        )
+        # Map labeled points to 3D coordinates
+        points_3d = {}
+        points_pixel = {}
+        
+        h, w = object_info.image.shape[:2]
+        
+        for label, point in skill.points_of_interest.items():
+            # Get normalized coordinates
+            norm_x, norm_y = point.position
+            
+            # Convert to pixel coordinates
+            pixel_x = int(norm_x * w)
+            pixel_y = int(norm_y * h)
+            
+            # Store pixel coordinates
+            points_pixel[label] = (pixel_x, pixel_y)
+            
+            # Convert to 3D coordinates if depth image is available
+            if hasattr(object_info, 'depth_image') and object_info.depth_image is not None:
+                try:
+                    # Get depth at this point (with some averaging for robustness)
+                    depth_roi = object_info.depth_image[
+                        max(0, pixel_y-2):min(object_info.depth_image.shape[0], pixel_y+3),
+                        max(0, pixel_x-2):min(object_info.depth_image.shape[1], pixel_x+3)
+                    ]
+                    # Filter out zero/invalid depths
+                    points_3d[label], _ = self.perception_system._estimate_point_pose(points_pixel[label],
+                                                                                   object_info.depth_image)
+                except Exception as e:
+                    print(f"Error estimating 3D position for point {label}: {e}")
+                    points_3d[label] = object_pose[:3]
+            else:
+                # No depth image, use object pose
+                points_3d[label] = object_pose[:3]
         
         # Convert each parsed primitive to executable action
         action_sequence = []
         for primitive in parsed_primitives:
-            print(primitive)
-            executable_action = self._convert_parsed_primitive_to_executable(
+            executable_action = self._convert_point_based_primitive(
                 primitive,
                 object_pose,
                 object_pixel_pose,
-                interaction_points,
-                pixel_points,
+                points_3d,
+                points_pixel,
                 skill.parameters
             )
             if executable_action is None:
                 print(f"Failed to convert primitive: {primitive.raw_string}")
                 return None
             action_sequence.append(executable_action)
-            
+        
         # Create execution parameters
         execution_parameters = self._generate_execution_parameters(
             skill.parameters,
             object_pose,
-            interaction_points
+            points_3d
         )
         
         return InstantiatedSkill(
@@ -377,7 +242,269 @@ class SkillHandler:
             object_pixel_pose=object_pixel_pose
         )
 
-    # [Previous helper methods remain unchanged]
+    def _convert_point_based_primitive(self,
+                              parsed_primitive,
+                              object_pose,
+                              object_pixel_pose,
+                              points_3d,
+                              points_pixel,
+                              skill_parameters) -> Optional[ExecutableAction]:
+        """Convert a parsed primitive using point labels to an executable action"""
+        action_type = parsed_primitive.action_type
+        parameters = parsed_primitive.parameters
+        print(parsed_primitive)
+        
+        # Create case-insensitive lookup dictionaries
+        points_3d_ci = {k.upper(): v for k, v in points_3d.items()}
+        points_pixel_ci = {k.upper(): v for k, v in points_pixel.items()}
+        
+        # Handle push/pull actions
+        if action_type in ['push', 'pull']:
+            # Get target point with case-insensitive lookup
+            point_label = parameters.get('point_label', '')
+            point_label_upper = point_label.upper()
+            
+            if point_label_upper not in points_3d_ci:
+                print(f"Point label '{point_label}' not found in points_3d")
+                # Check if we have any points at all
+                if points_3d:
+                    # Use the first available point as fallback
+                    print(f"Using first available point as fallback")
+                    fallback_label = list(points_3d.keys())[0]
+                    target_position = points_3d[fallback_label]
+                    target_pixel = points_pixel[fallback_label]
+                else:
+                    return None
+            else:
+                target_position = points_3d_ci[point_label_upper]
+                target_pixel = points_pixel_ci[point_label_upper]
+            
+            # Get pivot point if specified
+            pivot_position = None
+            if parameters.get('has_pivot', False) and 'pivot_point_label' in parameters:
+                pivot_label = parameters['pivot_point_label']
+                if pivot_label:
+                    pivot_label_upper = pivot_label.upper()
+                    if pivot_label_upper in points_3d_ci:
+                        pivot_position = points_3d_ci[pivot_label_upper]
+                    else:
+                        print(f"Pivot point label '{pivot_label}' not found in points_3d")
+            
+            # Create parameters dictionary
+            action_params = {
+                'force_magnitude': self._get_force_magnitude(skill_parameters.get('force_threshold', 'medium')),
+                'speed': self._get_speed_value(skill_parameters.get('speed_requirement', 'medium')),
+                'precision': skill_parameters.get('precision_required', 'medium'),
+                'is_parallel': parameters.get('force_direction', 'perpendicular') == 'parallel',
+                'is_button': parameters.get('is_button', False),
+                'has_pivot': parameters.get('has_pivot', False),
+                'point_label': point_label
+            }
+            
+            # Add pivot position if available
+            if pivot_position is not None:
+                action_params['pivot_position'] = pivot_position
+                action_params['pivot_label'] = parameters.get('pivot_point_label')
+            
+            # Determine approach direction and orientation based on parameters
+            orientation = self._calculate_approach_orientation(
+                target_position, 
+                pivot_position if pivot_position is not None else None,
+                action_params['is_parallel'],
+                action_type
+            )
+            
+            return ExecutableAction(
+                action_type=action_type,
+                position=target_position,
+                orientation=orientation,
+                pixel_position=target_pixel,
+                parameters=action_params,
+                is_top_down_grasp=False,
+                is_side_grasp=False
+            )
+            
+        elif action_type == 'move_gripper_to_pose':
+            # Add debug information about the incoming parameters
+            print(f"DEBUG: Converting move_gripper_to_pose primitive")
+            print(f"DEBUG: Raw parameters: {parameters}")
+            print(f"DEBUG: Available points_3d keys: {list(points_3d.keys())}")
+            print(f"DEBUG: Available points_3d_ci keys: {list(points_3d_ci.keys())}")
+            
+            # Get target point with case-insensitive lookup
+            point_label = parameters.get('point_label', '')
+            print(f"DEBUG: Extracted point_label: '{point_label}', type: {type(point_label)}")
+            
+            # Check if point_label is a string before trying to uppercase
+            if not isinstance(point_label, str):
+                print(f"DEBUG: point_label is not a string! Converting to string first.")
+                point_label = str(point_label)
+                
+            point_label_upper = point_label.upper()
+            print(f"DEBUG: Uppercased point_label: '{point_label_upper}'")
+            
+            if point_label_upper not in points_3d_ci:
+                print(f"Point label '{point_label}' not found in points_3d")
+                # Check if we have any points at all
+                if points_3d:
+                    print(f"Using first available point as fallback")
+                    fallback_label = list(points_3d.keys())[0]
+                    print(f"DEBUG: Fallback to point '{fallback_label}'")
+                    target_position = points_3d[fallback_label]
+                    target_pixel = points_pixel[fallback_label]
+                else:
+                    print("DEBUG: No points available at all, returning None")
+                    return None
+            else:
+                print(f"DEBUG: Found target position for point '{point_label_upper}'")
+                target_position = points_3d_ci[point_label_upper]
+                target_pixel = points_pixel_ci[point_label_upper]
+            
+            # Check grasp parameters
+            is_top_down_grasp = parameters.get('is_top_down_grasp', False)
+            is_side_grasp = parameters.get('is_side_grasp', False)
+            print(f"DEBUG: is_top_down_grasp: {is_top_down_grasp}, type: {type(is_top_down_grasp)}")
+            print(f"DEBUG: is_side_grasp: {is_side_grasp}, type: {type(is_side_grasp)}")
+            
+            # Add type conversion in case the boolean values are strings
+            if isinstance(is_top_down_grasp, str):
+                print(f"DEBUG: Converting is_top_down_grasp from string to boolean")
+                is_top_down_grasp = is_top_down_grasp.lower() == 'true'
+            if isinstance(is_side_grasp, str):
+                print(f"DEBUG: Converting is_side_grasp from string to boolean")
+                is_side_grasp = is_side_grasp.lower() == 'true'
+            
+            print(f"DEBUG: After conversion - is_top_down_grasp: {is_top_down_grasp}, is_side_grasp: {is_side_grasp}")
+            
+            # Create parameters dictionary
+            action_params = {
+                'point_label': point_label,
+                'speed': self._get_speed_value(skill_parameters.get('speed_requirement', 'medium')),
+                'precision': skill_parameters.get('precision_required', 'medium')
+            }
+            
+            # Add grasp parameters if applicable
+            if is_top_down_grasp or is_side_grasp:
+                action_params['force'] = self._get_force_magnitude(
+                    skill_parameters.get('force_threshold', 'medium')
+                )
+                action_params['grasp_planning_required'] = True
+            
+            # Determine approach orientation based on grasp type
+            orientation = np.zeros(3)
+            if is_top_down_grasp:
+                # Approach from above (negative Z)
+                orientation = np.array([0, 0, 0])  # This will be handled by grasp planner
+            elif is_side_grasp:
+                # Approach from side (horizontal)
+                orientation = np.array([np.pi/2, 0, 0])  # This will be handled by grasp planner
+            
+            print(f"DEBUG: Successfully created executable action for move_gripper_to_pose")
+            return ExecutableAction(
+                action_type=action_type,
+                position=target_position,
+                orientation=orientation,
+                pixel_position=target_pixel,
+                parameters=action_params,
+                is_top_down_grasp=is_top_down_grasp,
+                is_side_grasp=is_side_grasp
+            )
+            
+        # Handle simpler actions
+        elif action_type == 'close_gripper':
+            return ExecutableAction(
+                action_type='close_gripper',
+                position=np.zeros(3),
+                orientation=np.zeros(3),
+                pixel_position=object_pixel_pose,
+                parameters={'force': self._get_force_magnitude(skill_parameters.get('force_threshold', 'medium'))},
+                is_top_down_grasp=False,
+                is_side_grasp=False
+            )
+            
+        elif action_type == 'open_gripper':
+            return ExecutableAction(
+                action_type='open_gripper',
+                position=np.zeros(3),
+                orientation=np.zeros(3),
+                pixel_position=object_pixel_pose,
+                parameters={},
+                is_top_down_grasp=False,
+                is_side_grasp=False
+            )
+            
+        elif action_type == 'retract_gripper':
+            return ExecutableAction(
+                action_type='retract_gripper',
+                position=np.zeros(3),
+                orientation=np.zeros(3),
+                pixel_position=object_pixel_pose,
+                parameters={'speed': self._get_speed_value(skill_parameters.get('speed_requirement', 'medium'))},
+                is_top_down_grasp=False,
+                is_side_grasp=False
+            )
+            
+        return None
+
+    def _calculate_approach_orientation(self, 
+                                    target_position, 
+                                    pivot_position, 
+                                    is_parallel, 
+                                    action_type):
+        """
+        Calculate approach orientation based on target and pivot positions
+        
+        Args:
+            target_position: 3D position of target point
+            pivot_position: 3D position of pivot point (or None)
+            is_parallel: Whether approach should be parallel to surface
+            action_type: 'push' or 'pull'
+            
+        Returns:
+            3D orientation vector [roll, pitch, yaw]
+        """
+        # Default orientation (approaching directly from front)
+        orientation = np.zeros(3)
+        
+        if pivot_position is not None:
+            # Calculate vector from pivot to target
+            pivot_to_target = target_position - pivot_position
+            pivot_to_target = pivot_to_target / np.linalg.norm(pivot_to_target)
+            
+            # Calculate approach vector
+            if is_parallel:
+                # For parallel approach, we want to move perpendicular to pivot_to_target vector
+                if abs(pivot_to_target[2]) < 0.9:  # If not predominantly vertical
+                    approach_vector = np.cross(pivot_to_target, np.array([0, 0, 1]))
+                else:
+                    approach_vector = np.cross(pivot_to_target, np.array([1, 0, 0]))
+                
+                # Normalize
+                approach_vector = approach_vector / np.linalg.norm(approach_vector)
+            else:
+                # For perpendicular approach, we want to move along the pivot_to_target vector
+                approach_vector = pivot_to_target
+                
+            # Adjust for push vs. pull
+            if action_type == 'pull':
+                approach_vector = -approach_vector
+                
+            # Convert approach vector to Euler angles
+            # This is a simplified conversion - in production would use proper rotation matrices
+            pitch = np.arctan2(approach_vector[2], np.sqrt(approach_vector[0]**2 + approach_vector[1]**2))
+            yaw = np.arctan2(approach_vector[1], approach_vector[0])
+            orientation = np.array([0, pitch, yaw])
+        else:
+            # No pivot - use simpler orientation
+            # For push, approach from negative Z (top-down)
+            # For pull, approach from positive Z (bottom-up)
+            if action_type == 'push':
+                orientation = np.array([0, 0, 0])  # Default orientation
+            else:  # pull
+                orientation = np.array([np.pi, 0, 0])  # Rotated 180 degrees around X
+                
+        return orientation
+
     def _convert_parsed_primitive_to_executable(self,
                                             parsed_primitive: ParsedPrimitive,
                                             object_pose: np.ndarray,
@@ -632,6 +759,7 @@ class SkillHandler:
             parameters=parameters
         )
 
+    
     def _get_force_magnitude(self, force_threshold: str) -> float:
         """Convert force threshold to concrete value"""
         force_values = {
@@ -653,7 +781,7 @@ class SkillHandler:
     def _generate_execution_parameters(self,
                                     skill_parameters: Dict[str, Any],
                                     object_pose: np.ndarray,
-                                    interaction_points: Dict[str, np.ndarray]) -> Dict[str, Any]:
+                                    points_3d: Dict[str, np.ndarray]) -> Dict[str, Any]:
         """Generate concrete execution parameters from abstract skill parameters"""
         execution_params = {}
         
@@ -680,35 +808,14 @@ class SkillHandler:
             
         # Add object-specific parameters
         execution_params['object_pose'] = object_pose
-        execution_params['interaction_points'] = interaction_points
+        execution_params['points_3d'] = points_3d
         
-        # Add any safety parameters
+        # Add safety parameters
         execution_params['force_monitoring'] = True
         execution_params['collision_detection'] = True
         execution_params['velocity_scaling'] = 0.8  # 80% of maximum speed for safety
         
         return execution_params
-
-    def _calculate_approach_orientation(self, direction: str, object_pose: np.ndarray) -> np.ndarray:
-        """Calculate approach orientation based on direction and object pose"""
-        # Basic orientation calculation
-        orientation = np.zeros(3)
-        if direction == 'up':
-            orientation[0] = -np.pi/2
-        elif direction == 'down':
-            orientation[0] = np.pi/2
-        elif direction == 'left':
-            orientation[1] = -np.pi/2
-        elif direction == 'right':
-            orientation[1] = np.pi/2
-        elif direction == 'push':
-            orientation[0] = 0
-        elif direction == 'pull':
-            orientation[0] = np.pi
-            
-        # Adjust based on object pose
-        orientation += object_pose[3:]
-        return orientation
 
     def _calculate_approach_orientation_for_torque(self, axis: str, object_pose: np.ndarray) -> np.ndarray:
         """Calculate approach orientation for torque application"""

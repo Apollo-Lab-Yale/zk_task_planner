@@ -1,0 +1,99 @@
+{
+  "name": "open_book_top_down_grasp",
+  "abstract_action": "open",
+  "target_object": "book",
+  "primitive_sequence": [
+    "move_gripper_to_pose('f', true, false)",
+    "close_gripper()",
+    "pull('f', 'perpendicular', false, false, '')",
+    "retract_gripper()"
+  ],
+  "parameters": {
+    "force_threshold": "low",
+    "precision_required": "high",
+    "speed_requirement": "slow"
+  },
+  "prerequisites": [
+    "Gripper must be calibrated to handle paper without damaging it.",
+    "Ensure no obstructions on the book's path while opening."
+  ],
+  "constraints": [
+    "Avoid applying excessive force to prevent ripping the pages.",
+    "Ensure the book remains balanced on the surface during the operation."
+  ],
+  "image_id": "open_book_58ccdc",
+  "points_of_interest": {
+    "a": {
+      "label": "a",
+      "position": [
+        0.5609375,
+        0.65
+      ],
+      "description": "Interest point a"
+    },
+    "b": {
+      "label": "b",
+      "position": [
+        0.50625,
+        0.30833333333333335
+      ],
+      "description": "Interest point b"
+    },
+    "c": {
+      "label": "c",
+      "position": [
+        0.4390625,
+        0.4
+      ],
+      "description": "Interest point c"
+    },
+    "d": {
+      "label": "d",
+      "position": [
+        0.34375,
+        0.3020833333333333
+      ],
+      "description": "Interest point d"
+    },
+    "e": {
+      "label": "e",
+      "position": [
+        0.5703125,
+        0.46875
+      ],
+      "description": "Interest point e"
+    },
+    "f": {
+      "label": "f",
+      "position": [
+        0.4203125,
+        0.5375
+      ],
+      "description": "Interest point f"
+    },
+    "g": {
+      "label": "g",
+      "position": [
+        0.2046875,
+        0.60625
+      ],
+      "description": "Interest point g"
+    },
+    "h": {
+      "label": "h",
+      "position": [
+        0.33125,
+        0.5354166666666667
+      ],
+      "description": "Interest point h"
+    },
+    "i": {
+      "label": "i",
+      "position": [
+        0.5,
+        0.55
+      ],
+      "description": "Interest point i"
+    }
+  }
+}

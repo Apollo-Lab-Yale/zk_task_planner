@@ -67,6 +67,8 @@ class FastSAMMaskGenerator:
         self._setup_model()
         self._next_mask_id = 1
         self.debug = False
+        
+        self.last_masks = None
 
     def _setup_memory_config(self):
         """Configure memory management settings"""
@@ -228,7 +230,7 @@ class FastSAMMaskGenerator:
                             cv2.approxPolyDP(c, epsilon=0.01, closed=True).tolist()
                             for c in contours
                         ]
-                
+                self.last_masks = original_labeled_masks
                 return original_labeled_masks, metadata
             else:
                 return labeled_masks, metadata
