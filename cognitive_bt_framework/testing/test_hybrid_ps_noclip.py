@@ -446,7 +446,7 @@ def main():
         cv2.namedWindow("Segmentation", cv2.WINDOW_NORMAL)
         cv2.namedWindow("SAM Masks", cv2.WINDOW_NORMAL)
         cv2.namedWindow("Interest Points", cv2.WINDOW_NORMAL)
-        point_method = "shi_tomasi"  # Default method for point detection
+        point_method = "orb"  # Default method for point detection
         point_methods = ["harris", "shi_tomasi", "sift", "orb", "fast"]
         max_points = 20
         # Main loop

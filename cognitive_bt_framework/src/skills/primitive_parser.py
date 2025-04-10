@@ -19,7 +19,7 @@ class PrimitiveParser:
             r'push\('
             r'\[(?P<surface_keywords>[^\]]+)\]'
             r'(?:,\s*(?:is_parallel_surface=)?(?P<is_parallel_surface>true|false))?'
-            r'(?:,\s*(?:is_bottom=)?(?P<is_bottom>true|false))?'
+            r'(?:,\s*(?:is_button=)?(?P<is_button>true|false))?'
             r'(?:,\s*(?:has_pivot=)?(?P<has_pivot>true|false))?'
             r'(?:,\s*(?:pivot_point=)?(?P<pivot_point>[^)]+))?'
             r'\)'
@@ -28,7 +28,7 @@ class PrimitiveParser:
             r'pull\('
             r'\[(?P<surface_keywords>[^\]]+)\]'
             r'(?:,\s*(?:is_parallel_surface=)?(?P<is_parallel_surface>true|false))?'
-            r'(?:,\s*(?:is_bottom=)?(?P<is_bottom>true|false))?'
+            r'(?:,\s*(?:is_button=)?(?P<is_button>true|false))?'
             r'(?:,\s*(?:has_pivot=)?(?P<has_pivot>true|false))?'
             r'(?:,\s*(?:pivot_point=)?(?P<pivot_point>[^)]+))?'
             r'\)'
@@ -187,7 +187,7 @@ class PrimitiveParser:
                     parameters[keyword_param] = keywords
             
             # Process boolean parameters
-            for param in ['is_parallel_surface', 'is_bottom', 'has_pivot', 
+            for param in ['is_parallel_surface', 'is_button', 'has_pivot', 
                         'is_top_down_grasp', 'is_side_grasp']:
                 if param in match_dict and match_dict[param] is not None:
                     parameters[param] = match_dict[param].lower() == 'true'
@@ -333,14 +333,14 @@ class PrimitiveParser:
                 result = f"{action_type}({surface_keywords_str}"
                 
                 # Add optional parameters with names
-                optional_params = ['is_parallel_surface', 'is_bottom', 'has_pivot', 'pivot_point']
+                optional_params = ['is_parallel_surface', 'is_button', 'has_pivot', 'pivot_point']
                 for param in optional_params:
                     if param in kwargs:
                         # Add comma
                         result += ', '
                         
                         # Add the parameter name and value
-                        if param in ['is_parallel_surface', 'is_bottom', 'has_pivot']:
+                        if param in ['is_parallel_surface', 'is_button', 'has_pivot']:
                             result += f"{param}={str(kwargs[param]).lower()}"
                         else:
                             result += f"{param}={str(kwargs[param])}"

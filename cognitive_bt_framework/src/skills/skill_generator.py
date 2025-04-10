@@ -32,6 +32,7 @@ class Skill:
     constraints: List[str]
     image_id: str
     points_of_interest: Dict[str, PointOfInterest]  # Dictionary of labeled points
+    explanations: List[str]
 
 class SkillGenerator:
     def __init__(self, llm_interface, skills_dir: str = "stored_skills"):
@@ -48,6 +49,7 @@ class SkillGenerator:
         self.image_dir = self.skills_dir / "images"
         self.image_dir.mkdir(exist_ok=True)
         self.skills_cache: Dict[str, Skill] = {}
+        self.debug = False
         self._load_stored_skills()
 
     def _load_stored_skills(self):
@@ -114,7 +116,7 @@ class SkillGenerator:
             px, py = int(point.position[0] * w), int(point.position[1] * h)
             
             # Draw circle for point
-            cv2.circle(vis_img, (px, py), 5, (0, 0, 255), -1)
+            cv2.circle(vis_img, (px, py), 5, (0, 0, 255), 3)
             
             # Draw label
             cv2.putText(
@@ -128,8 +130,8 @@ class SkillGenerator:
             )
         
         return vis_img
-
-    async def generate_skill(self, 
+    
+    def generate_skill(self, 
                            image: np.ndarray,
                            points_of_interest: Dict[str, PointOfInterest],
                            abstract_action: str,
@@ -152,6 +154,15 @@ class SkillGenerator:
         vis_img = self._visualize_points_of_interest(image, points_of_interest)
         
         # Generate unique ID for this image
+        timestamp = int(time.time())
+        point_hash = hash(str([(p.label, p.position) for p in points_of_interest.values()])) & 0xFFFFFF
+        image_id = f"{abstract_action}_{target_object}_{timestamp}_{point_hash:06x}"
+        img_path = self._save_image(vis_img, f"vis_{image_id}")
+        if self.debug:
+            self.get_logger().info(f"Saved visualization image to {img_path}")
+        
+        # Also save the original image for reference
+        # Generate unique ID for this image
         point_hash = hash(str([(p.label, p.position) for p in points_of_interest.values()])) & 0xFFFFFF
         image_id = f"{abstract_action}_{target_object}_{point_hash:06x}"
         self._save_image(vis_img, image_id)
@@ -164,8 +175,7 @@ class SkillGenerator:
             point_descriptions.append(desc)
         
         # Create prompt for skill definition
-        combined_prompt = [
-            {"role": "system", "content": f"""Analyze the object visually and generate a complete skill definition for performing {abstract_action} on a {target_object}.
+        combined_prompt = [{"role": "system", "content": f"""Analyze the object visually and generate a complete skill definition for performing {abstract_action} on a {target_object}.
 
                     The image contains an object with labeled points of interest (red circles with alphabetical labels).
 
@@ -174,6 +184,62 @@ class SkillGenerator:
 
                     First, determine the specific subtype of the action based on the object's visual characteristics.
                     The skill name should follow the format: action_targetobject_mechanism
+
+                    AVAILABLE ACTION PRIMITIVES AND PARAMETERS:
+
+                    1. move_gripper_to_pose('point_label', is_top_down_grasp, is_side_grasp)
+                    - point_label: The labeled point (a, b, c, etc.) where the gripper should move to
+                    - is_top_down_grasp: Boolean (true/false) indicating if the gripper should approach from above
+                    - is_side_grasp: Boolean (true/false) indicating if the gripper should approach from the side
+                    - Example: move_gripper_to_pose('a', true, false) - Move to point 'a' with a top-down approach
+
+                    2. push('point_label', 'force_direction', is_button, has_pivot, 'pivot_point_label')
+                    - point_label: The labeled point that the vision system should use to detect the surface whos normal will guide the direction of the push
+                    - force_direction: Either 'perpendicular' (push directly into the surface) or 'parallel' (push along the surface)
+                    - is_button: Boolean (true/false) indicating if this is a button push (short distance, low force)
+                    - has_pivot: Boolean (true/false) indicating if the push should pivot around another point
+                    - pivot_point_label: If has_pivot is true, the labeled point to pivot around; otherwise use empty string ''
+                    - Example: push('b', 'perpendicular', true, false, '') - Push point 'b' like a button
+
+                    3. pull('point_label', 'force_direction', is_button, has_pivot, 'pivot_point_label')
+                    - point_label: The labeled point that the vision system should use to detect the surface whos normal will guide the direction of the pull
+                    - force_direction: Either 'perpendicular' (pull directly away from the surface) or 'parallel' (pull along the surface)
+                    - is_button: Boolean (true/false) indicating if this is a button-like pull (short distance, low force)
+                    - has_pivot: Boolean (true/false) indicating if the pull should pivot around another point
+                    - pivot_point_label: If has_pivot is true, the labeled point to pivot around; otherwise use empty string ''
+                    - Example: pull('c', 'parallel', false, true, 'd') - Pull point 'c' along the surface, pivoting around point 'd'
+
+                    4. close_gripper()
+                    - Closes the robot's gripper to grasp an object
+                    - No parameters required
+                    - Example: close_gripper()
+
+                    5. open_gripper()
+                    - Opens the robot's gripper to release an object
+                    - No parameters required
+                    - Example: open_gripper()
+
+                    6. retract_gripper()
+                    - Moves the gripper away from the current position to a safe position
+                    - No parameters required
+                    - Example: retract_gripper()
+
+                    SKILL PARAMETERS:
+
+                    1. force_threshold:
+                    - low: For delicate objects or precise operations (1-5N)
+                    - medium: For standard operations (5-15N)
+                    - high: For operations requiring significant force (15-30N)
+
+                    2. precision_required:
+                    - low: For operations where exact positioning is not critical (±10mm)
+                    - medium: For standard operations requiring good accuracy (±5mm)
+                    - high: For operations requiring very precise positioning (±1mm)
+
+                    3. speed_requirement:
+                    - slow: For delicate operations or where safety is paramount (0.1-0.2m/s)
+                    - medium: For standard operations (0.2-0.4m/s)
+                    - high: For operations where time efficiency is important (0.4-0.6m/s)
 
                     IMPORTANT: You must output ONLY a valid JSON object with the following structure:
 
@@ -198,6 +264,9 @@ class SkillGenerator:
                         ],
                         "constraints": [
                             "list of safety limits and constraints"
+                        ],
+                        "explanations": [
+                            "list of detailed explanations for primitives and parameter choices"
                         ]
                     }}}}
 
@@ -215,9 +284,18 @@ class SkillGenerator:
                     - retract_gripper()
 
                     Note:
-                    - push and pull will always be applied directly outwards or inwards relative to the direction the gripper is currently pointing.
-                    - when grasping an object move_gripper_to_pose should specify the point label for positioning.
-                    - all references to locations should use the labeled points (a, b, c, etc.)
+                    - For push and pull, the force_direction determines if the movement is perpendicular to the surface or parallel along it
+                    - Surface normals will be calculated automatically from the environment
+                    - When grasping an object, move_gripper_to_pose should specify the best point label for positioning
+                    - All references to locations should use the labeled points (a, b, c, etc.)
+                    - Prerequisites should include any conditions that must be met before execution (e.g., "object must be stationary")
+                    - Constraints should include any safety limits (e.g., "maximum force must not exceed 15N")
+                    
+                    - The chosen point label for move_gripper_to_pose should indicate the BEST location for the robot to manipulate the object given 
+                      the requested action: {abstract_action}
+                    
+                    - The chosen surface point label for push/pull should be the CLEAREST INDICATOR of the surface to align the force with
+                        the goal be to should make it easy for the robot to calculate the normal direction.
 
                     Base all values on the visual appearance of the object.
                     Return only the raw JSON object with no additional text."""},
@@ -236,11 +314,9 @@ class SkillGenerator:
                 {"type": "image_url", "image_url": {
                     "url": f"data:image/png;base64,{self._encode_image(vis_img)}"
                 }}
-            ]}
-        ]
-        
+            ]}]
         # Get response
-        skill_response = await self.llm.query_llm(combined_prompt)
+        skill_response = self.llm.query_llm(combined_prompt)
         try:
             skill_data = json.loads(skill_response)
         except json.JSONDecodeError:
@@ -256,6 +332,7 @@ class SkillGenerator:
             parameters=skill_data.get('parameters', {}),
             prerequisites=skill_data.get('prerequisites', []),
             constraints=skill_data.get('constraints', []),
+            explanations=skill_data.get('explanations', []),
             image_id=image_id,
             points_of_interest=points_of_interest
         )
@@ -263,7 +340,7 @@ class SkillGenerator:
         self._store_skill(skill)
         return skill
 
-    async def find_similar_skill(self, 
+    def find_similar_skill(self, 
                           image: np.ndarray,
                           points_of_interest: Dict[str, PointOfInterest],
                           abstract_action: str,
@@ -338,7 +415,7 @@ class SkillGenerator:
             comparison_prompt[1]["content"].append(img_data)
         
         # Query LLM for all comparisons at once
-        comparison_response = await self.llm.query_llm(comparison_prompt)
+        comparison_response = self.llm.query_llm(comparison_prompt)
         
         try:
             # Parse the JSON response
@@ -369,7 +446,7 @@ class SkillGenerator:
             print(f"Response: {comparison_response}")
             return None
 
-    async def adapt_skill(self, 
+    def adapt_skill(self, 
                          base_skill: Skill,
                          new_image: np.ndarray,
                          new_points: Dict[str, PointOfInterest]) -> Optional[Skill]:
@@ -426,7 +503,7 @@ class SkillGenerator:
             ]}
         ]
         
-        adaptation_response = await self.llm.query_llm(adaptation_prompt)
+        adaptation_response = self.llm.query_llm(adaptation_prompt)
         try:
             adapted_data = json.loads(adaptation_response)
             

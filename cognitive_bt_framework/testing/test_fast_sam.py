@@ -296,15 +296,16 @@ def main():
     device = "cpu" if args.use_cpu else "cuda"
     
     fastsam_config = FastSAMConfig(
-        model_type=args.model_type,
-        device=device,
-        max_image_size=args.max_image_size,
-        conf_threshold=args.conf_threshold,
-        iou_threshold=0.9,
+        model_type="FastSAM-x",
+        max_image_size=640,
+        conf_threshold=0.5,  # Lower threshold for better book segmentation
+        iou_threshold=0.5,
         retina_masks=True,
-        remove_small_regions=True,
-        merge_overlapping=True,
-        min_area=25.0
+        remove_small_regions=False,
+        merge_overlapping=False,
+        overlap_threshold=0.5,
+        min_area=10.0,  # Smaller minimum area to capture book details
+        draw_borders=True
     )
     
     mask_generator = FastSAMMaskGenerator(fastsam_config)

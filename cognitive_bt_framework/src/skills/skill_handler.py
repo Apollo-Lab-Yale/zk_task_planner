@@ -65,6 +65,7 @@ class SkillHandler:
         self.skill_generator = skill_generator
         self.perception_system = perception_system
         self.primitive_parser = PrimitiveParser()
+        self.debug = False
         
     @staticmethod
     def _get_alpha_id(num):
@@ -81,7 +82,7 @@ class SkillHandler:
         
         return letters
         
-    async def instantiate_skill(
+    def instantiate_skill(
         self, 
         abstract_action: str, 
         target_object: str,
@@ -112,13 +113,7 @@ class SkillHandler:
             return None
         
         # Detect regions of interest on the object
-        roi_results = self.perception_system.detect_regions_of_interest(
-            image=image,
-            obj_info=object_info,
-            method='shi_tomasi',  # Use SIFT for better feature detection
-            max_points=20,  # Limit to 10 key points to avoid clutter
-            visualize=True
-        )
+        roi_results = object_info.points
         
         # Create points of interest dictionary
         points_of_interest = {}
@@ -146,7 +141,7 @@ class SkillHandler:
         # )
         skill = None
         if skill is None:
-            skill = await self.skill_generator.generate_skill(
+            skill = self.skill_generator.generate_skill(
                 image=object_info.image,
                 points_of_interest=points_of_interest,
                 abstract_action=abstract_action,
@@ -522,7 +517,7 @@ class SkillHandler:
             action_type=action_type,
             surface_keywords=parameters.get('surface_keywords', []),
             is_parallel_surface=parameters.get('is_parallel_surface', False),
-            is_bottom=parameters.get('is_bottom', False),
+            is_button=parameters.get('is_button', False),
             has_pivot=parameters.get('has_pivot', False),
             pivot_point=parameters.get('pivot_point', None),
             distance=parameters.get('distance', 0.1),
@@ -584,7 +579,7 @@ class SkillHandler:
                        action_type: str,
                        surface_keywords: List[str],
                        is_parallel_surface: bool,
-                       is_bottom: bool,
+                       is_button: bool,
                        has_pivot: bool,
                        pivot_point: Optional[str],
                        distance: float,
@@ -652,7 +647,7 @@ class SkillHandler:
                 approach_vector = -approach_vector
                 
             # Adjust for top vs bottom surface
-            if is_bottom:
+            if is_button:
                 # For bottom surface, we typically approach from below
                 approach_vector[2] = -abs(approach_vector[2])
             else:
@@ -695,7 +690,7 @@ class SkillHandler:
             'speed': self._get_speed_value(skill_parameters.get('speed_requirement', 'medium')),
             'precision': skill_parameters.get('precision_required', 'medium'),
             'is_parallel_surface': is_parallel_surface,
-            'is_bottom': is_bottom,
+            'is_button': is_button,
             'has_pivot': has_pivot,
             'surface_keywords': surface_keywords
         }

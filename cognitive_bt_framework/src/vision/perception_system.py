@@ -30,6 +30,7 @@ class ObjectInfo:
     components: Dict[str, 'ObjectInfo'] = None  # Store detected components within this object
     depth_image: Optional[np.ndarray] = None
     alpha_id: Optional[str] = None  # Alphabetical ID for user-friendly identification
+    points: Optional[np.ndarray] = None
     
 
 def get_alpha_id(num):
@@ -211,12 +212,21 @@ class PerceptionSystem:
                         self.profiler.start(f"segment_obj_{i}")
                         print(f"Generating segmentation for object {i} ({class_name})")
                     
-                    mask = self._generate_segmentation(image, obj_info)
-                    if mask is not None:
-                        obj_info.mask = mask
+                    # mask = self._generate_segmentation(image, obj_info)
+                    mask = None
+                    # Fallback to bbox mask if segmentation failed
+                    if mask is None:
+                        if self.debug:
+                            print(f"Segmentation failed for object {i}, falling back to bbox mask")
+                        
+                        # Create a simple binary mask from bbox
+                        mask = np.zeros(image.shape[:2], dtype=bool)
+                        x, y, w, h = bbox
+                        mask[y:y+h, x:x+w] = True
                     
-                    if self.debug:
-                        self.profiler.stop(f"segment_obj_{i}")
+                    obj_info.mask = mask
+                    
+                    obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=50)
                 
                 # Estimate pose if depth image is provided
                 if depth_image is not None:
@@ -1093,10 +1103,10 @@ class PerceptionSystem:
         self,
         image: np.ndarray,
         obj_info: ObjectInfo,
-        method: str = 'shi_tomasi',
+        method: str = 'orb',
         max_points: int = 100,
         quality_level: float = 0.01,
-        min_distance: int = 50,
+        min_distance: int = 25,
         visualize: bool = False
     ) -> Dict[str, Any]:
         """
@@ -1252,19 +1262,71 @@ class PerceptionSystem:
                     # Filter out keypoints outside the mask
                     valid_keypoints = []
                     valid_descriptors = []
+                    valid_indices = []
                     
                     for i, kp in enumerate(keypoints):
                         x, y = int(kp.pt[0]), int(kp.pt[1])
                         if 0 <= x < mask.shape[1] and 0 <= y < mask.shape[0] and mask[y, x]:
                             valid_keypoints.append(kp)
+                            valid_indices.append(i)
                             if descriptors is not None:
                                 valid_descriptors.append(descriptors[i])
                     
-                    keypoints = valid_keypoints
-                    if descriptors is not None and len(valid_descriptors) > 0:
-                        descriptors = np.array(valid_descriptors)
+                    # Apply minimum distance filtering to ensure spatial distribution
+                    if min_distance > 0 and len(valid_keypoints) > 1:
+                        # Sort keypoints by response strength (strongest first)
+                        sorted_keypoints = sorted(
+                            [(i, kp) for i, kp in enumerate(valid_keypoints)], 
+                            key=lambda x: x[1].response, 
+                            reverse=True
+                        )
+                        
+                        filtered_keypoints = []
+                        filtered_descriptors = []
+                        filtered_indices = []
+                        
+                        # Always keep the strongest keypoint
+                        strongest_idx, strongest_kp = sorted_keypoints[0]
+                        filtered_keypoints.append(strongest_kp)
+                        filtered_indices.append(valid_indices[strongest_idx])
+                        if descriptors is not None:
+                            filtered_descriptors.append(valid_descriptors[strongest_idx])
+                        
+                        # For each remaining keypoint, check if it's far enough from already-selected keypoints
+                        for idx, kp in sorted_keypoints[1:]:
+                            # Check minimum distance to all previously filtered keypoints
+                            too_close = False
+                            kp_x, kp_y = kp.pt
+                            
+                            for filtered_kp in filtered_keypoints:
+                                f_x, f_y = filtered_kp.pt
+                                distance = np.sqrt((kp_x - f_x)**2 + (kp_y - f_y)**2)
+                                if distance < min_distance:
+                                    too_close = True
+                                    break
+                            
+                            if not too_close:
+                                filtered_keypoints.append(kp)
+                                filtered_indices.append(valid_indices[idx])
+                                if descriptors is not None:
+                                    filtered_descriptors.append(valid_descriptors[idx])
+                        
+                        # Update keypoints and descriptors with filtered ones
+                        keypoints = filtered_keypoints
+                        if descriptors is not None and len(filtered_descriptors) > 0:
+                            descriptors = np.array(filtered_descriptors)
+                        else:
+                            descriptors = None
                     else:
-                        descriptors = None
+                        # No min_distance filtering needed
+                        keypoints = valid_keypoints
+                        if descriptors is not None and len(valid_descriptors) > 0:
+                            descriptors = np.array(valid_descriptors)
+                        else:
+                            descriptors = None
+                            
+                    if self.debug and len(keypoints) == 0:
+                        print("ORB detection found no keypoints after filtering")
                         
                 except Exception as e:
                     if self.debug:
