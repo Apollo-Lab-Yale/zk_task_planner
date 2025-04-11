@@ -132,7 +132,7 @@ class PerceptionSystem:
         self,
         image: np.ndarray,
         classes: Optional[List[str]] = None,
-        conf: Optional[float] = 0.5,
+        conf: Optional[float] = 0.1,
         segment: bool = True,
         depth_image: Optional[np.ndarray] = None,
     ) -> List[ObjectInfo]:
@@ -226,7 +226,7 @@ class PerceptionSystem:
                     
                     obj_info.mask = mask
                     
-                    obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=50)
+                    obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=20)
                 
                 # Estimate pose if depth image is provided
                 if depth_image is not None:
@@ -272,7 +272,7 @@ class PerceptionSystem:
         self,
         target_object: str,
         image: np.ndarray,
-        conf: Optional[float] = 0.5,
+        conf: Optional[float] = 0.1,
         segment: bool = True,
         depth_image: Optional[np.ndarray] = None,
     ) -> Optional[ObjectInfo]:
@@ -334,7 +334,7 @@ class PerceptionSystem:
         self,
         image: np.ndarray,
         bbox: List[int],
-        conf_threshold: float = 0.4,
+        conf_threshold: float = 0.1,
         depth_image: Optional[np.ndarray] = None
     ) -> Dict[int, ObjectInfo]:
         """
@@ -1104,7 +1104,7 @@ class PerceptionSystem:
         image: np.ndarray,
         obj_info: ObjectInfo,
         method: str = 'orb',
-        max_points: int = 100,
+        max_points: int = 20,
         quality_level: float = 0.01,
         min_distance: int = 25,
         visualize: bool = False
@@ -1253,7 +1253,7 @@ class PerceptionSystem:
             elif method.lower() == 'orb':
                 # ORB detector
                 try:
-                    orb = cv2.ORB_create(nfeatures=max_points)
+                    orb = cv2.ORB_create(nfeatures=max_points, edgeThreshold=1, patchSize=1)
                     
                     # Apply mask to limit detection region
                     mask_uint8 = mask.astype(np.uint8) * 255

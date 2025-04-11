@@ -316,7 +316,7 @@ class SkillGenerator:
                 }}
             ]}]
         # Get response
-        skill_response = self.llm.query_llm(combined_prompt)
+        skill_response = self.llm.query_llm_sync(combined_prompt)
         try:
             skill_data = json.loads(skill_response)
         except json.JSONDecodeError:
@@ -415,7 +415,7 @@ class SkillGenerator:
             comparison_prompt[1]["content"].append(img_data)
         
         # Query LLM for all comparisons at once
-        comparison_response = self.llm.query_llm(comparison_prompt)
+        comparison_response = self.llm.query_llm_sync(comparison_prompt)
         
         try:
             # Parse the JSON response
@@ -503,7 +503,7 @@ class SkillGenerator:
             ]}
         ]
         
-        adaptation_response = self.llm.query_llm(adaptation_prompt)
+        adaptation_response = self.llm.query_llm_sync(adaptation_prompt)
         try:
             adapted_data = json.loads(adaptation_response)
             

@@ -290,6 +290,27 @@ class LLMInterfaceOpenAI:
         except Exception as e:
             print(f"Error querying LLM: {e}")
             return None
+        
+    @sleep_and_retry
+    @limits(calls=100, period=60)
+    def query_llm_sync(self, prompt):
+        try:
+            self.conversation_history.append(prompt)
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=prompt,
+                max_tokens=4096,
+                temperature=0.5
+            )
+            self.conversation_history.append([{
+                'role': 'llm',
+                'content': response.choices[0].message.content
+            }])
+            print(response)
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"Error querying LLM: {e}")
+            return None
 
     async def get_task_decomposition(self, task, known_objects, context):
         prompt = self.generate_prompt_htn(task, known_objects, context)

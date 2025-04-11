@@ -448,7 +448,7 @@ def main():
         cv2.namedWindow("Interest Points", cv2.WINDOW_NORMAL)
         point_method = "orb"  # Default method for point detection
         point_methods = ["harris", "shi_tomasi", "sift", "orb", "fast"]
-        max_points = 20
+        max_points = 50
         # Main loop
         while True:
             # Get frames from camera
