@@ -1,0 +1,83 @@
+{
+  "name": "open_box_lid_lift",
+  "abstract_action": "open",
+  "target_object": "box",
+  "primitive_sequence": [
+    "move_gripper_to_pose('mhf', true, false)",
+    "close_gripper()",
+    "pull('mzh', 'perpendicular', false, false, '')",
+    "retract_gripper()",
+    "open_gripper()"
+  ],
+  "parameters": {
+    "force_threshold": "medium",
+    "precision_required": "high",
+    "speed_requirement": "medium"
+  },
+  "prerequisites": [
+    "Robot must be calibrated for precise grip and pull motions",
+    "Ensure the box is stable and not overloaded to prevent tipping"
+  ],
+  "constraints": [
+    "Avoid excessive force to prevent damage to the box",
+    "Ensure gripper is properly aligned with the lid to avoid slippage during pull"
+  ],
+  "image_id": "open_box_1744642800_32f476",
+  "points_of_interest": {
+    "lsv": {
+      "label": "lsv",
+      "position": [
+        0.51875,
+        0.40208333333333335
+      ],
+      "description": "Interest point lsv at normalized position (0.51875, 0.40208333333333335)"
+    },
+    "efv": {
+      "label": "efv",
+      "position": [
+        0.509375,
+        0.10625
+      ],
+      "description": "Interest point efv at normalized position (0.509375, 0.10625)"
+    },
+    "mjy": {
+      "label": "mjy",
+      "position": [
+        0.39375,
+        0.10416666666666667
+      ],
+      "description": "Interest point mjy at normalized position (0.39375, 0.10416666666666667)"
+    },
+    "mhf": {
+      "label": "mhf",
+      "position": [
+        0.51875,
+        0.23541666666666666
+      ],
+      "description": "Interest point mhf at normalized position (0.51875, 0.23541666666666666)"
+    },
+    "yka": {
+      "label": "yka",
+      "position": [
+        0.365625,
+        0.32708333333333334
+      ],
+      "description": "Interest point yka at normalized position (0.365625, 0.32708333333333334)"
+    },
+    "ydh": {
+      "label": "ydh",
+      "position": [
+        0.3671875,
+        0.20625
+      ],
+      "description": "Interest point ydh at normalized position (0.3671875, 0.20625)"
+    }
+  },
+  "explanations": [
+    "Gripper moves to 'mhf' to grasp the lid from a top-down position for better control.",
+    "Close gripper to secure grip on the box lid.",
+    "Pull action is perpendicular to the surface 'mzh' to lift the lid open effectively.",
+    "Retract gripper to clear the area after pulling the lid open.",
+    "Open gripper to release the lid after opening."
+  ]
+}

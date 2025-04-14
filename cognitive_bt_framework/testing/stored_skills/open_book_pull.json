@@ -1,0 +1,115 @@
+{
+  "name": "open_book_pull",
+  "abstract_action": "open",
+  "target_object": "book",
+  "primitive_sequence": [
+    "move_gripper_to_pose('xvh', true, false)",
+    "close_gripper()",
+    "pull('jev', 'parallel', false, false, '')",
+    "open_gripper()",
+    "retract_gripper()"
+  ],
+  "parameters": {
+    "force_threshold": "low",
+    "precision_required": "high",
+    "speed_requirement": "slow"
+  },
+  "prerequisites": [
+    "Ensure book is not attached or fixed to the surface",
+    "Verify gripper is calibrated and functional"
+  ],
+  "constraints": [
+    "Avoid excessive force that may damage the book",
+    "Ensure the book's position allows for complete opening without obstruction"
+  ],
+  "image_id": "open_book_1744645156_4194da",
+  "points_of_interest": {
+    "rao": {
+      "label": "rao",
+      "position": [
+        0.2859375,
+        0.6666666666666666
+      ],
+      "description": "Interest point rao at normalized position (0.2859375, 0.6666666666666666)"
+    },
+    "lwt": {
+      "label": "lwt",
+      "position": [
+        0.4953125,
+        0.6229166666666667
+      ],
+      "description": "Interest point lwt at normalized position (0.4953125, 0.6229166666666667)"
+    },
+    "cvo": {
+      "label": "cvo",
+      "position": [
+        0.475,
+        0.725
+      ],
+      "description": "Interest point cvo at normalized position (0.475, 0.725)"
+    },
+    "xvh": {
+      "label": "xvh",
+      "position": [
+        0.340625,
+        0.5854166666666667
+      ],
+      "description": "Interest point xvh at normalized position (0.340625, 0.5854166666666667)"
+    },
+    "vuc": {
+      "label": "vuc",
+      "position": [
+        0.3859375,
+        0.6854166666666667
+      ],
+      "description": "Interest point vuc at normalized position (0.3859375, 0.6854166666666667)"
+    },
+    "byl": {
+      "label": "byl",
+      "position": [
+        0.4453125,
+        0.4354166666666667
+      ],
+      "description": "Interest point byl at normalized position (0.4453125, 0.4354166666666667)"
+    },
+    "brn": {
+      "label": "brn",
+      "position": [
+        0.4953125,
+        0.34791666666666665
+      ],
+      "description": "Interest point brn at normalized position (0.4953125, 0.34791666666666665)"
+    },
+    "clo": {
+      "label": "clo",
+      "position": [
+        0.34375,
+        0.4041666666666667
+      ],
+      "description": "Interest point clo at normalized position (0.34375, 0.4041666666666667)"
+    },
+    "jjn": {
+      "label": "jjn",
+      "position": [
+        0.2703125,
+        0.3375
+      ],
+      "description": "Interest point jjn at normalized position (0.2703125, 0.3375)"
+    },
+    "gnh": {
+      "label": "gnh",
+      "position": [
+        0.196875,
+        0.725
+      ],
+      "description": "Interest point gnh at normalized position (0.196875, 0.725)"
+    }
+  },
+  "explanations": [
+    "move_gripper_to_pose('xvh', true, false) - Position gripper above point xvh for a top-down grasp, suitable for grabbing the edge of the book",
+    "close_gripper() - Grips the book securely for pulling",
+    "pull('jev', 'parallel', false, false, '') - Pulls the front cover of the book parallel to its surface to open it, using surface jev which is oriented appropriately for this action",
+    "open_gripper() - Releases the book after opening",
+    "retract_gripper() - Moves the gripper away to a safe position after the task is complete"
+  ]
+}

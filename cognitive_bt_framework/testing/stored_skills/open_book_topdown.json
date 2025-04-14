@@ -1,0 +1,113 @@
+{
+  "name": "open_book_topdown",
+  "abstract_action": "open",
+  "target_object": "book",
+  "primitive_sequence": [
+    "move_gripper_to_pose('nrm', true, false)",
+    "close_gripper()",
+    "pull('yqf', 'perpendicular', false, false, '')",
+    "retract_gripper()",
+    "open_gripper()"
+  ],
+  "parameters": {
+    "force_threshold": "low",
+    "precision_required": "high",
+    "speed_requirement": "slow"
+  },
+  "prerequisites": [
+    "The book must be positioned such that the spine is accessible and not obstructed."
+  ],
+  "constraints": [
+    "Ensure the gripper does not apply excessive force to avoid damaging the book."
+  ],
+  "image_id": "open_book_1744484370_173f3e",
+  "points_of_interest": {
+    "ojp": {
+      "label": "ojp",
+      "position": [
+        0.5859375,
+        0.5270833333333333
+      ],
+      "description": "Interest point ojp"
+    },
+    "lhu": {
+      "label": "lhu",
+      "position": [
+        0.7921875,
+        0.6208333333333333
+      ],
+      "description": "Interest point lhu"
+    },
+    "wel": {
+      "label": "wel",
+      "position": [
+        0.584375,
+        0.61875
+      ],
+      "description": "Interest point wel"
+    },
+    "nrm": {
+      "label": "nrm",
+      "position": [
+        0.609375,
+        0.5729166666666666
+      ],
+      "description": "Interest point nrm"
+    },
+    "vhw": {
+      "label": "vhw",
+      "position": [
+        0.7578125,
+        0.4791666666666667
+      ],
+      "description": "Interest point vhw"
+    },
+    "fui": {
+      "label": "fui",
+      "position": [
+        0.6265625,
+        0.6229166666666667
+      ],
+      "description": "Interest point fui"
+    },
+    "xdd": {
+      "label": "xdd",
+      "position": [
+        0.690625,
+        0.6229166666666667
+      ],
+      "description": "Interest point xdd"
+    },
+    "dey": {
+      "label": "dey",
+      "position": [
+        0.66875,
+        0.55
+      ],
+      "description": "Interest point dey"
+    },
+    "hvi": {
+      "label": "hvi",
+      "position": [
+        0.75,
+        0.6020833333333333
+      ],
+      "description": "Interest point hvi"
+    },
+    "hfh": {
+      "label": "hfh",
+      "position": [
+        0.6453125,
+        0.49375
+      ],
+      "description": "Interest point hfh"
+    }
+  },
+  "explanations": [
+    "The gripper moves to point 'nrm' for a top-down grasp, which is optimal for opening a book from the top.",
+    "The gripper then closes to secure the book.",
+    "A perpendicular pull on surface 'yqf' opens the book without pivoting, suitable for lifting a cover directly.",
+    "Retracting the gripper moves it away from the book after opening.",
+    "Opening the gripper releases the book in its open state."
+  ]
+}

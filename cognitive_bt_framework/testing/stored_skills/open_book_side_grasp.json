@@ -1,0 +1,115 @@
+{
+  "name": "open_book_side_grasp",
+  "abstract_action": "open",
+  "target_object": "book",
+  "primitive_sequence": [
+    "move_gripper_to_pose('iro', false, true)",
+    "close_gripper()",
+    "pull('oit', 'parallel', false, true, 'iro')",
+    "open_gripper()",
+    "retract_gripper()"
+  ],
+  "parameters": {
+    "force_threshold": "low",
+    "precision_required": "high",
+    "speed_requirement": "slow"
+  },
+  "prerequisites": [
+    "Ensure the book is not attached or fixed to any surface.",
+    "Verify that the gripper's approach path is clear of obstructions."
+  ],
+  "constraints": [
+    "Avoid excessive force that could damage the book.",
+    "Ensure the book remains stable on the surface during the operation."
+  ],
+  "image_id": "open_book_1744478319_b35fb1",
+  "points_of_interest": {
+    "bwd": {
+      "label": "bwd",
+      "position": [
+        0.65,
+        0.6270833333333333
+      ],
+      "description": "Interest point bwd"
+    },
+    "lzr": {
+      "label": "lzr",
+      "position": [
+        0.5859375,
+        0.6270833333333333
+      ],
+      "description": "Interest point lzr"
+    },
+    "hpz": {
+      "label": "hpz",
+      "position": [
+        0.784375,
+        0.61875
+      ],
+      "description": "Interest point hpz"
+    },
+    "lib": {
+      "label": "lib",
+      "position": [
+        0.63125,
+        0.4791666666666667
+      ],
+      "description": "Interest point lib"
+    },
+    "bkz": {
+      "label": "bkz",
+      "position": [
+        0.5796875,
+        0.48125
+      ],
+      "description": "Interest point bkz"
+    },
+    "oer": {
+      "label": "oer",
+      "position": [
+        0.63125,
+        0.5604166666666667
+      ],
+      "description": "Interest point oer"
+    },
+    "aja": {
+      "label": "aja",
+      "position": [
+        0.753125,
+        0.4791666666666667
+      ],
+      "description": "Interest point aja"
+    },
+    "zyr": {
+      "label": "zyr",
+      "position": [
+        0.696875,
+        0.6
+      ],
+      "description": "Interest point zyr"
+    },
+    "iro": {
+      "label": "iro",
+      "position": [
+        0.5796875,
+        0.5395833333333333
+      ],
+      "description": "Interest point iro"
+    },
+    "env": {
+      "label": "env",
+      "position": [
+        0.7453125,
+        0.6
+      ],
+      "description": "Interest point env"
+    }
+  },
+  "explanations": [
+    "The gripper moves to point 'iro' which is near the edge of the book, allowing a side grasp.",
+    "A side grasp is used to securely hold the book without obstructing the page-turning action.",
+    "Pulling action is executed along the surface 'oit' (the cover of the book), pivoting around point 'iro' to simulate the opening of the book.",
+    "Low force is used to prevent damage to the book, and high precision is necessary to grasp and manipulate the book accurately.",
+    "The operation is performed slowly to ensure control and prevent rapid movements that could tear pages or destabilize the book."
+  ]
+}

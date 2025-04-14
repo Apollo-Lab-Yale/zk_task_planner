@@ -119,7 +119,7 @@ class SkillHandler:
         points_of_interest = {}
         for i, (pixel_x, pixel_y) in enumerate(roi_results['pixel_coords']):
             # Create uppercase alphabetical label
-            label = self._get_alpha_id(i + 1)  # A, B, C, ...
+            label = roi_results['ids'][i]
             
             # Convert to normalized coordinates
             norm_x = pixel_x / image.shape[1]
@@ -129,7 +129,7 @@ class SkillHandler:
             points_of_interest[label] = PointOfInterest(
                 label=label,
                 position=(norm_x, norm_y),
-                description=f"Interest point {label}"
+                description=f"Interest point {label} at normalized position {(norm_x, norm_y)}"
             )
         
         # Get or generate skill using SkillGenerator
@@ -243,8 +243,23 @@ class SkillHandler:
                               object_pixel_pose,
                               points_3d,
                               points_pixel,
-                              skill_parameters) -> Optional[ExecutableAction]:
-        """Convert a parsed primitive using point labels to an executable action"""
+                              skill_parameters,
+                              object_info=None) -> Optional[ExecutableAction]:
+        """
+        Convert a parsed primitive using surface labels or point labels to an executable action
+        
+        Args:
+            parsed_primitive: The parsed primitive with action type and parameters
+            object_pose: 3D pose of the object
+            object_pixel_pose: Pixel coordinates of the object
+            points_3d: Dictionary mapping point labels to 3D positions
+            points_pixel: Dictionary mapping point labels to pixel positions
+            skill_parameters: Parameters for the skill execution
+            object_info: ObjectInfo containing surface masks and depth image
+            
+        Returns:
+            ExecutableAction if conversion is successful, None otherwise
+        """
         action_type = parsed_primitive.action_type
         parameters = parsed_primitive.parameters
         print(parsed_primitive)
@@ -253,26 +268,88 @@ class SkillHandler:
         points_3d_ci = {k.upper(): v for k, v in points_3d.items()}
         points_pixel_ci = {k.upper(): v for k, v in points_pixel.items()}
         
-        # Handle push/pull actions
+        # Handle push/pull actions that now use surface labels
         if action_type in ['push', 'pull']:
-            # Get target point with case-insensitive lookup
-            point_label = parameters.get('point_label', '')
-            point_label_upper = point_label.upper()
+            # Get target surface with case-insensitive lookup
+            surface_label = parameters.get('surface_label', '')
+            surface_label_upper = surface_label.upper()
             
-            if point_label_upper not in points_3d_ci:
-                print(f"Point label '{point_label}' not found in points_3d")
-                # Check if we have any points at all
+            # Calculate surface normal if object_info is available
+            surface_normal = None
+            surface_centroid_position = None
+            surface_centroid_pixel = None
+            
+            if object_info is not None and object_info.surface_masks is not None and object_info.depth_image is not None:
+                # Find the surface mask based on the label
+                surface_mask = None
+                
+                # Look for the surface by label in format "surface_X"
+                for name, mask in object_info.surface_masks.items():
+                    # Extract the alphabetical ID from the surface name
+                    if "_" in name:
+                        mask_id = name.split("_")[1].upper()
+                        if mask_id == surface_label_upper:
+                            surface_mask = mask
+                            break
+                
+                # If we found a matching surface mask
+                if surface_mask is not None:
+                    # Calculate centroid of the surface mask
+                    y_coords, x_coords = np.where(surface_mask)
+                    if len(y_coords) > 0:
+                        # Calculate pixel centroid
+                        centroid_y = int(np.mean(y_coords))
+                        centroid_x = int(np.mean(x_coords))
+                        surface_centroid_pixel = (centroid_x, centroid_y)
+                        
+                        # Get depth at the centroid
+                        if 0 <= centroid_y < object_info.depth_image.shape[0] and 0 <= centroid_x < object_info.depth_image.shape[1]:
+                            depth = object_info.depth_image[centroid_y, centroid_x]
+                            
+                            # Convert to 3D position using camera intrinsics
+                            # Note: This assumes we have access to camera intrinsics
+                            # which should be available in the perception system
+                            # For now, we'll use the object's own conversion method if available
+                            if hasattr(self, '_pixel_to_3d'):
+                                surface_centroid_position = self._pixel_to_3d(centroid_x, centroid_y, depth)
+                            else:
+                                # Fallback: Estimate position using simple pinhole model
+                                # This assumes fx, fy, cx, cy are available somewhere
+                                # You may need to adjust this based on your actual implementation
+                                fx = 429.92523193359375  # Default from perception system
+                                fy = 429.92523193359375
+                                cx = 431.7160339355469
+                                cy = 233.39739990234375
+                                depth_scale = 0.001  # Default scale factor (m/unit)
+                                
+                                # Convert to meters
+                                z = depth * depth_scale
+                                x = (centroid_x - cx) * z / fx
+                                y = (centroid_y - cy) * z / fy
+                                surface_centroid_position = np.array([x, y, z])
+                        
+                        # Calculate surface normal using the depth image and mask
+                        surface_normal = self._calculate_surface_normal(
+                            object_info.depth_image,
+                            surface_mask,
+                            depth_scale=0.001  # Default scale factor (m/unit)
+                        )
+            
+            # If we couldn't find the surface or calculate normal, use fallback
+            if surface_centroid_position is None or surface_normal is None:
+                print(f"Surface '{surface_label}' not found or normal calculation failed")
+                
+                # Fall back to using a point if available
                 if points_3d:
-                    # Use the first available point as fallback
                     print(f"Using first available point as fallback")
                     fallback_label = list(points_3d.keys())[0]
-                    target_position = points_3d[fallback_label]
-                    target_pixel = points_pixel[fallback_label]
+                    surface_centroid_position = points_3d[fallback_label]
+                    surface_centroid_pixel = points_pixel[fallback_label]
+                    
+                    # Create a default normal pointing along Z-axis
+                    surface_normal = np.array([0, 0, 1])
                 else:
                     return None
-            else:
-                target_position = points_3d_ci[point_label_upper]
-                target_pixel = points_pixel_ci[point_label_upper]
             
             # Get pivot point if specified
             pivot_position = None
@@ -293,7 +370,8 @@ class SkillHandler:
                 'is_parallel': parameters.get('force_direction', 'perpendicular') == 'parallel',
                 'is_button': parameters.get('is_button', False),
                 'has_pivot': parameters.get('has_pivot', False),
-                'point_label': point_label
+                'surface_label': surface_label,
+                'surface_normal': surface_normal  # Add the calculated normal to parameters
             }
             
             # Add pivot position if available
@@ -301,9 +379,9 @@ class SkillHandler:
                 action_params['pivot_position'] = pivot_position
                 action_params['pivot_label'] = parameters.get('pivot_point_label')
             
-            # Determine approach direction and orientation based on parameters
-            orientation = self._calculate_approach_orientation(
-                target_position, 
+            # Determine approach direction and orientation based on surface normal and parameters
+            orientation = self._calculate_orientation_from_normal(
+                surface_normal,
                 pivot_position if pivot_position is not None else None,
                 action_params['is_parallel'],
                 action_type
@@ -311,90 +389,58 @@ class SkillHandler:
             
             return ExecutableAction(
                 action_type=action_type,
-                position=target_position,
+                position=surface_centroid_position,
                 orientation=orientation,
-                pixel_position=target_pixel,
+                pixel_position=surface_centroid_pixel,
                 parameters=action_params,
                 is_top_down_grasp=False,
                 is_side_grasp=False
             )
-            
+        
+        # Handle move_gripper_to_pose (which still uses point labels)
         elif action_type == 'move_gripper_to_pose':
-            # Add debug information about the incoming parameters
-            print(f"DEBUG: Converting move_gripper_to_pose primitive")
-            print(f"DEBUG: Raw parameters: {parameters}")
-            print(f"DEBUG: Available points_3d keys: {list(points_3d.keys())}")
-            print(f"DEBUG: Available points_3d_ci keys: {list(points_3d_ci.keys())}")
-            
             # Get target point with case-insensitive lookup
             point_label = parameters.get('point_label', '')
-            print(f"DEBUG: Extracted point_label: '{point_label}', type: {type(point_label)}")
-            
-            # Check if point_label is a string before trying to uppercase
-            if not isinstance(point_label, str):
-                print(f"DEBUG: point_label is not a string! Converting to string first.")
-                point_label = str(point_label)
-                
             point_label_upper = point_label.upper()
-            print(f"DEBUG: Uppercased point_label: '{point_label_upper}'")
             
             if point_label_upper not in points_3d_ci:
                 print(f"Point label '{point_label}' not found in points_3d")
                 # Check if we have any points at all
                 if points_3d:
+                    # Use the first available point as fallback
                     print(f"Using first available point as fallback")
                     fallback_label = list(points_3d.keys())[0]
-                    print(f"DEBUG: Fallback to point '{fallback_label}'")
                     target_position = points_3d[fallback_label]
                     target_pixel = points_pixel[fallback_label]
                 else:
-                    print("DEBUG: No points available at all, returning None")
                     return None
             else:
-                print(f"DEBUG: Found target position for point '{point_label_upper}'")
                 target_position = points_3d_ci[point_label_upper]
                 target_pixel = points_pixel_ci[point_label_upper]
             
-            # Check grasp parameters
-            is_top_down_grasp = parameters.get('is_top_down_grasp', False)
-            is_side_grasp = parameters.get('is_side_grasp', False)
-            print(f"DEBUG: is_top_down_grasp: {is_top_down_grasp}, type: {type(is_top_down_grasp)}")
-            print(f"DEBUG: is_side_grasp: {is_side_grasp}, type: {type(is_side_grasp)}")
-            
-            # Add type conversion in case the boolean values are strings
-            if isinstance(is_top_down_grasp, str):
-                print(f"DEBUG: Converting is_top_down_grasp from string to boolean")
-                is_top_down_grasp = is_top_down_grasp.lower() == 'true'
-            if isinstance(is_side_grasp, str):
-                print(f"DEBUG: Converting is_side_grasp from string to boolean")
-                is_side_grasp = is_side_grasp.lower() == 'true'
-            
-            print(f"DEBUG: After conversion - is_top_down_grasp: {is_top_down_grasp}, is_side_grasp: {is_side_grasp}")
-            
             # Create parameters dictionary
             action_params = {
-                'point_label': point_label,
                 'speed': self._get_speed_value(skill_parameters.get('speed_requirement', 'medium')),
-                'precision': skill_parameters.get('precision_required', 'medium')
+                'precision': skill_parameters.get('precision_required', 'medium'),
+                'point_label': point_label
             }
             
-            # Add grasp parameters if applicable
-            if is_top_down_grasp or is_side_grasp:
-                action_params['force'] = self._get_force_magnitude(
-                    skill_parameters.get('force_threshold', 'medium')
-                )
-                action_params['grasp_planning_required'] = True
+            # Get grasp approach parameters
+            is_top_down_grasp = parameters.get('is_top_down_grasp', True)
+            is_side_grasp = parameters.get('is_side_grasp', False)
             
-            # Determine approach orientation based on grasp type
-            orientation = np.zeros(3)
+            # Calculate orientation based on grasp approach
             if is_top_down_grasp:
-                # Approach from above (negative Z)
-                orientation = np.array([0, 0, 0])  # This will be handled by grasp planner
+                # Top-down approach - gripper aligned with Z-axis
+                orientation = [0, 0, -1, 0]  # Quaternion for pointing down
             elif is_side_grasp:
-                # Approach from side (horizontal)
-                orientation = np.array([np.pi/2, 0, 0])  # This will be handled by grasp planner
+                # Side approach - gripper aligned with X or Y axis
+                # The exact orientation should be calculated based on object position
+                orientation = self._calculate_side_grasp_orientation(target_position, object_pose)
+            else:
+                # Default orientation
+                orientation = [0, 0, 0, 1]  # Identity quaternion
             
-            print(f"DEBUG: Successfully created executable action for move_gripper_to_pose")
             return ExecutableAction(
                 action_type=action_type,
                 position=target_position,
@@ -404,355 +450,22 @@ class SkillHandler:
                 is_top_down_grasp=is_top_down_grasp,
                 is_side_grasp=is_side_grasp
             )
-            
-        # Handle simpler actions
-        elif action_type == 'close_gripper':
+        
+        # Handle simple actions without points
+        elif action_type in ['close_gripper', 'open_gripper', 'retract_gripper']:
             return ExecutableAction(
-                action_type='close_gripper',
-                position=np.zeros(3),
-                orientation=np.zeros(3),
-                pixel_position=object_pixel_pose,
-                parameters={'force': self._get_force_magnitude(skill_parameters.get('force_threshold', 'medium'))},
-                is_top_down_grasp=False,
-                is_side_grasp=False
-            )
-            
-        elif action_type == 'open_gripper':
-            return ExecutableAction(
-                action_type='open_gripper',
-                position=np.zeros(3),
-                orientation=np.zeros(3),
-                pixel_position=object_pixel_pose,
+                action_type=action_type,
+                position=None,
+                orientation=None,
+                pixel_position=None,
                 parameters={},
                 is_top_down_grasp=False,
                 is_side_grasp=False
             )
-            
-        elif action_type == 'retract_gripper':
-            return ExecutableAction(
-                action_type='retract_gripper',
-                position=np.zeros(3),
-                orientation=np.zeros(3),
-                pixel_position=object_pixel_pose,
-                parameters={'speed': self._get_speed_value(skill_parameters.get('speed_requirement', 'medium'))},
-                is_top_down_grasp=False,
-                is_side_grasp=False
-            )
-            
-        return None
-
-    def _calculate_approach_orientation(self, 
-                                    target_position, 
-                                    pivot_position, 
-                                    is_parallel, 
-                                    action_type):
-        """
-        Calculate approach orientation based on target and pivot positions
         
-        Args:
-            target_position: 3D position of target point
-            pivot_position: 3D position of pivot point (or None)
-            is_parallel: Whether approach should be parallel to surface
-            action_type: 'push' or 'pull'
-            
-        Returns:
-            3D orientation vector [roll, pitch, yaw]
-        """
-        # Default orientation (approaching directly from front)
-        orientation = np.zeros(3)
-        
-        if pivot_position is not None:
-            # Calculate vector from pivot to target
-            pivot_to_target = target_position - pivot_position
-            pivot_to_target = pivot_to_target / np.linalg.norm(pivot_to_target)
-            
-            # Calculate approach vector
-            if is_parallel:
-                # For parallel approach, we want to move perpendicular to pivot_to_target vector
-                if abs(pivot_to_target[2]) < 0.9:  # If not predominantly vertical
-                    approach_vector = np.cross(pivot_to_target, np.array([0, 0, 1]))
-                else:
-                    approach_vector = np.cross(pivot_to_target, np.array([1, 0, 0]))
-                
-                # Normalize
-                approach_vector = approach_vector / np.linalg.norm(approach_vector)
-            else:
-                # For perpendicular approach, we want to move along the pivot_to_target vector
-                approach_vector = pivot_to_target
-                
-            # Adjust for push vs. pull
-            if action_type == 'pull':
-                approach_vector = -approach_vector
-                
-            # Convert approach vector to Euler angles
-            # This is a simplified conversion - in production would use proper rotation matrices
-            pitch = np.arctan2(approach_vector[2], np.sqrt(approach_vector[0]**2 + approach_vector[1]**2))
-            yaw = np.arctan2(approach_vector[1], approach_vector[0])
-            orientation = np.array([0, pitch, yaw])
         else:
-            # No pivot - use simpler orientation
-            # For push, approach from negative Z (top-down)
-            # For pull, approach from positive Z (bottom-up)
-            if action_type == 'push':
-                orientation = np.array([0, 0, 0])  # Default orientation
-            else:  # pull
-                orientation = np.array([np.pi, 0, 0])  # Rotated 180 degrees around X
-                
-        return orientation
-
-    def _convert_parsed_primitive_to_executable(self,
-                                            parsed_primitive: ParsedPrimitive,
-                                            object_pose: np.ndarray,
-                                            object_pixel_pose: Tuple[int, int],
-                                            interaction_points: Dict[str, np.ndarray],
-                                            interaction_pixel_points: Dict[str, Tuple[int, int]],
-                                            skill_parameters: Dict[str, Any]) -> Optional[ExecutableAction]:
-        """Convert parsed primitive to executable action"""
-        action_type = parsed_primitive.action_type
-        parameters = parsed_primitive.parameters
-        
-        # Handle push/pull actions
-        if action_type in ['push', 'pull']:
-            return self._create_push_pull_action(
-            action_type=action_type,
-            surface_keywords=parameters.get('surface_keywords', []),
-            is_parallel_surface=parameters.get('is_parallel_surface', False),
-            is_button=parameters.get('is_button', False),
-            has_pivot=parameters.get('has_pivot', False),
-            pivot_point=parameters.get('pivot_point', None),
-            distance=parameters.get('distance', 0.1),
-            object_pose=object_pose,
-            object_pixel_pose=object_pixel_pose,
-            interaction_points=interaction_points,
-            interaction_pixel_points=interaction_pixel_points,
-            skill_parameters=skill_parameters,
-        )
-            
-        # Handle gripper movement with potential grasp
-        elif action_type == 'move_gripper_to_pose':
-            return self._create_gripper_pose_action(
-                keywords=parameters.get('keywords', []),
-                is_side_grasp=parameters.get('is_side_grasp', False),
-                is_top_down_grasp=parameters.get('is_top_down_grasp', False),
-                interaction_points=interaction_points,
-                interaction_pixel_points=interaction_pixel_points,
-                skill_parameters=skill_parameters
-            )
-            
-        # Handle simple gripper actions
-        elif action_type == 'close_gripper':
-            return ExecutableAction(
-                action_type='close_gripper',
-                position=np.zeros(3),
-                orientation=np.zeros(3),
-                is_top_down_grasp=False,
-                is_side_grasp=False,
-                pixel_position=object_pixel_pose,  # Use object center for visualization
-                parameters={'force': self._get_force_magnitude(skill_parameters.get('force_threshold', 'medium'))}
-            )
-            
-        elif action_type == 'open_gripper':
-            return ExecutableAction(
-                action_type='release',
-                position=np.zeros(3),
-                orientation=np.zeros(3),
-                is_top_down_grasp=False,
-                is_side_grasp=False,
-                pixel_position=object_pixel_pose,  # Use object center for visualization
-                parameters={}
-            )
-            
-        elif action_type == 'retract_gripper':
-            return ExecutableAction(
-                action_type='retract_gripper',
-                position=np.zeros(3),
-                orientation=np.zeros(3),
-                is_top_down_grasp=False,
-                is_side_grasp=False,
-                pixel_position=object_pixel_pose,  # Use object center for visualization
-                parameters={'speed': self._get_speed_value(skill_parameters.get('speed_requirement', 'medium'))}
-            )
-                
-        return None
-
-    def _create_push_pull_action(self,
-                       action_type: str,
-                       surface_keywords: List[str],
-                       is_parallel_surface: bool,
-                       is_button: bool,
-                       has_pivot: bool,
-                       pivot_point: Optional[str],
-                       distance: float,
-                       object_pose: np.ndarray,
-                       object_pixel_pose: Tuple[int, int],
-                       interaction_points: Dict[str, np.ndarray],
-                       interaction_pixel_points: Dict[str, Tuple[int, int]],
-                       skill_parameters: Dict[str, Any]) -> ExecutableAction:
-        """Create push or pull action with specified parameters"""
-        # Calculate force based on distance and skill parameters
-        force_magnitude = self._get_force_magnitude(skill_parameters.get('force_threshold', 'medium'))
-        
-        # Find target interaction point for the surface
-        target_point = np.zeros(3)
-        target_pixel = object_pixel_pose  # Default to object center
-        
-        for keyword in surface_keywords:
-            if keyword in interaction_points:
-                target_point = interaction_points[keyword]
-                target_pixel = interaction_pixel_points[keyword]
-                break
-        
-        # Determine the orientation based on surface relationship
-        orientation = np.zeros(3)
-        
-        # If we have surface information, use it to determine approach angle
-        if len(surface_keywords) > 0:
-            # Calculate surface normal vector (simplified)
-            # In a real system, this would be based on point cloud analysis or depth image
-            surface_normal = np.array([0, 0, 1])  # Default points towards camera
-            
-            # Adjust based on object pose
-            if object_pose is not None and len(object_pose) >= 6:
-                # Apply rotation from object pose to surface normal
-                # This is a simplified approach; in reality would use rotation matrices
-                roll, pitch, yaw = object_pose[3:6]
-                # Simple rotation transformation - in production would use proper 3D rotation
-                surface_normal = np.array([
-                    np.sin(pitch) * np.cos(yaw),
-                    np.sin(pitch) * np.sin(yaw),
-                    np.cos(pitch)
-                ])
-            
-            # Adjust based on is_parallel_surface
-            if is_parallel_surface:
-                # For parallel approach, we want to move along the surface
-                # This requires computing a vector parallel to the surface
-                # For simplicity, we'll use a perpendicular vector to the normal
-                if abs(surface_normal[2]) < 0.9:  # If normal is not too vertical
-                    parallel_vector = np.cross(surface_normal, np.array([0, 0, 1]))
-                else:
-                    parallel_vector = np.cross(surface_normal, np.array([1, 0, 0]))
-                    
-                # Normalize
-                parallel_vector = parallel_vector / np.linalg.norm(parallel_vector)
-                
-                # Set approach direction to be along this parallel vector
-                approach_vector = parallel_vector
-            else:
-                # For perpendicular approach, just use the surface normal
-                approach_vector = surface_normal
-            
-            # Adjust for push vs pull direction
-            if action_type == 'pull':
-                approach_vector = -approach_vector
-                
-            # Adjust for top vs bottom surface
-            if is_button:
-                # For bottom surface, we typically approach from below
-                approach_vector[2] = -abs(approach_vector[2])
-            else:
-                # For top surface, we typically approach from above
-                approach_vector[2] = abs(approach_vector[2])
-            
-            # Calculate orientation from approach vector
-            # This is a simplified conversion from vector to Euler angles
-            # In production, would use proper vector to rotation matrix conversion
-            pitch = np.arctan2(approach_vector[2], np.sqrt(approach_vector[0]**2 + approach_vector[1]**2))
-            yaw = np.arctan2(approach_vector[1], approach_vector[0])
-            orientation = np.array([0, pitch, yaw])  # Roll is set to 0 for simplicity
-        
-        # Handle pivot points if specified
-        pivot_position = None
-        if has_pivot and pivot_point:
-            # Try to find the pivot point location
-            if pivot_point in interaction_points:
-                pivot_position = interaction_points[pivot_point]
-            else:
-                # If pivot point isn't explicitly provided, make an estimate
-                # This is a simplified approach - in production would use more sophisticated estimation
-                if pivot_point.lower() in ['top', 'upper']:
-                    # Estimate pivot at top of object
-                    pivot_position = object_pose[:3] + np.array([0, 0, 0.1])  # 10cm above object center
-                elif pivot_point.lower() in ['bottom', 'lower']:
-                    # Estimate pivot at bottom of object
-                    pivot_position = object_pose[:3] + np.array([0, 0, -0.1])  # 10cm below object center
-                elif pivot_point.lower() in ['left']:
-                    # Estimate pivot at left of object
-                    pivot_position = object_pose[:3] + np.array([-0.1, 0, 0])  # 10cm left of object center
-                elif pivot_point.lower() in ['right']:
-                    # Estimate pivot at right of object
-                    pivot_position = object_pose[:3] + np.array([0.1, 0, 0])  # 10cm right of object center
-        
-        # Create the parameters for the executable action
-        action_params = {
-            'distance': distance,
-            'force_magnitude': force_magnitude,
-            'speed': self._get_speed_value(skill_parameters.get('speed_requirement', 'medium')),
-            'precision': skill_parameters.get('precision_required', 'medium'),
-            'is_parallel_surface': is_parallel_surface,
-            'is_button': is_button,
-            'has_pivot': has_pivot,
-            'surface_keywords': surface_keywords
-        }
-        
-        # Add pivot information if available
-        if pivot_position is not None:
-            action_params['pivot_position'] = pivot_position
-        
-        return ExecutableAction(
-            action_type=action_type,
-            position=target_point,  # Use the identified surface point
-            orientation=orientation,  # Orientation calculated based on surface relationship
-            pixel_position=target_pixel,  # Store pixel location for visualization
-            is_top_down_grasp=False,  # Not a grasp action
-            is_side_grasp=False,  # Not a grasp action
-            parameters=action_params
-        )
-
-    def _create_gripper_pose_action(self,
-                              keywords: List[str],
-                              is_side_grasp: bool,
-                              is_top_down_grasp: bool,
-                              interaction_points: Dict[str, np.ndarray],
-                              interaction_pixel_points: Dict[str, Tuple[int, int]],
-                              skill_parameters: Dict[str, Any]) -> Optional[ExecutableAction]:
-        """Create gripper pose action with grasp parameter"""
-        target_point = None
-        target_pixel = None
-        
-        for keyword in keywords:
-            if keyword in interaction_points:
-                target_point = interaction_points[keyword]
-                target_pixel = interaction_pixel_points[keyword]
-                break
-                
-        if target_point is None:
+            print(f"Unsupported action type: {action_type}")
             return None
-            
-        # If this is a grasp action, add additional parameters
-        parameters = {
-            'speed': self._get_speed_value(skill_parameters.get('speed_requirement', 'medium')),
-            'precision': skill_parameters.get('precision_required', 'medium'),
-            'keywords': keywords,
-            'is_side_grasp': is_side_grasp,
-            'is_top_down_grasp': is_top_down_grasp
-        }
-        
-        if is_top_down_grasp or is_side_grasp:
-            parameters.update({
-                'force': self._get_force_magnitude(skill_parameters.get('force_threshold', 'medium')),
-                'grasp_planning_required': True
-            })
-        
-        return ExecutableAction(
-            action_type='move_gripper_to_pose',
-            position=target_point,
-            orientation=np.zeros(3),  # Will be determined by pose/grasp planner
-            pixel_position=target_pixel,
-            is_top_down_grasp=False,
-            is_side_grasp=False,
-            parameters=parameters
-        )
 
     
     def _get_force_magnitude(self, force_threshold: str) -> float:
@@ -1138,6 +851,265 @@ class SkillHandler:
         finally:
             if self.debug:
                 self.profiler.stop("visualize_mask")
+                
+    def _calculate_surface_normal(self, depth_image, mask, depth_scale=0.001, window_size=5):
+        """
+        Calculate the surface normal from a depth image and mask using PCA
+        
+        Args:
+            depth_image: Depth image
+            mask: Binary mask of the surface
+            depth_scale: Scale factor to convert depth values to meters
+            window_size: Size of window for normal calculation
+            
+        Returns:
+            Surface normal vector (3D unit vector)
+        """
+        # Find all pixel coordinates in the mask
+        y_coords, x_coords = np.where(mask)
+        
+        # If not enough points, return default normal
+        if len(y_coords) < 10:
+            return np.array([0, 0, 1])  # Default normal along Z axis
+        
+        # Sample a reasonable number of points for efficiency if there are too many
+        max_points = 1000
+        if len(y_coords) > max_points:
+            indices = np.random.choice(len(y_coords), max_points, replace=False)
+            y_coords = y_coords[indices]
+            x_coords = x_coords[indices]
+        
+        # Set up camera intrinsics (use defaults or get from your system)
+        fx = 429.92523193359375  # Default from perception system
+        fy = 429.92523193359375
+        cx = 431.7160339355469
+        cy = 233.39739990234375
+        
+        # Collect valid 3D points
+        points_3d = []
+        
+        # For each pixel in the mask
+        for x, y in zip(x_coords, y_coords):
+            # Extract a window around this pixel
+            x_min = max(0, x - window_size // 2)
+            x_max = min(depth_image.shape[1] - 1, x + window_size // 2)
+            y_min = max(0, y - window_size // 2)
+            y_max = min(depth_image.shape[0] - 1, y + window_size // 2)
+            
+            window = depth_image[y_min:y_max+1, x_min:x_max+1]
+            
+            # If the window has valid depth values
+            if np.any(window > 0):
+                # Get depth at this pixel
+                depth = depth_image[y, x]
+                
+                # Skip pixels with invalid depth
+                if depth <= 0:
+                    continue
+                
+                # Convert to meters
+                z = depth * depth_scale
+                
+                # Apply pinhole camera model to get 3D coordinates
+                x_3d = (x - cx) * z / fx
+                y_3d = (y - cy) * z / fy
+                z_3d = z
+                
+                points_3d.append([x_3d, y_3d, z_3d])
+        
+        # If we don't have enough points for PCA, return default normal
+        if len(points_3d) < 3:
+            return np.array([0, 0, 1])
+        
+        # Convert to numpy array
+        points_3d = np.array(points_3d)
+        
+        # Calculate covariance matrix
+        centroid = np.mean(points_3d, axis=0)
+        centered_points = points_3d - centroid
+        covariance_matrix = np.dot(centered_points.T, centered_points) / centered_points.shape[0]
+        
+        try:
+            # Use SVD to find the normal (eigenvector with smallest eigenvalue)
+            u, s, vh = np.linalg.svd(covariance_matrix)
+            normal = u[:, 2]  # The last column of U contains the normal vector
+            
+            # Ensure the normal points towards the camera (negative Z direction)
+            if normal[2] > 0:
+                normal = -normal
+            
+            # Normalize the vector
+            normal = normal / np.linalg.norm(normal)
+            
+            return normal
+            
+        except np.linalg.LinAlgError:
+            # Fallback to default normal
+            return np.array([0, 0, 1])
+
+    def _calculate_orientation_from_normal(self, normal, pivot_position=None, is_parallel=False, action_type='push'):
+        """
+        Calculate approach orientation based on surface normal
+        
+        Args:
+            normal: Surface normal vector (3D unit vector)
+            pivot_position: Position of pivot point (if applicable)
+            is_parallel: Whether the force should be parallel to the surface
+            action_type: Type of action ('push' or 'pull')
+            
+        Returns:
+            Orientation as a quaternion or rotation matrix
+        """
+        # Create a coordinate system based on the normal
+        z_axis = np.array(normal)
+        
+        # Ensure it's normalized
+        z_axis = z_axis / np.linalg.norm(z_axis)
+        
+        # Create orthogonal axes
+        # Find a vector not collinear with z_axis
+        if abs(z_axis[0]) < abs(z_axis[1]) and abs(z_axis[0]) < abs(z_axis[2]):
+            temp = np.array([1, 0, 0])
+        elif abs(z_axis[1]) < abs(z_axis[2]):
+            temp = np.array([0, 1, 0])
+        else:
+            temp = np.array([0, 0, 1])
+        
+        # Calculate y-axis
+        y_axis = np.cross(z_axis, temp)
+        y_axis = y_axis / np.linalg.norm(y_axis)
+        
+        # Calculate x-axis
+        x_axis = np.cross(y_axis, z_axis)
+        x_axis = x_axis / np.linalg.norm(x_axis)
+        
+        # If parallel, adjust the approach direction
+        if is_parallel:
+            # For parallel approach, we need to use a different axis
+            if action_type == 'push':
+                approach_axis = x_axis  # Use x-axis for parallel push
+            else:  # pull
+                approach_axis = -x_axis  # Use negative x-axis for parallel pull
+        else:
+            # For perpendicular approach, use the normal
+            if action_type == 'push':
+                approach_axis = z_axis  # Use normal for perpendicular push
+            else:  # pull
+                approach_axis = -z_axis  # Use negative normal for perpendicular pull
+        
+        # If pivot is specified, adjust approach direction
+        if pivot_position is not None:
+            # This would require additional geometry calculations
+            # For now, we'll use the same approach as without pivot
+            pass
+        
+        # Create rotation matrix where z-axis is the approach direction
+        rotation_matrix = np.column_stack((x_axis, y_axis, approach_axis))
+        
+        # Convert to quaternion (if your system uses quaternions)
+        # This is a simplified conversion and may need adjustment
+        from scipy.spatial.transform import Rotation
+        r = Rotation.from_matrix(rotation_matrix)
+        quaternion = r.as_quat()  # [x, y, z, w] format
+        
+        # Reorder to [w, x, y, z] if needed
+        # quaternion = np.array([quaternion[3], quaternion[0], quaternion[1], quaternion[2]])
+        
+        return quaternion
+    
+    def _calculate_side_grasp_orientation(self, target_position, object_pose):
+        """
+        Calculate orientation for a side grasp approach
+        
+        Args:
+            target_position: 3D position of the target point
+            object_pose: 3D pose of the object
+            
+        Returns:
+            Orientation quaternion for side grasp
+        """
+        # Calculate vector from object center to target position
+        if object_pose is not None:
+            object_position = object_pose[:3]  # Extract position part
+            approach_vector = target_position - object_position
+        else:
+            # If object pose is unknown, default to horizontal approach
+            approach_vector = np.array([1, 0, 0])
+        
+        # Project onto horizontal plane (ignore Z component)
+        approach_vector[2] = 0
+        
+        # If the vector is too small, use a default approach
+        if np.linalg.norm(approach_vector) < 0.001:
+            approach_vector = np.array([1, 0, 0])
+        
+        # Normalize the vector
+        approach_vector = approach_vector / np.linalg.norm(approach_vector)
+        
+        # Create a coordinate system
+        z_axis = np.array([0, 0, 1])  # Upward
+        x_axis = approach_vector  # Approach direction
+        y_axis = np.cross(z_axis, x_axis)  # Perpendicular to both
+        
+        # Create rotation matrix
+        rotation_matrix = np.column_stack((x_axis, y_axis, z_axis))
+        
+        # Convert to quaternion
+        from scipy.spatial.transform import Rotation
+        r = Rotation.from_matrix(rotation_matrix)
+        quaternion = r.as_quat()  # [x, y, z, w] format
+        
+        # Reorder to [w, x, y, z] if needed
+        # quaternion = np.array([quaternion[3], quaternion[0], quaternion[1], quaternion[2]])
+        
+        return quaternion
+    
+    def _calculate_side_grasp_orientation(self, target_position, object_pose):
+        """
+        Calculate orientation for a side grasp approach
+        
+        Args:
+            target_position: 3D position of the target point
+            object_pose: 3D pose of the object
+            
+        Returns:
+            Orientation quaternion for side grasp
+        """
+        # Calculate vector from object center to target position
+        if object_pose is not None:
+            object_position = object_pose[:3]  # Extract position part
+            approach_vector = target_position - object_position
+        else:
+            # If object pose is unknown, default to horizontal approach
+            approach_vector = np.array([1, 0, 0])
+        
+        # Project onto horizontal plane (ignore Z component)
+        approach_vector[2] = 0
+        
+        # If the vector is too small, use a default approach
+        if np.linalg.norm(approach_vector) < 0.001:
+            approach_vector = np.array([1, 0, 0])
+        
+        # Normalize the vector
+        approach_vector = approach_vector / np.linalg.norm(approach_vector)
+        
+        # Create a coordinate system
+        z_axis = np.array([0, 0, 1])  # Upward
+        x_axis = approach_vector  # Approach direction
+        y_axis = np.cross(z_axis, x_axis)  # Perpendicular to both
+        
+        # Create rotation matrix
+        rotation_matrix = np.column_stack((x_axis, y_axis, z_axis))
+        
+        # Convert to quaternion
+        from scipy.spatial.transform import Rotation
+        r = Rotation.from_matrix(rotation_matrix)
+        quaternion = r.as_quat()  # [x, y, z, w] format
+        
+        # Reorder to [w, x, y, z] if needed
+        # quaternion = np.array([quaternion[3], quaternion[0], quaternion[1], quaternion[2]])
+        
+        return quaternion
 
     def visualize_detection(
         self,

@@ -1,0 +1,83 @@
+{
+  "name": "open_box_lid",
+  "abstract_action": "open",
+  "target_object": "box",
+  "primitive_sequence": [
+    "move_gripper_to_pose('zng', true, false)",
+    "close_gripper()",
+    "pull('pla', 'perpendicular', false, false, '')",
+    "retract_gripper()",
+    "open_gripper()"
+  ],
+  "parameters": {
+    "force_threshold": "low",
+    "precision_required": "high",
+    "speed_requirement": "slow"
+  },
+  "prerequisites": [
+    "Ensure the box is stable and not obstructed",
+    "Confirm the gripper is calibrated"
+  ],
+  "constraints": [
+    "Avoid applying excessive force to prevent damage to the box",
+    "Ensure the gripper does not collide with surrounding objects"
+  ],
+  "image_id": "open_box_1744635040_0a7bb7",
+  "points_of_interest": {
+    "djr": {
+      "label": "djr",
+      "position": [
+        0.525,
+        0.10416666666666667
+      ],
+      "description": "Interest point djr at normalized position (0.525, 0.10416666666666667)"
+    },
+    "cou": {
+      "label": "cou",
+      "position": [
+        0.515625,
+        0.41041666666666665
+      ],
+      "description": "Interest point cou at normalized position (0.515625, 0.41041666666666665)"
+    },
+    "efn": {
+      "label": "efn",
+      "position": [
+        0.390625,
+        0.10416666666666667
+      ],
+      "description": "Interest point efn at normalized position (0.390625, 0.10416666666666667)"
+    },
+    "zng": {
+      "label": "zng",
+      "position": [
+        0.5171875,
+        0.23333333333333334
+      ],
+      "description": "Interest point zng at normalized position (0.5171875, 0.23333333333333334)"
+    },
+    "oqs": {
+      "label": "oqs",
+      "position": [
+        0.365625,
+        0.32708333333333334
+      ],
+      "description": "Interest point oqs at normalized position (0.365625, 0.32708333333333334)"
+    },
+    "obf": {
+      "label": "obf",
+      "position": [
+        0.365625,
+        0.20625
+      ],
+      "description": "Interest point obf at normalized position (0.365625, 0.20625)"
+    }
+  },
+  "explanations": [
+    "The point 'zng' is chosen for a top-down grip because it is centrally located on the lid of the box, providing optimal control.",
+    "A close gripper action is required to securely grasp the lid.",
+    "The 'pla' surface is pulled perpendicular to its normal vector to lift the lid open effectively.",
+    "Retracting the gripper ensures a safe distance after opening the box.",
+    "Opening the gripper releases the lid after opening."
+  ]
+}

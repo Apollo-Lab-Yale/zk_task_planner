@@ -34,7 +34,7 @@ def test_skill_handler_sync():
         skill_generator = SkillGenerator(llm_interface=llm_interface)
         
         # Create synchronous wrapper for the skill handler
-        sync_skill_handler = SyncSkillHandler(skill_generator, perception_system)
+        sync_skill_handler = SkillHandler(skill_generator, perception_system)
 
         print("\nWaiting for valid frame...")
         # Wait for valid frame with more attempts and debugging

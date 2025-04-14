@@ -1,0 +1,111 @@
+{
+  "name": "open_box_lid_manipulation",
+  "abstract_action": "open",
+  "target_object": "box",
+  "primitive_sequence": [
+    "move_gripper_to_pose('muf', true, false)",
+    "pull('uzr', 'perpendicular', false, false, '')",
+    "retract_gripper()"
+  ],
+  "parameters": {
+    "force_threshold": "medium",
+    "precision_required": "high",
+    "speed_requirement": "medium"
+  },
+  "prerequisites": [
+    "Robot must be calibrated to handle objects with precision",
+    "Ensure that the box is stable and not obstructed"
+  ],
+  "constraints": [
+    "Avoid applying excessive force to prevent damage to the box lid",
+    "Ensure that the gripper does not collide with nearby objects"
+  ],
+  "image_id": "open_box_1744555018_e2d90f",
+  "points_of_interest": {
+    "wft": {
+      "label": "wft",
+      "position": [
+        0.3953125,
+        0.32083333333333336
+      ],
+      "description": "Interest point wft"
+    },
+    "muf": {
+      "label": "muf",
+      "position": [
+        0.259375,
+        0.25416666666666665
+      ],
+      "description": "Interest point muf"
+    },
+    "wsa": {
+      "label": "wsa",
+      "position": [
+        0.1828125,
+        0.39791666666666664
+      ],
+      "description": "Interest point wsa"
+    },
+    "hac": {
+      "label": "hac",
+      "position": [
+        0.2078125,
+        0.17916666666666667
+      ],
+      "description": "Interest point hac"
+    },
+    "esa": {
+      "label": "esa",
+      "position": [
+        0.0859375,
+        0.2375
+      ],
+      "description": "Interest point esa"
+    },
+    "pbi": {
+      "label": "pbi",
+      "position": [
+        0.2828125,
+        0.14791666666666667
+      ],
+      "description": "Interest point pbi"
+    },
+    "iuc": {
+      "label": "iuc",
+      "position": [
+        0.2203125,
+        0.5770833333333333
+      ],
+      "description": "Interest point iuc"
+    },
+    "cfi": {
+      "label": "cfi",
+      "position": [
+        0.334375,
+        0.21458333333333332
+      ],
+      "description": "Interest point cfi"
+    },
+    "mry": {
+      "label": "mry",
+      "position": [
+        0.3859375,
+        0.45
+      ],
+      "description": "Interest point mry"
+    },
+    "rix": {
+      "label": "rix",
+      "position": [
+        0.3453125,
+        0.27291666666666664
+      ],
+      "description": "Interest point rix"
+    }
+  },
+  "explanations": [
+    "The 'move_gripper_to_pose' targets point 'muf' for an optimal grip on the box lid",
+    "The 'pull' action uses surface 'uzr' with a perpendicular force to lift the lid efficiently",
+    "The 'retract_gripper' is used to clear the gripper from the box after opening"
+  ]
+}

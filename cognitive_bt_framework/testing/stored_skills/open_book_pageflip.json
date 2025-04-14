@@ -1,0 +1,115 @@
+{
+  "name": "open_book_pageflip",
+  "abstract_action": "open",
+  "target_object": "book",
+  "primitive_sequence": [
+    "move_gripper_to_pose('xlw', true, false)",
+    "close_gripper()",
+    "pull('cdn', 'parallel', false, true, 'xlw')",
+    "open_gripper()",
+    "retract_gripper()"
+  ],
+  "parameters": {
+    "force_threshold": "low",
+    "precision_required": "high",
+    "speed_requirement": "slow"
+  },
+  "prerequisites": [
+    "The book must be positioned such that the spine is not obstructed.",
+    "The book should be closed with the cover facing up."
+  ],
+  "constraints": [
+    "Ensure the gripper does not damage the pages of the book.",
+    "Avoid excessive force that could dislodge the book from its position."
+  ],
+  "image_id": "open_book_1744644808_75e451",
+  "points_of_interest": {
+    "hcb": {
+      "label": "hcb",
+      "position": [
+        0.2859375,
+        0.6666666666666666
+      ],
+      "description": "Interest point hcb at normalized position (0.2859375, 0.6666666666666666)"
+    },
+    "mmm": {
+      "label": "mmm",
+      "position": [
+        0.4734375,
+        0.7270833333333333
+      ],
+      "description": "Interest point mmm at normalized position (0.4734375, 0.7270833333333333)"
+    },
+    "xlw": {
+      "label": "xlw",
+      "position": [
+        0.340625,
+        0.5854166666666667
+      ],
+      "description": "Interest point xlw at normalized position (0.340625, 0.5854166666666667)"
+    },
+    "ydy": {
+      "label": "ydy",
+      "position": [
+        0.4953125,
+        0.5604166666666667
+      ],
+      "description": "Interest point ydy at normalized position (0.4953125, 0.5604166666666667)"
+    },
+    "kjs": {
+      "label": "kjs",
+      "position": [
+        0.3984375,
+        0.6875
+      ],
+      "description": "Interest point kjs at normalized position (0.3984375, 0.6875)"
+    },
+    "rka": {
+      "label": "rka",
+      "position": [
+        0.44375,
+        0.4354166666666667
+      ],
+      "description": "Interest point rka at normalized position (0.44375, 0.4354166666666667)"
+    },
+    "djg": {
+      "label": "djg",
+      "position": [
+        0.3421875,
+        0.4041666666666667
+      ],
+      "description": "Interest point djg at normalized position (0.3421875, 0.4041666666666667)"
+    },
+    "oxe": {
+      "label": "oxe",
+      "position": [
+        0.4953125,
+        0.35208333333333336
+      ],
+      "description": "Interest point oxe at normalized position (0.4953125, 0.35208333333333336)"
+    },
+    "hpq": {
+      "label": "hpq",
+      "position": [
+        0.228125,
+        0.5229166666666667
+      ],
+      "description": "Interest point hpq at normalized position (0.228125, 0.5229166666666667)"
+    },
+    "rzu": {
+      "label": "rzu",
+      "position": [
+        0.26875,
+        0.3375
+      ],
+      "description": "Interest point rzu at normalized position (0.26875, 0.3375)"
+    }
+  },
+  "explanations": [
+    "The gripper moves to 'xlw' to grasp the edge of a page, ensuring precision with a top-down approach.",
+    "The gripper closes to secure a single page.",
+    "A parallel pull on the 'cdn' surface with 'xlw' as the pivot opens the page without tearing it.",
+    "The gripper opens to release the page after turning.",
+    "The gripper retracts to a safe position post-operation."
+  ]
+}

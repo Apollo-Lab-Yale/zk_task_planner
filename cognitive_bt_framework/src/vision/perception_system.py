@@ -13,7 +13,7 @@ import traceback
 from cognitive_bt_framework.src.vision.sam.fast_sam import FastSAMMaskGenerator, FastSAMConfig
 from cognitive_bt_framework.src.vision.realsense import Camera
 from cognitive_bt_framework.utils.time_profiler import IterationTimeProfiler
-from ultralytics import YOLOWorld
+from ultralytics import YOLOWorld, YOLOE
 
 
 @dataclass
@@ -31,29 +31,27 @@ class ObjectInfo:
     depth_image: Optional[np.ndarray] = None
     alpha_id: Optional[str] = None  # Alphabetical ID for user-friendly identification
     points: Optional[np.ndarray] = None
+    surface_masks: Dict[str, np.ndarray] = None,
+    camera_intrinsics: Dict[str, float] = None
     
+
+import random
+import string
 
 def get_alpha_id(num):
     """
-    Convert a numerical ID to an alphabetical ID (a, b, c, ... aa, ab, ...)
-    For example:
-    1 -> a, 2 -> b, ..., 26 -> z, 27 -> aa, 28 -> ab, ...
+    Generate a random sequence of three lowercase letters.
+    Each call returns a new random ID regardless of the number passed.
     """
-    if num <= 0:
-        return ""
-    
-    letters = ""
-    while num > 0:
-        num, remainder = divmod(num - 1, 26)
-        letters = chr(97 + remainder) + letters  # 97 is ASCII for 'a'
-    
+    # Generate 3 random lowercase letters
+    letters = ''.join(random.choices(string.ascii_lowercase, k=3))
     return letters
 
 class PerceptionSystem:
     def __init__(
         self,
         fast_sam_config: Optional[FastSAMConfig],
-        yolo_model_path: str = 'yolov8x-worldv2.pt',
+        yolo_model_path: str = 'yoloe-v8l-seg.pt',
         camera_matrix: Optional[np.ndarray] = None,
         depth_scale: float = 0.001,  # Default for most depth cameras (m/unit)
         default_conf: float = 0.5,
@@ -80,7 +78,7 @@ class PerceptionSystem:
             if self.debug:
                 print(f"Initializing YOLO-World detector with model {yolo_model_path}")
                 
-            self.detector = YOLOWorld(yolo_model_path)
+            self.detector = YOLOE()
             self.default_conf = default_conf
             
             # Set default classes if provided
@@ -132,7 +130,7 @@ class PerceptionSystem:
         self,
         image: np.ndarray,
         classes: Optional[List[str]] = None,
-        conf: Optional[float] = 0.1,
+        conf: Optional[float] = 0.01,
         segment: bool = True,
         depth_image: Optional[np.ndarray] = None,
     ) -> List[ObjectInfo]:
@@ -156,7 +154,7 @@ class PerceptionSystem:
         try:
             # Use provided parameters or defaults
             if classes is not None:
-                self.detector.set_classes(classes)
+                self.detector.set_classes(classes, self.detector.get_text_pe(classes))
                 if self.debug:
                     print(f"Set detection classes: {classes}")
             
@@ -167,7 +165,7 @@ class PerceptionSystem:
                 self.profiler.start("yolo_detection")
                 print(f"Running YOLO-World detection with confidence threshold {conf_threshold}")
             
-            results = self.detector.predict(image, conf=conf_threshold, verbose=False)
+            results = self.detector.predict(image, verbose=False)
             
             if self.debug:
                 self.profiler.stop("yolo_detection")
@@ -194,39 +192,87 @@ class PerceptionSystem:
                 # Create alphabetical ID
                 alpha_id = get_alpha_id(self._next_mask_id)
                 self._next_mask_id += 1
-                
+                mask_coords = detection.masks.xy[0]
+                bool_mask = np.zeros((image.shape[0], image.shape[1]), dtype=bool)
+                num_masks = len(detection.masks)
+    
+                # Process each mask and merge them
+                for i in range(num_masks):
+                    try:
+                        # Get mask coordinates for current mask
+                        mask_coords = detection.masks.xy[i]
+                        
+                         # Convert to numpy array of integers, make sure it's properly formatted
+                        points = np.array(mask_coords, dtype=np.int32)
+                        
+                        # Create a temporary mask to hold this contour
+                        temp_mask = np.zeros((image.shape[0], image.shape[1]), dtype=np.uint8)
+                        
+                        # Draw filled contour on the temporary mask
+                        cv2.fillPoly(temp_mask, [points], 1)
+                        
+                        # Convert to boolean and merge with main mask
+                        bool_mask = np.logical_or(bool_mask, temp_mask.astype(bool))
+                        
+                        if self.debug and i > 0:
+                            print(f"Merged mask {i+1}/{num_masks} for object {class_name}")
+                            
+                    except Exception as e:
+                        if self.debug:
+                            print(f"Error processing mask {i}: {str(e)}")
+                            continue
+                # Set these pixels to True in the boolean mask
                 # Create ObjectInfo
                 obj_info = ObjectInfo(
                     id=i,
                     name=class_name,
                     bbox=bbox,
+                    mask=bool_mask,
                     confidence=confidence,
                     image=image,
                     depth_image=depth_image,
-                    alpha_id=alpha_id
+                    alpha_id=alpha_id,
                 )
-                
-                # Generate segmentation mask if requested
-                if segment and self.segmenter is not None:
+                obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=10)
+                # Initialize surface_masks
+                obj_info.surface_masks = {}
+
+                # Generate surface segmentation if requested and object has a valid mask
+                if segment and self.segmenter is not None and obj_info.mask is not None:
                     if self.debug:
-                        self.profiler.start(f"segment_obj_{i}")
-                        print(f"Generating segmentation for object {i} ({class_name})")
+                        self.profiler.start(f"segment_surfaces_{i}")
+                        print(f"Generating surface segmentation for object {i} ({class_name})")
                     
-                    # mask = self._generate_segmentation(image, obj_info)
-                    mask = None
-                    # Fallback to bbox mask if segmentation failed
-                    if mask is None:
-                        if self.debug:
-                            print(f"Segmentation failed for object {i}, falling back to bbox mask")
+                    obj_info.surface_masks = self.segment_surfaces_by_plane_fitting(
+                        image=image,
+                        obj_info=obj_info,
+                        depth_image=depth_image,
+                    )
+                    
+                    if self.debug:
+                        self.profiler.stop(f"segment_surfaces_{i}")
+                        print(f"Detected {len(obj_info.surface_masks)} surfaces for object {i}")
+                # Generate segmentation mask if requested
+                # if segment and self.segmenter is not None:
+                #     if self.debug:
+                #         self.profiler.start(f"segment_obj_{i}")
+                #         print(f"Generating segmentation for object {i} ({class_name})")
+                    
+                #     # mask = self._generate_segmentation(image, obj_info)
+                #     mask = None
+                #     # Fallback to bbox mask if segmentation failed
+                #     if mask is None:
+                #         if self.debug:
+                #             print(f"Segmentation failed for object {i}, falling back to bbox mask")
                         
-                        # Create a simple binary mask from bbox
-                        mask = np.zeros(image.shape[:2], dtype=bool)
-                        x, y, w, h = bbox
-                        mask[y:y+h, x:x+w] = True
+                #         # Create a simple binary mask from bbox
+                #         mask = np.zeros(image.shape[:2], dtype=bool)
+                #         x, y, w, h = bbox
+                #         mask[y:y+h, x:x+w] = True
                     
-                    obj_info.mask = mask
+                #     obj_info.mask = mask
                     
-                    obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=20)
+                #     obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=10)
                 
                 # Estimate pose if depth image is provided
                 if depth_image is not None:
@@ -268,11 +314,15 @@ class PerceptionSystem:
                 self.profiler.stop("detect_objects")
                 self.profiler.end_iteration(preserve_current=True)
     
+    
+    
+    
+    
     def detect_object(
         self,
         target_object: str,
         image: np.ndarray,
-        conf: Optional[float] = 0.1,
+        conf: Optional[float] = 0.01,
         segment: bool = True,
         depth_image: Optional[np.ndarray] = None,
     ) -> Optional[ObjectInfo]:
@@ -334,7 +384,7 @@ class PerceptionSystem:
         self,
         image: np.ndarray,
         bbox: List[int],
-        conf_threshold: float = 0.1,
+        conf_threshold: float = 0.01,
         depth_image: Optional[np.ndarray] = None
     ) -> Dict[int, ObjectInfo]:
         """
@@ -1103,10 +1153,10 @@ class PerceptionSystem:
         self,
         image: np.ndarray,
         obj_info: ObjectInfo,
-        method: str = 'orb',
+        method: str = 'shi_tomasi',
         max_points: int = 20,
         quality_level: float = 0.01,
-        min_distance: int = 25,
+        min_distance: int = 50,
         visualize: bool = False
     ) -> Dict[str, Any]:
         """
@@ -1410,6 +1460,7 @@ class PerceptionSystem:
                 'object_name': obj_info.name,
                 'method': method,
                 'mask_area': np.sum(mask),
+                'ids': [get_alpha_id(i) for i in range(len(keypoints))]
             }
             
             if visualize:
@@ -1723,3 +1774,468 @@ class PerceptionSystem:
             print("\nFinal performance summary:")
             self.print_performance_summary(sort_by="total", top_n=10)
             
+
+    def detect_object_surfaces(
+        self,
+        image: np.ndarray,
+        obj_info: ObjectInfo,
+        conf_threshold: float = 0.1,
+        depth_image: Optional[np.ndarray] = None
+    ) -> Dict[str, np.ndarray]:
+        """
+        Detect surfaces in the scene by segmenting everything except the object mask
+        
+        Args:
+            image: Input image
+            obj_info: Object information with mask
+            conf_threshold: Confidence threshold for surface detection
+            depth_image: Optional depth image
+            
+        Returns:
+            Dictionary mapping surface IDs to masks
+        """
+        if self.segmenter is None:
+            if self.debug:
+                print("Cannot detect surfaces: FastSAM segmenter not initialized")
+            return {}
+            
+        if self.debug:
+            self.profiler.start_iteration()
+            self.profiler.start("detect_surfaces")
+        
+        try:
+            # Create inverted mask to focus on everything except the object
+            if obj_info.mask is None:
+                if self.debug:
+                    print("Cannot detect surfaces: Object mask is None")
+                return {}
+                
+            inverted_mask = ~obj_info.mask
+            
+            # Get image dimensions
+            h, w = image.shape[:2]
+            
+            # Create a masked image where only non-object regions are visible
+            masked_image = image.copy()
+            # for c in range(3):  # For each color channel
+            #     masked_image[:,:,c] = masked_image[:,:,c] * inverted_mask
+            
+            # Generate masks for everything in the scene except the object
+            if self.debug:
+                self.profiler.start("generate_surface_masks")
+                
+            try:
+                # Use "everything" prompt to segment all surfaces
+                labeled_masks, metadata = self.segmenter.generate_masks(
+                    masked_image,
+                    prompt_type="everything"
+                )
+                
+                if self.debug:
+                    print(f"FastSAM returned {len(metadata)} potential surfaces in the scene")
+                    self.profiler.stop("generate_surface_masks")
+            except Exception as e:
+                if self.debug:
+                    print(f"Error generating surface masks: {e}")
+                    self.profiler.stop("generate_surface_masks")
+                return {}
+            
+            # Process the masks to create surface dictionary
+            if self.debug:
+                self.profiler.start("process_surfaces")
+                
+            surfaces = {}
+            
+            # Filter masks based on area and other criteria
+            total_image_area = h * w
+            min_surface_area = total_image_area * 0.01  # Surfaces should be at least 1% of image
+            max_surface_area = total_image_area * 0.9   # Surfaces shouldn't be more than 90% of image
+                
+            for mask_id, meta in metadata.items():
+                # Skip surfaces that are too small or too large
+                area = meta.get('area', 0)
+                if area < min_surface_area or area > max_surface_area:
+                    if self.debug:
+                        print(f"Skipping surface {mask_id}: area={area:.0f} (outside range [{min_surface_area:.0f}, {max_surface_area:.0f}])")
+                    continue
+
+                # Get the mask for this surface
+                surface_mask = labeled_masks == mask_id
+                
+                # Generate a unique name for this surface
+                alpha_id = get_alpha_id(mask_id)
+                surface_name = f"surface_{alpha_id}"
+                
+                # Store the mask
+                surfaces[surface_name] = surface_mask
+            
+            if self.debug:
+                self.profiler.stop("process_surfaces")
+                print(f"Processed {len(surfaces)} surfaces")
+            
+            return surfaces
+            
+        except Exception as e:
+            if self.debug:
+                print(f"Error in detect_object_surfaces: {str(e)}")
+                traceback.print_exc()
+            return {}
+            
+        finally:
+            if self.debug:
+                self.profiler.stop("detect_surfaces")
+                self.profiler.end_iteration(preserve_current=True)
+                           
+    def segment_surfaces_by_plane_fitting(
+        self,
+        image: np.ndarray,
+        obj_info: ObjectInfo,
+        depth_image: np.ndarray,
+        max_plane_distance: float = 0.01,
+        min_points_per_plane: int = 100,
+        max_planes_per_surface: int = 3,
+        ransac_iterations: int = 300,  # Reduced from 1000
+        normal_similarity_threshold: float = 0.95,
+        downsample_factor: int = 4  # Added downsampling parameter
+    ) -> Dict[str, np.ndarray]:
+        """
+        Segment surfaces by fitting planes to depth data - optimized for speed
+        """
+        if depth_image is None:
+            if self.debug:
+                print("Cannot segment surfaces: Depth image is required")
+            return {}
+            
+        if self.debug:
+            self.profiler.start("segment_surfaces_by_plane")
+        
+        try:
+            # First detect initial surface masks
+            initial_surfaces = self.detect_object_surfaces(image, obj_info, depth_image=depth_image)
+            
+            if not initial_surfaces:
+                if self.debug:
+                    print("No initial surfaces detected")
+                return {}
+            
+            # Store surface normals in the obj_info
+            if not hasattr(obj_info, 'surface_normals'):
+                obj_info.surface_normals = {}
+                
+            # Get camera intrinsics
+            fx = self.fx
+            fy = self.fy
+            cx = self.cx
+            cy = self.cy
+            
+            refined_surfaces = {}
+            plane_count = 0
+            
+            # Process each detected surface
+            for surface_id, surface_mask in initial_surfaces.items():
+                if self.debug:
+                    print(f"Processing surface {surface_id}")
+                    
+                # Get points corresponding to this surface
+                y_coords, x_coords = np.where(surface_mask)
+                
+                if len(y_coords) < min_points_per_plane:
+                    if self.debug:
+                        print(f"Surface {surface_id} has too few points: {len(y_coords)}")
+                    refined_surfaces[surface_id] = surface_mask  # Keep the original mask
+                    continue
+                
+                # Downsample points for speed
+                if downsample_factor > 1:
+                    # Use systematic sampling instead of random
+                    indices = np.arange(0, len(y_coords), downsample_factor)
+                    y_coords = y_coords[indices]
+                    x_coords = x_coords[indices]
+                    
+                    if len(y_coords) < min_points_per_plane:
+                        # If downsampling leaves too few points, adjust the factor
+                        downsample_factor = max(1, len(y_coords) // min_points_per_plane)
+                        indices = np.arange(0, len(y_coords), downsample_factor)
+                        y_coords = y_coords[indices]
+                        x_coords = x_coords[indices]
+                
+                # Pre-allocate arrays for speed
+                surface_points = np.zeros((len(y_coords), 3), dtype=np.float32)
+                valid_mask = np.zeros(len(y_coords), dtype=bool)
+                
+                # Vectorized depth to point cloud conversion
+                depth_values = depth_image[y_coords, x_coords] * self.depth_scale
+                
+                # Filter valid depths
+                valid_mask = (depth_values > 0.001) & (depth_values < 2.0)
+                
+                if np.sum(valid_mask) < min_points_per_plane:
+                    if self.debug:
+                        print(f"Surface {surface_id} has too few valid points: {np.sum(valid_mask)}")
+                    refined_surfaces[surface_id] = surface_mask
+                    continue
+                
+                # Only process valid points
+                valid_y = y_coords[valid_mask]
+                valid_x = x_coords[valid_mask]
+                valid_depths = depth_values[valid_mask]
+                
+                # Vectorized conversion to 3D
+                surface_points = np.column_stack([
+                    (valid_x - cx) * valid_depths / fx,
+                    (valid_y - cy) * valid_depths / fy,
+                    valid_depths
+                ])
+                
+                # Create mapping from point indices to pixel coordinates
+                pixel_indices = np.arange(len(valid_y))
+                pixel_map = list(zip(valid_y, valid_x))
+                
+                # Use Open3D for faster plane segmentation if available
+                try:
+                    import open3d as o3d
+                    
+                    # Create Open3D point cloud
+                    pcd = o3d.geometry.PointCloud()
+                    pcd.points = o3d.utility.Vector3dVector(surface_points)
+                    
+                    # Use Open3D's built-in plane segmentation
+                    remaining_points = surface_points
+                    remaining_indices = pixel_indices
+                    remaining_pixel_map = pixel_map
+                    
+                    plane_masks = []
+                    plane_normals = []
+                    plane_centroids = []
+                    
+                    for _ in range(max_planes_per_surface):
+                        if len(remaining_points) < min_points_per_plane:
+                            break
+                            
+                        # Create Open3D point cloud from remaining points
+                        current_pcd = o3d.geometry.PointCloud()
+                        current_pcd.points = o3d.utility.Vector3dVector(remaining_points)
+                        
+                        # Use Open3D's plane segmentation (much faster than manual RANSAC)
+                        plane_model, inliers = current_pcd.segment_plane(
+                            distance_threshold=max_plane_distance,
+                            ransac_n=3,
+                            num_iterations=ransac_iterations
+                        )
+                        
+                        if len(inliers) < min_points_per_plane:
+                            break
+                            
+                        # Extract plane parameters and inlier points
+                        a, b, c, d = plane_model
+                        normal = np.array([a, b, c])
+                        
+                        # Ensure normal points towards camera
+                        if normal[2] > 0:
+                            normal = -normal
+                            
+                        inlier_points = np.asarray(current_pcd.points)[inliers]
+                        centroid = np.mean(inlier_points, axis=0)
+                        
+                        # Create mask for these inlier points
+                        plane_mask = np.zeros_like(surface_mask, dtype=bool)
+                        inlier_coords = [remaining_pixel_map[i] for i in inliers]
+                        for y, x in inlier_coords:
+                            plane_mask[y, x] = True
+                        
+                        # Check for similar existing planes
+                        should_merge = False
+                        merge_idx = -1
+                        
+                        for i, existing_normal in enumerate(plane_normals):
+                            # Calculate cosine similarity
+                            similarity = np.abs(np.dot(normal, existing_normal))
+                            
+                            if similarity > normal_similarity_threshold:
+                                # Planes have similar orientation
+                                should_merge = True
+                                merge_idx = i
+                                break
+                        
+                        if should_merge:
+                            # Merge with existing plane
+                            plane_masks[merge_idx] = plane_masks[merge_idx] | plane_mask
+                            
+                            # Update centroid
+                            existing_count = np.sum(plane_masks[merge_idx])
+                            new_count = np.sum(plane_mask)
+                            total_count = existing_count + new_count
+                            
+                            plane_centroids[merge_idx] = (
+                                (existing_count * plane_centroids[merge_idx] + 
+                                new_count * centroid) / total_count
+                            )
+                        else:
+                            # Add as a new plane
+                            plane_masks.append(plane_mask)
+                            plane_normals.append(normal)
+                            plane_centroids.append(centroid)
+                        
+                        # Remove inliers from remaining points
+                        non_inliers = np.ones(len(remaining_points), dtype=bool)
+                        non_inliers[inliers] = False
+                        remaining_points = remaining_points[non_inliers]
+                        remaining_indices = remaining_indices[non_inliers]
+                        remaining_pixel_map = [remaining_pixel_map[i] for i in range(len(remaining_pixel_map)) if non_inliers[i]]
+                    
+                except ImportError:
+                    # Fallback to optimized numpy-based RANSAC if Open3D is not available
+                    remaining_points = np.ones(len(surface_points), dtype=bool)
+                    plane_masks = []
+                    plane_normals = []
+                    plane_centroids = []
+                    
+                    for plane_idx in range(max_planes_per_surface):
+                        # Stop if too few points remain
+                        if np.sum(remaining_points) < min_points_per_plane:
+                            break
+                            
+                        # Get current points
+                        current_points = surface_points[remaining_points]
+                        current_indices = pixel_indices[remaining_points]
+                        
+                        # Fast RANSAC implementation with early stopping
+                        best_inliers = None
+                        best_normal = None
+                        most_inliers = min_points_per_plane  # Set threshold for early stopping
+                        min_samples = 3
+                        
+                        # Pre-select random samples for speed
+                        if len(current_points) > min_samples:
+                            sample_indices = np.random.choice(
+                                len(current_points), 
+                                min_samples * ransac_iterations, 
+                                replace=True
+                            ).reshape(ransac_iterations, min_samples)
+                        else:
+                            break
+                        
+                        for i in range(ransac_iterations):
+                            # Get sample points
+                            idx = sample_indices[i]
+                            p1, p2, p3 = current_points[idx]
+                            
+                            # Calculate plane normal
+                            v1 = p2 - p1
+                            v2 = p3 - p1
+                            normal = np.cross(v1, v2)
+                            norm = np.linalg.norm(normal)
+                            
+                            # Skip if points are collinear
+                            if norm < 1e-6:
+                                continue
+                                
+                            normal = normal / norm
+                            d = -np.dot(normal, p1)
+                            
+                            # Calculate distances (vectorized)
+                            distances = np.abs(np.dot(current_points, normal) + d)
+                            inliers = distances < max_plane_distance
+                            num_inliers = np.sum(inliers)
+                            
+                            if num_inliers > most_inliers:
+                                most_inliers = num_inliers
+                                best_inliers = inliers
+                                best_normal = normal
+                                
+                                # Early stopping if we found a good plane
+                                if num_inliers > len(current_points) * 0.8:
+                                    break
+                        
+                        # If no good plane found, stop
+                        if best_inliers is None:
+                            break
+                        
+                        # Calculate centroid and refine normal
+                        inlier_points = current_points[best_inliers]
+                        centroid = np.mean(inlier_points, axis=0)
+                        
+                        # Create mask for these inlier points
+                        inlier_indices = current_indices[best_inliers]
+                        plane_mask = np.zeros_like(surface_mask, dtype=bool)
+                        for idx in inlier_indices:
+                            y, x = pixel_map[idx]
+                            plane_mask[y, x] = True
+                        
+                        # Check for similar existing planes
+                        should_merge = False
+                        merge_idx = -1
+                        
+                        for i, existing_normal in enumerate(plane_normals):
+                            similarity = np.abs(np.dot(best_normal, existing_normal))
+                            if similarity > normal_similarity_threshold:
+                                should_merge = True
+                                merge_idx = i
+                                break
+                        
+                        if should_merge:
+                            # Merge with existing plane
+                            plane_masks[merge_idx] = plane_masks[merge_idx] | plane_mask
+                            
+                            # Update centroid
+                            existing_count = np.sum(plane_masks[merge_idx])
+                            new_count = np.sum(plane_mask)
+                            total_count = existing_count + new_count
+                            
+                            plane_centroids[merge_idx] = (
+                                (existing_count * plane_centroids[merge_idx] + 
+                                new_count * centroid) / total_count
+                            )
+                        else:
+                            # Add as a new plane
+                            plane_masks.append(plane_mask)
+                            plane_normals.append(best_normal)
+                            plane_centroids.append(centroid)
+                        
+                        # Mark these points as processed
+                        current_remaining = np.where(remaining_points)[0]
+                        remaining_points[current_remaining[best_inliers]] = False
+                
+                # Add planes to output dictionary
+                if len(plane_masks) > 0:
+                    # If we found multiple planes, create new entries
+                    if len(plane_masks) > 1:
+                        for i, (mask, normal, centroid) in enumerate(zip(plane_masks, plane_normals, plane_centroids)):
+                            plane_count += 1
+                            alpha_id = get_alpha_id(plane_count)
+                            plane_id = f"surface_{alpha_id}"
+                            
+                            # Add to refined surfaces
+                            refined_surfaces[plane_id] = mask
+                            
+                            # Store normal information
+                            obj_info.surface_normals[plane_id] = {
+                                'normal': normal,
+                                'centroid': centroid,
+                                'parent_surface': surface_id
+                            }
+                    else:
+                        # Single plane - keep original ID
+                        refined_surfaces[surface_id] = plane_masks[0]
+                        
+                        # Store normal information
+                        obj_info.surface_normals[surface_id] = {
+                            'normal': plane_normals[0],
+                            'centroid': plane_centroids[0],
+                            'parent_surface': None
+                        }
+                else:
+                    # No planes found - keep original surface
+                    refined_surfaces[surface_id] = surface_mask
+            
+            return refined_surfaces
+            
+        except Exception as e:
+            if self.debug:
+                print(f"Error in segment_surfaces_by_plane_fitting: {str(e)}")
+                traceback.print_exc()
+            return {}
+            
+        finally:
+            if self.debug:
+                self.profiler.stop("segment_surfaces_by_plane")

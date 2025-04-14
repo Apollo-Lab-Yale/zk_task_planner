@@ -56,7 +56,7 @@ def main():
                 target_object=target_object,
                 image=color_image,
                 depth_image=depth_image,
-                confidence_threshold=0.5
+                confidence_threshold=0.1
             )
 
             if object_info is not None:

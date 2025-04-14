@@ -96,91 +96,785 @@ class SkillGenerator:
             return cv2.imread(str(image_path))
         return None
 
-    def _visualize_points_of_interest(self, image: np.ndarray, points: Dict[str, PointOfInterest]) -> np.ndarray:
+
+
+    def _project_normal_to_image(self, normal: Tuple[float, float, float], 
+                            centroid_x: int, centroid_y: int,
+                            arrow_length: int = 30) -> Tuple[int, int]:
         """
-        Create a visualization of the image with labeled points of interest
+        Project a 3D normal vector onto the 2D image plane.
+        
+        Args:
+            normal: (nx, ny, nz) normal vector
+            centroid_x, centroid_y: Origin point of the normal in image coordinates
+            arrow_length: Length of the arrow in pixels
+            
+        Returns:
+            (end_x, end_y) coordinates for the arrow
+        """
+        nx, ny, nz = normal
+        
+        # Scale factor to adjust for the projection
+        scale = arrow_length / max(0.1, abs(nz))
+        
+        # Project the normal onto the image plane
+        # Flip the y-coordinate due to image coordinate system
+        dx = int(nx * scale)
+        dy = int(-ny * scale)  # Negate to align with image y-axis direction
+        
+        end_x = centroid_x + dx
+        end_y = centroid_y + dy
+        
+        return (end_x, end_y)
+
+    def _calculate_surface_normals(self, 
+                            surface_mask: np.ndarray, 
+                            depth_image: np.ndarray,
+                            camera_intrinsics: Optional[Dict[str, float]] = None) -> Tuple[float, float, float]:
+        """
+        Calculate the surface normal vector using the depth image and mask.
+        
+        Args:
+            surface_mask: Binary mask of the surface
+            depth_image: Depth image with values in meters
+            camera_intrinsics: Dictionary with camera parameters (fx, fy, cx, cy)
+                If None, uses default parameters
+        
+        Returns:
+            Tuple of (nx, ny, nz) representing the normal vector
+        """
+        # Find coordinates of points in the mask
+        y_coords, x_coords = np.where(surface_mask)
+        
+        if len(y_coords) < 10:  # Not enough points for a reliable normal
+            return (0, 0, 1)  # Default to pointing outward from the camera
+        
+        # Default camera intrinsics if not provided (approximate values)
+        if camera_intrinsics is None:
+            # These are reasonable defaults for a typical RGB-D camera
+            fx = 525.0  # focal length x
+            fy = 525.0  # focal length y
+            cx = depth_image.shape[1] / 2  # principal point x
+            cy = depth_image.shape[0] / 2  # principal point y
+        else:
+            fx = camera_intrinsics.get('fx', 525.0)
+            fy = camera_intrinsics.get('fy', 525.0)
+            cx = camera_intrinsics.get('cx', depth_image.shape[1] / 2)
+            cy = camera_intrinsics.get('cy', depth_image.shape[0] / 2)
+        
+        # Sample points from the mask (limit to 100 points for efficiency)
+        if len(x_coords) > 100:
+            indices = np.random.choice(len(x_coords), 100, replace=False)
+            x_coords = x_coords[indices]
+            y_coords = y_coords[indices]
+        
+        # Create 3D points from depth and camera parameters
+        points_3d = []
+        
+        for x, y in zip(x_coords, y_coords):
+            # Skip if depth value is invalid (0, NaN, or infinity)
+            depth = depth_image[y, x]
+            if depth <= 0 or np.isnan(depth) or np.isinf(depth):
+                continue
+            
+            # Convert from pixel coordinates to 3D coordinates
+            # Formula: X = (u - cx) * Z / fx, Y = (v - cy) * Z / fy, Z = depth
+            z = depth
+            x_3d = (x - cx) * z / fx
+            y_3d = (y - cy) * z / fy
+            
+            points_3d.append([x_3d, y_3d, z])
+        
+        # If we don't have enough valid 3D points, return a default normal
+        if len(points_3d) < 10:
+            return (0, 0, 1)
+        
+        # Convert to numpy array
+        points_3d = np.array(points_3d)
+        
+        # Use PCA to find the principal components
+        from sklearn.decomposition import PCA
+        
+        pca = PCA(n_components=3)
+        pca.fit(points_3d)
+        
+        # The normal is perpendicular to the first two principal components
+        # Get the third principal component (the least significant direction)
+        normal = pca.components_[2]
+        
+        # Ensure the normal points toward the camera (negative z direction)
+        # In camera coordinates, the camera looks along the positive z axis,
+        # so a normal facing the camera would have a negative z component
+        if normal[2] > 0:
+            normal = -normal
+        
+        # Normalize the vector
+        normal = normal / np.linalg.norm(normal)
+        
+        return tuple(normal)
+
+    def _visualize_points_of_interest(
+            self, 
+            image: np.ndarray, 
+            obj_info: ObjectInfo,
+            points: Dict[str, Any] = None,
+            top_n_surfaces: int = 5  # Number of most confident surface masks to visualize
+        ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Create two separate visualizations:
+        1. Image with surface masks and their normals as arrows
+        2. Points of interest visualization
         
         Args:
             image: Input image
-            points: Dictionary of points of interest
+            obj_info: Object information with surface masks and depth image
+            points: Dictionary of points of interest (optional)
+            top_n_surfaces: Number of most confident surface masks to visualize
             
         Returns:
-            Image with visualized points of interest
+            Tuple of (surface_img, points_img)
         """
-        vis_img = image.copy()
         h, w = image.shape[:2]
         
-        # Draw labeled points
-        for label, point in points.items():
-            # Convert normalized coordinates to pixel coordinates
-            px, py = int(point.position[0] * w), int(point.position[1] * h)
+        # Create the first image: Surface masks overlay with normals
+        surface_img = image.copy()
+        
+        # Draw object mask as a semi-transparent overlay
+        if obj_info.mask is not None:
+            mask_overlay = np.zeros_like(surface_img, dtype=np.uint8)
+            mask_overlay[obj_info.mask] = [0, 255, 0]  # Green for object mask
+            surface_img = cv2.addWeighted(surface_img, 1.0, mask_overlay, 0.2, 0)
             
-            # Draw circle for point
-            cv2.circle(vis_img, (px, py), 5, (0, 0, 255), 3)
+            # Draw object label with alphabetical ID
+            alpha_id = obj_info.alpha_id if obj_info.alpha_id else get_alpha_id(obj_info.id)
+            # Find centroid of the object mask for label placement
+            y_coords, x_coords = np.where(obj_info.mask)
+            if len(y_coords) > 0:
+                centroid_y = int(np.mean(y_coords))
+                centroid_x = int(np.mean(x_coords))
+                
+                # Add object ID and name at centroid
+                cv2.putText(
+                    surface_img,
+                    f"{alpha_id}: {obj_info.name}",
+                    (centroid_x, centroid_y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 0, 0),  # Black text
+                    2
+                )
+        
+        # Check if depth image is available in obj_info
+        has_depth = hasattr(obj_info, 'depth_image') and obj_info.depth_image is not None
+        
+        # Draw surface masks with different colors and normals if available
+        if obj_info.surface_masks is not None and len(obj_info.surface_masks) > 0:
+            # Use different colors for each surface
+            color_map = [
+                (255, 0, 0),    # Red
+                (0, 0, 255),    # Blue
+                (255, 255, 0),  # Yellow
+                (255, 0, 255),  # Magenta
+                (0, 255, 255),  # Cyan
+                (128, 0, 0),    # Maroon
+                (0, 128, 0),    # Green
+                (0, 0, 128),    # Navy
+                (128, 128, 0),  # Olive
+                (128, 0, 128)   # Purple
+            ]
             
-            # Draw label
+            # Sort surface masks by size (as a confidence proxy) and take top N
+            surface_items = list(obj_info.surface_masks.items())
+            surface_areas = [np.sum(mask) for _, mask in surface_items]
+            surface_indices = np.argsort(surface_areas)[::-1][:top_n_surfaces]  # Take top N largest
+            
+            # Create a separate overlay for all surfaces
+            surface_overlay = np.zeros_like(surface_img, dtype=np.uint8)
+            
+            # Add each surface to the overlay with a different color
+            for idx, i in enumerate(surface_indices):
+                if i >= len(surface_items):
+                    continue
+                    
+                surface_name, surface_mask = surface_items[i]
+                color_idx = idx % len(color_map)
+                surface_overlay[surface_mask] = color_map[color_idx]
+                
+                # Find centroid of the surface for label placement and normal calculation
+                y_coords, x_coords = np.where(surface_mask)
+                if len(y_coords) > 0:
+                    centroid_y = int(np.mean(y_coords))
+                    centroid_x = int(np.mean(x_coords))
+                    
+                    # Extract alphabetical ID if it's in the format "surface_abc"
+                    if "_" in surface_name:
+                        alpha_id = surface_name.split("_")[1]
+                    else:
+                        alpha_id = get_alpha_id(idx + 1)
+                    
+                    # Calculate normal for this surface using depth if available
+                    if has_depth:
+                        normal = self._calculate_surface_normals(
+                            surface_mask, 
+                            obj_info.depth_image,
+                            getattr(obj_info, 'camera_intrinsics', None)
+                        )
+                    else:
+                        # Fallback to PCA-based estimation without depth
+                        from sklearn.decomposition import PCA
+                        
+                        # Find coordinates of points in the mask
+                        surf_y, surf_x = np.where(surface_mask)
+                        
+                        if len(surf_y) >= 10:  # Enough points for PCA
+                            # Create points array with z-coordinate estimated as constant
+                            points = np.column_stack((surf_x, surf_y, np.ones_like(surf_x)))
+                            
+                            # Fit PCA to find the principal components
+                            pca = PCA(n_components=3)
+                            pca.fit(points)
+                            
+                            # The normal is perpendicular to the first two principal components
+                            normal = pca.components_[2]
+                            
+                            # Ensure the normal points toward the camera (positive z direction)
+                            if normal[2] < 0:
+                                normal = -normal
+                                
+                            # Normalize the vector
+                            normal = normal / np.linalg.norm(normal)
+                            normal = tuple(normal)
+                        else:
+                            normal = (0, 0, 1)  # Default to pointing out from camera
+                    
+                    # Project normal to image plane
+                    arrow_end = self._project_normal_to_image(
+                        normal, centroid_x, centroid_y, arrow_length=40
+                    )
+                    
+                    # Draw normal as an arrow
+                    cv2.arrowedLine(
+                        surface_img,
+                        (centroid_x, centroid_y),
+                        arrow_end,
+                        color_map[color_idx],
+                        2,
+                        tipLength=0.3
+                    )
+                    
+                    # Add surface ID at centroid
+                    cv2.putText(
+                        surface_img,
+                        alpha_id,
+                        (centroid_x, centroid_y),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (255, 255, 255),  # White text
+                        2
+                    )
+                    
+                    # Add normal vector information
+                    normal_text = f"n: ({normal[0]:.2f}, {normal[1]:.2f}, {normal[2]:.2f})"
+                    cv2.putText(
+                        surface_img,
+                        normal_text,
+                        (centroid_x + 5, centroid_y + 20),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.4,
+                        (255, 255, 255),  # White text
+                        1
+                    )
+            
+            # Add surface overlay with transparency
+            surface_img = cv2.addWeighted(surface_img, 1.0, surface_overlay, 0.3, 0)
+            
+        
+        # Add title to the surface image
+        cv2.putText(
+            surface_img,
+            "Surface Segmentation with Normals",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2
+        )
+        
+        # Add legend for normals
+        cv2.putText(
+            surface_img,
+            "Arrows show surface normals",
+            (10, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            1
+        )
+        
+        # Add information about depth usage
+        cv2.putText(
+            surface_img,
+            f"Using {'depth data' if has_depth else 'PCA estimation'} for normals",
+            (10, 80),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            1
+        )
+        
+        # Create the second image: Points of interest
+        points_img = image.copy()
+        
+        
+        # Draw points of interest if provided
+        if points is not None and len(points) > 0:
+            # If 'pixel_coords' is in points, use that
+            if 'pixel_coords' in points and points['pixel_coords']:
+                pixel_coords = points['pixel_coords']
+                scores = points.get('scores', [1.0] * len(pixel_coords))
+                ids = points.get('ids', [f"p{i}" for i in range(len(pixel_coords))])
+                
+                # Calculate score range for coloring
+                min_score = min(scores) if scores else 0
+                max_score = max(scores) if scores else 1
+                score_range = max_score - min_score if max_score > min_score else 1
+                
+                # Draw each point
+                for i, ((px, py), score, point_id) in enumerate(zip(pixel_coords, scores, ids)):
+                    # Normalize score to [0, 1]
+                    norm_score = (score - min_score) / score_range if score_range > 0 else 0.5
+                    
+                    # Map to color (blue to red based on score)
+                    color = (
+                        int(255 * (1 - norm_score)),  # B
+                        0,                           # G
+                        int(255 * norm_score)         # R
+                    )
+                    
+                    # Draw circle for point
+                    cv2.circle(
+                        points_img, 
+                        (px, py), 
+                        radius=5, 
+                        color=color, 
+                        thickness=2
+                    )
+                    
+                    # Draw label (use alphabetical ID)
+                    if not point_id.isalpha():
+                        # If ID is not already alphabetical, generate one
+                        point_id = get_alpha_id(i + 1)
+                        
+                    cv2.putText(
+                        points_img,
+                        point_id,
+                        (px, py),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (255, 255, 255),
+                        1
+                    )
+                    
+                    
+            else:
+                # Handle dictionary of named points (original format)
+                for i, (label, point) in enumerate(points.items()):
+                    if hasattr(point, 'position'):
+                        # Handle PointOfInterest objects
+                        # Convert normalized coordinates to pixel coordinates if needed
+                        if max(point.position) <= 1.0:
+                            px, py = int(point.position[0] * w), int(point.position[1] * h)
+                        else:
+                            px, py = int(point.position[0]), int(point.position[1])
+                    else:
+                        # Handle direct (x,y) tuples
+                        px, py = int(point[0]), int(point[1])
+                    
+                    # Generate alphabetical ID if the label is not already alphabetical
+                    if not label.isalpha():
+                        alpha_id = get_alpha_id(i + 1)
+                    else:
+                        alpha_id = label
+                    
+                    # Draw circle for point
+                    cv2.circle(points_img, (px, py), 5, (0, 0, 255), -1)
+                    
+                    # Draw label
+                    cv2.putText(
+                        points_img,
+                        alpha_id,
+                        (px, py ),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.9,
+                        (255, 255, 255),
+                        2
+                    )
+        
+        # Add title to the points image
+        cv2.putText(
+            points_img,
+            "Points of Interest",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2
+        )
+        
+        # Add object name and ID
+        alpha_id = obj_info.alpha_id if obj_info.alpha_id else get_alpha_id(obj_info.id)
+        obj_text = f"Object: {alpha_id} {obj_info.name}"
+        cv2.putText(
+            points_img,
+            obj_text,
+            (10, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 255),
+            2
+        )
+        
+        # If depth is available, add this information
+        if has_depth:
             cv2.putText(
-                vis_img,
-                label,
-                (px + 10, py + 5),
+                points_img,
+                "Depth data available",
+                (10, 80),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
+                0.5,
                 (255, 255, 255),
-                2
+                1
             )
         
-        return vis_img
+        return surface_img, points_img
     
-    def generate_skill(self, 
-                           image: np.ndarray,
-                           points_of_interest: Dict[str, PointOfInterest],
-                           abstract_action: str,
-                           target_object: str,
-                           object_info: Optional[ObjectInfo] = None) -> Optional[Skill]:
+    def _categorize_points_in_bounding_box(self, 
+                                      image: np.ndarray,
+                                      pixel_coords: List[Tuple[float, float]],
+                                      object_info: Optional[ObjectInfo] = None,
+                                      ids: Optional[List[str]] = None,
+                                      scores: Optional[List[float]] = None) -> List[str]:
         """
-        Generate a new skill using the LLM interface based on image input with labeled points
+        Categorize points based on their position within the object's bounding box.
         
         Args:
             image: Input image of the object
-            points_of_interest: Dictionary of labeled points of interest
+            pixel_coords: List of (x, y) coordinates for points of interest
+            object_info: ObjectInfo containing additional object data including bounding box
+            ids: Optional list of point IDs
+            scores: Optional list of confidence scores for each point
+            
+        Returns:
+            List of point descriptions with spatial categorization
+        """
+        # Use provided IDs or generate default alphabetical IDs
+        if ids is None:
+            ids = [f"{chr(97 + i)}" for i in range(len(pixel_coords))]
+            
+        # Use provided scores or default to 1.0
+        if scores is None:
+            scores = [1.0] * len(pixel_coords)
+        
+        # Get object bounding box - either from object_info or calculate from points
+        if object_info is not None and object_info.bbox is not None:
+            x_min, y_min, x_max, y_max = object_info.bbox
+        else:
+            # Calculate approximate bounding box from points
+            if len(pixel_coords) > 0:
+                x_points = [p[0] for p in pixel_coords]
+                y_points = [p[1] for p in pixel_coords]
+                x_min, x_max = min(x_points), max(x_points)
+                y_min, y_max = min(y_points), max(y_points)
+                # Add padding to ensure points on the edge are covered
+                padding = 0.05  # 5% padding
+                width = x_max - x_min
+                height = y_max - y_min
+                x_min = max(0, x_min - padding * width)
+                y_min = max(0, y_min - padding * height)
+                x_max = min(image.shape[1], x_max + padding * width)
+                y_max = min(image.shape[0], y_max + padding * height)
+            else:
+                # Fallback to full image if no points
+                x_min, y_min = 0, 0
+                x_max, y_max = image.shape[1], image.shape[0]
+        
+        # Define regions of the bounding box
+        width = x_max - x_min
+        height = y_max - y_min
+        # Horizontal divisions
+        left_bound = x_min + width * 0.25
+        right_bound = x_max - width * 0.25
+        # Vertical divisions
+        top_bound = y_min + height * 0.25
+        bottom_bound = y_max - height * 0.25
+        # Edge margin (for detecting points close to edges)
+        edge_margin = min(width, height) * 0.1
+        
+        point_descriptions = []
+        for i, ((x, y), score, point_id) in enumerate(zip(pixel_coords, scores, ids)):
+            # Normalize coordinates for description
+            norm_x, norm_y = x / image.shape[1], y / image.shape[0]
+            
+            # Determine horizontal position
+            if x < left_bound:
+                h_pos = "left"
+            elif x > right_bound:
+                h_pos = "right"
+            else:
+                h_pos = "center"
+            
+            # Determine vertical position
+            if y < top_bound:
+                v_pos = "top"
+            elif y > bottom_bound:
+                v_pos = "bottom"
+            else:
+                v_pos = "middle"
+            
+            # Check if point is near an edge
+            is_edge = (x < x_min + edge_margin or 
+                    x > x_max - edge_margin or 
+                    y < y_min + edge_margin or 
+                    y > y_max - edge_margin)
+            
+            position_desc = f"{v_pos} {h_pos}"
+            if is_edge:
+                position_desc += " (edge)"
+            
+            desc = f"Point {point_id}: Located at normalized coordinates ({norm_x:.2f}, {norm_y:.2f}), position: {position_desc}, confidence score: {score:.2f}"
+            point_descriptions.append(desc)
+        
+        return point_descriptions
+
+    def _categorize_points_from_point_objects(self,
+                                            image: np.ndarray,
+                                            point_objects: Dict[str, Any],
+                                            object_info: Optional[ObjectInfo] = None) -> List[str]:
+        """
+        Categorize points from PointOfInterest objects based on their position within the object's bounding box.
+        
+        Args:
+            image: Input image of the object
+            point_objects: Dictionary of label->PointOfInterest objects
+            object_info: ObjectInfo containing additional object data including bounding box
+            
+        Returns:
+            List of point descriptions with spatial categorization
+        """
+        # First gather all points to calculate bounding box
+        point_positions = [point.position for point in point_objects.values()]
+        labels = list(point_objects.keys())
+        
+        # Get object bounding box - either from object_info or calculate from points
+        if object_info is not None and object_info.bbox is not None:
+            x_min, y_min, x_max, y_max = object_info.bbox
+        elif point_positions:
+            # Calculate approximate bounding box from points
+            x_points = [p[0] for p in point_positions]
+            y_points = [p[1] for p in point_positions]
+            # These are already normalized coordinates
+            x_min, x_max = min(x_points), max(x_points)
+            y_min, y_max = min(y_points), max(y_points)
+            # Add padding
+            padding = 0.05  # 5% padding
+            width = x_max - x_min
+            height = y_max - y_min
+            x_min = max(0, x_min - padding * width)
+            y_min = max(0, y_min - padding * height)
+            x_max = min(1.0, x_max + padding * width)
+            y_max = min(1.0, y_max + padding * height)
+        else:
+            # Fallback to full image if no points
+            x_min, y_min = 0, 0
+            x_max, y_max = 1.0, 1.0
+        
+        # Define regions of the bounding box
+        width = x_max - x_min
+        height = y_max - y_min
+        # Horizontal divisions
+        left_bound = x_min + width * 0.25
+        right_bound = x_max - width * 0.25
+        # Vertical divisions
+        top_bound = y_min + height * 0.25
+        bottom_bound = y_max - height * 0.25
+        # Edge margin (for detecting points close to edges)
+        edge_margin = min(width, height) * 0.1
+        
+        point_descriptions = []
+        for label, point in point_objects.items():
+            x, y = point.position  # These are normalized coordinates
+            
+            # Determine horizontal position
+            if x < left_bound:
+                h_pos = "left"
+            elif x > right_bound:
+                h_pos = "right"
+            else:
+                h_pos = "center"
+            
+            # Determine vertical position
+            if y < top_bound:
+                v_pos = "top"
+            elif y > bottom_bound:
+                v_pos = "bottom"
+            else:
+                v_pos = "middle"
+            
+            # Check if point is near an edge
+            is_edge = (x < x_min + edge_margin or 
+                    x > x_max - edge_margin or 
+                    y < y_min + edge_margin or 
+                    y > y_max - edge_margin)
+            
+            position_desc = f"{v_pos} {h_pos}"
+            if is_edge:
+                position_desc += " (edge)"
+            
+            desc = (f"Point {label}: {point.description}, position: {position_desc}" 
+                    if hasattr(point, 'description') and point.description 
+                    else f"Point {label}: Located at normalized coordinates ({x:.2f}, {y:.2f}), position: {position_desc}")
+            point_descriptions.append(desc)
+        
+        return point_descriptions
+
+
+    def generate_skill(self, 
+                    image: np.ndarray,
+                    points_of_interest: Dict[str, Any],
+                    abstract_action: str,
+                    target_object: str,
+                    object_info: Optional[ObjectInfo] = None) -> Optional[Skill]:
+        """
+        Generate a new skill using the LLM interface based on image input with labeled points and surfaces
+        
+        Args:
+            image: Input image of the object
+            points_of_interest: Dictionary of points information (from detect_regions_of_interest)
             abstract_action: The abstract action to perform
             target_object: The object to perform the action on
-            object_info: Optional ObjectInfo containing additional object data
+            object_info: ObjectInfo containing additional object data including surface_masks
         
         Returns:
             Generated skill if successful, None otherwise
         """
-        # Create visualization of image with labeled points
-        vis_img = self._visualize_points_of_interest(image, points_of_interest)
+        if object_info is None:
+            if self.debug:
+                self.get_logger().warn("No object_info provided for skill generation, visualizations will be limited")
+            # Create dummy object_info for visualization
+            object_info = ObjectInfo(
+                id=0,
+                name=target_object,
+                mask=None,
+                bbox=None,
+                surface_masks=None
+            )
+            # Create visualization of just points of interest (legacy mode)
+            surface_img, points_img = self._visualize_points_of_interest(image, object_info, points_of_interest)
+        else:
+            # Create the separate visualizations for surfaces with normals and points
+            surface_img, points_img = self._visualize_points_of_interest(image, object_info, points_of_interest)
         
         # Generate unique ID for this image
         timestamp = int(time.time())
-        point_hash = hash(str([(p.label, p.position) for p in points_of_interest.values()])) & 0xFFFFFF
+        
+        # Create a hash from the points data
+        if 'pixel_coords' in points_of_interest:
+            # New format from detect_regions_of_interest
+            point_hash = hash(str(points_of_interest['pixel_coords'])) & 0xFFFFFF
+        else:
+            # Original format with PointOfInterest objects
+            point_hash = hash(str([(p.label, p.position) for p in points_of_interest.values()])) & 0xFFFFFF
+        
         image_id = f"{abstract_action}_{target_object}_{timestamp}_{point_hash:06x}"
-        img_path = self._save_image(vis_img, f"vis_{image_id}")
+        
+        # Save each visualization separately
+        surface_img_path = self._save_image(surface_img, f"surface_{image_id}")
+        points_img_path = self._save_image(points_img, f"points_{image_id}")
+        
         if self.debug:
-            self.get_logger().info(f"Saved visualization image to {img_path}")
+            self.get_logger().info(f"Saved surface image to {surface_img_path}")
+            self.get_logger().info(f"Saved points image to {points_img_path}")
         
         # Also save the original image for reference
-        # Generate unique ID for this image
-        point_hash = hash(str([(p.label, p.position) for p in points_of_interest.values()])) & 0xFFFFFF
-        image_id = f"{abstract_action}_{target_object}_{point_hash:06x}"
-        self._save_image(vis_img, image_id)
+        self._save_image(image, image_id)
         
         # Create descriptions for prompt
         point_descriptions = []
-        for label, point in points_of_interest.items():
-            x, y = point.position
-            desc = f"Point {label}: {point.description}" if point.description else f"Point {label}: Located at normalized coordinates ({x:.2f}, {y:.2f})"
-            point_descriptions.append(desc)
+        surface_descriptions = []
+
+        # Handle points
+        if 'pixel_coords' in points_of_interest:
+            # New format from detect_regions_of_interest
+            pixel_coords = points_of_interest['pixel_coords']
+            scores = points_of_interest.get('scores', [1.0] * len(pixel_coords))
+            ids = points_of_interest.get('ids', [f"{chr(97 + i)}" for i in range(len(pixel_coords))])
+            
+            # Use the new function to categorize points
+            point_descriptions = self._categorize_points_in_bounding_box(
+                image=image,
+                pixel_coords=pixel_coords,
+                object_info=object_info,
+                ids=ids,
+                scores=scores
+            )
+        else:
+            # Original format with PointOfInterest objects
+            # Use the new function to categorize points
+            point_descriptions = self._categorize_points_from_point_objects(
+                image=image,
+                point_objects=points_of_interest,
+                object_info=object_info
+            )
+        # Handle surfaces with normals if available
+        if object_info is not None and object_info.surface_masks is not None:
+            # Sort surface masks by size (as a confidence proxy) and take top N
+            surface_items = list(object_info.surface_masks.items())
+            surface_areas = [np.sum(mask) for _, mask in surface_items]
+            top_n_surfaces = 5  # Number of most confident surface masks to describe
+            surface_indices = np.argsort(surface_areas)[::-1][:top_n_surfaces]
+            
+            for idx, i in enumerate(surface_indices):
+                if i >= len(surface_items):
+                    continue
+                    
+                surface_name, surface_mask = surface_items[i]
+                
+                # Extract alphabetical ID
+                if "_" in surface_name:
+                    alpha_id = surface_name.split("_")[1]
+                else:
+                    alpha_id = get_alpha_id(idx + 1)
+                
+                # Calculate surface area as percentage of total image
+                area_percentage = (np.sum(surface_mask) / (image.shape[0] * image.shape[1])) * 100
+                
+                # Find centroid of the surface
+                y_coords, x_coords = np.where(surface_mask)
+                if len(y_coords) > 0:
+                    centroid_y = int(np.mean(y_coords))
+                    centroid_x = int(np.mean(x_coords))
+                    
+                    # Calculate normal for this surface
+                    normal = self._calculate_surface_normals(surface_mask, object_info.depth_image)
+                    
+                    # Normalize coordinates for description
+                    norm_x, norm_y = centroid_x / image.shape[1], centroid_y / image.shape[0]
+                    
+                    desc = f"Surface {alpha_id}: Normal vector ({normal[0]:.2f}, {normal[1]:.2f}, {normal[2]:.2f}), covers {area_percentage:.1f}% of image area"
+                    surface_descriptions.append(desc)
         
         # Create prompt for skill definition
         combined_prompt = [{"role": "system", "content": f"""Analyze the object visually and generate a complete skill definition for performing {abstract_action} on a {target_object}.
 
-                    The image contains an object with labeled points of interest (red circles with alphabetical labels).
+                    You will be provided with two separate visualizations:
+                    1. FIRST IMAGE: The object with surface segments highlighted in different colors, each with an alphabetical label and normal vectors shown as arrows
+                    2. SECOND IMAGE: The same object with points of interest marked by colored circles, each with an alphabetical label
 
                     Points of interest:
                     {chr(10).join(point_descriptions)}
+
+                    Surface segments with calculated normal vectors:
+                    {chr(10).join(surface_descriptions)}
 
                     First, determine the specific subtype of the action based on the object's visual characteristics.
                     The skill name should follow the format: action_targetobject_mechanism
@@ -188,26 +882,26 @@ class SkillGenerator:
                     AVAILABLE ACTION PRIMITIVES AND PARAMETERS:
 
                     1. move_gripper_to_pose('point_label', is_top_down_grasp, is_side_grasp)
-                    - point_label: The labeled point (a, b, c, etc.) where the gripper should move to
+                    - point_label: The labeled point (a, b, c, etc.) from the SECOND IMAGE where the gripper should move to
                     - is_top_down_grasp: Boolean (true/false) indicating if the gripper should approach from above
                     - is_side_grasp: Boolean (true/false) indicating if the gripper should approach from the side
                     - Example: move_gripper_to_pose('a', true, false) - Move to point 'a' with a top-down approach
 
-                    2. push('point_label', 'force_direction', is_button, has_pivot, 'pivot_point_label')
-                    - point_label: The labeled point that the vision system should use to detect the surface whos normal will guide the direction of the push
+                    2. push('surface_label', 'force_direction', is_button, has_pivot, 'pivot_point_label')
+                    - surface_label: The labeled surface (a, b, c, etc.) from the FIRST IMAGE that the robot should push against
                     - force_direction: Either 'perpendicular' (push directly into the surface) or 'parallel' (push along the surface)
                     - is_button: Boolean (true/false) indicating if this is a button push (short distance, low force)
                     - has_pivot: Boolean (true/false) indicating if the push should pivot around another point
                     - pivot_point_label: If has_pivot is true, the labeled point to pivot around; otherwise use empty string ''
-                    - Example: push('b', 'perpendicular', true, false, '') - Push point 'b' like a button
+                    - Example: push('b', 'perpendicular', true, false, '') - Push surface 'b' like a button
 
-                    3. pull('point_label', 'force_direction', is_button, has_pivot, 'pivot_point_label')
-                    - point_label: The labeled point that the vision system should use to detect the surface whos normal will guide the direction of the pull
+                    3. pull('surface_label', 'force_direction', is_button, has_pivot, 'pivot_point_label')
+                    - surface_label: The labeled surface (a, b, c, etc.) from the FIRST IMAGE that the robot should pull
                     - force_direction: Either 'perpendicular' (pull directly away from the surface) or 'parallel' (pull along the surface)
                     - is_button: Boolean (true/false) indicating if this is a button-like pull (short distance, low force)
                     - has_pivot: Boolean (true/false) indicating if the pull should pivot around another point
                     - pivot_point_label: If has_pivot is true, the labeled point to pivot around; otherwise use empty string ''
-                    - Example: pull('c', 'parallel', false, true, 'd') - Pull point 'c' along the surface, pivoting around point 'd'
+                    - Example: pull('c', 'parallel', false, true, 'd') - Pull surface 'c' along the surface, pivoting around point 'd'
 
                     4. close_gripper()
                     - Closes the robot's gripper to grasp an object
@@ -248,8 +942,8 @@ class SkillGenerator:
                         "primitive_sequence": [
                             "EACH PRIMITIVE MUST USE EXACTLY ONE OF THESE FORMATS:",
                             "move_gripper_to_pose('point_label', is_top_down_grasp, is_side_grasp)",
-                            "push('point_label', 'force_direction', is_button, has_pivot, 'pivot_point_label')",
-                            "pull('point_label', 'force_direction', is_button, has_pivot, 'pivot_point_label')",
+                            "push('surface_label', 'force_direction', is_button, has_pivot, 'pivot_point_label')",
+                            "pull('surface_label', 'force_direction', is_button, has_pivot, 'pivot_point_label')",
                             "close_gripper()",
                             "open_gripper()",
                             "retract_gripper()"
@@ -271,7 +965,7 @@ class SkillGenerator:
                     }}}}
 
                     CRITICAL FORMATTING RULES:
-                    1. All point labels MUST be in single quotes (e.g., 'a', 'b', etc.)
+                    1. All point and surface labels MUST be in single quotes (e.g., 'a', 'b', etc.)
                     2. force_direction MUST be in single quotes and be either 'parallel' or 'perpendicular'
                     3. is_button, has_pivot, is_top_down_grasp, is_side_grasp MUST be boolean values (true or false) WITHOUT quotes
                     4. pivot_point_label MUST be in single quotes, even if empty (e.g., '', 'c')
@@ -283,22 +977,21 @@ class SkillGenerator:
                     - open_gripper()
                     - retract_gripper()
 
+                    IMPORTANT DISTINCTION:
+                    - For move_gripper_to_pose: use a point label from the SECOND IMAGE (points of interest)
+                    - For push and pull: use a surface label from the FIRST IMAGE (surface segments)
+                    - Use the normal vector information shown in the FIRST IMAGE to determine the best direction for pushing or pulling
+
                     Note:
-                    - For push and pull, the force_direction determines if the movement is perpendicular to the surface or parallel along it
-                    - Surface normals will be calculated automatically from the environment
-                    - When grasping an object, move_gripper_to_pose should specify the best point label for positioning
-                    - All references to locations should use the labeled points (a, b, c, etc.)
-                    - Prerequisites should include any conditions that must be met before execution (e.g., "object must be stationary")
-                    - Constraints should include any safety limits (e.g., "maximum force must not exceed 15N")
-                    
-                    - The chosen point label for move_gripper_to_pose should indicate the BEST location for the robot to manipulate the object given 
-                      the requested action: {abstract_action}
-                    
-                    - The chosen surface point label for push/pull should be the CLEAREST INDICATOR of the surface to align the force with
-                        the goal be to should make it easy for the robot to calculate the normal direction.
+                    - The chosen point for move_gripper_to_pose should be the BEST location for grasping or manipulating the object
+                    - The chosen surface for push/pull should be the CLEAREST INDICATOR of the surface to align the force with
+                    - Use the calculated normal vectors shown as arrows to determine the appropriate force direction
+                    - Prerequisites should include any conditions that must be met before execution
+                    - Constraints should include any safety limits or operating constraints
+                    - BE VERY CAREFUL SELECTING POINTS, always take your time and DOUBLE CHECK that they are in the spacial location you think they are in
 
                     Base all values on the visual appearance of the object.
-                    Return only the raw JSON object with no additional text."""},
+                    Return only the raw JSON object with no additional text or formatting. the output should start with an open bracket and end with a close bracket."""},
             {"role": "user", "content": [
                 {"type": "text", "text": f"""
                 Abstract Action: {abstract_action}
@@ -306,15 +999,23 @@ class SkillGenerator:
                 
                 Generate a complete skill definition for this task based on the object's visual appearance.
                 First determine the specific subtype of action needed based on the object's
-                characteristics, then generate the complete skill definition including
-                primitive sequence, parameters, prerequisites, and constraints.
+                characteristics, then generate the complete skill definition.
                 
-                Use the labeled points (a, b, c, etc.) to reference specific locations on the object.
+                FIRST IMAGE shows surface segments with alphabetical labels and normal vectors displayed as arrows.
+                SECOND IMAGE shows points of interest with alphabetical labels.
+                
+                For move_gripper_to_pose: use a point label from the SECOND IMAGE.
+                For push and pull: use a surface label from the FIRST IMAGE.
+                Use the normal vector arrows to determine appropriate force directions.
                 """},
                 {"type": "image_url", "image_url": {
-                    "url": f"data:image/png;base64,{self._encode_image(vis_img)}"
+                    "url": f"data:image/png;base64,{self._encode_image(surface_img)}"
+                }},
+                {"type": "image_url", "image_url": {
+                    "url": f"data:image/png;base64,{self._encode_image(points_img)}"
                 }}
             ]}]
+        print(combined_prompt[0])
         # Get response
         skill_response = self.llm.query_llm_sync(combined_prompt)
         try:
@@ -336,6 +1037,11 @@ class SkillGenerator:
             image_id=image_id,
             points_of_interest=points_of_interest
         )
+        
+        # Store the processed object_info with the skill for future reference
+        if object_info is not None:
+            # We can add a reference to the object_info if needed
+            skill.object_info = object_info
         
         self._store_skill(skill)
         return skill

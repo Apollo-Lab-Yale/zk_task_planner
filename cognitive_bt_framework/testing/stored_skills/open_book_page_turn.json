@@ -1,0 +1,115 @@
+{
+  "name": "open_book_page_turn",
+  "abstract_action": "open",
+  "target_object": "book",
+  "primitive_sequence": [
+    "move_gripper_to_pose('tbh', true, false)",
+    "close_gripper()",
+    "pull('ljn', 'parallel', false, false, '')",
+    "open_gripper()",
+    "retract_gripper()"
+  ],
+  "parameters": {
+    "force_threshold": "low",
+    "precision_required": "high",
+    "speed_requirement": "slow"
+  },
+  "prerequisites": [
+    "Book must be resting stable on a surface.",
+    "Book must be opened at least slightly to allow gripping of a page."
+  ],
+  "constraints": [
+    "Avoid excessive force to prevent damaging the book.",
+    "Ensure that the gripper does not collide with other objects on the table."
+  ],
+  "image_id": "open_book_1744645501_ff5825",
+  "points_of_interest": {
+    "nim": {
+      "label": "nim",
+      "position": [
+        0.284375,
+        0.66875
+      ],
+      "description": "Interest point nim at normalized position (0.284375, 0.66875)"
+    },
+    "qni": {
+      "label": "qni",
+      "position": [
+        0.384375,
+        0.6875
+      ],
+      "description": "Interest point qni at normalized position (0.384375, 0.6875)"
+    },
+    "hdx": {
+      "label": "hdx",
+      "position": [
+        0.4953125,
+        0.49375
+      ],
+      "description": "Interest point hdx at normalized position (0.4953125, 0.49375)"
+    },
+    "tbh": {
+      "label": "tbh",
+      "position": [
+        0.4734375,
+        0.7270833333333333
+      ],
+      "description": "Interest point tbh at normalized position (0.4734375, 0.7270833333333333)"
+    },
+    "cha": {
+      "label": "cha",
+      "position": [
+        0.3390625,
+        0.5854166666666667
+      ],
+      "description": "Interest point cha at normalized position (0.3390625, 0.5854166666666667)"
+    },
+    "pxn": {
+      "label": "pxn",
+      "position": [
+        0.4828125,
+        0.6145833333333334
+      ],
+      "description": "Interest point pxn at normalized position (0.4828125, 0.6145833333333334)"
+    },
+    "tve": {
+      "label": "tve",
+      "position": [
+        0.4953125,
+        0.35625
+      ],
+      "description": "Interest point tve at normalized position (0.4953125, 0.35625)"
+    },
+    "zrn": {
+      "label": "zrn",
+      "position": [
+        0.340625,
+        0.43125
+      ],
+      "description": "Interest point zrn at normalized position (0.340625, 0.43125)"
+    },
+    "hnv": {
+      "label": "hnv",
+      "position": [
+        0.434375,
+        0.425
+      ],
+      "description": "Interest point hnv at normalized position (0.434375, 0.425)"
+    },
+    "azs": {
+      "label": "azs",
+      "position": [
+        0.2703125,
+        0.3375
+      ],
+      "description": "Interest point azs at normalized position (0.2703125, 0.3375)"
+    }
+  },
+  "explanations": [
+    "Gripper moves to 'tbh' to grasp the top edge of a page, using a top-down approach for better control.",
+    "The gripper then closes to secure a single page.",
+    "Pulling action is performed on 'ljn' surface, pulling parallel to the book's spine to turn the page.",
+    "Gripper opens to release the page after turning.",
+    "Gripper retracts to a safe distance to avoid interfering with the user's view or further operations."
+  ]
+}
