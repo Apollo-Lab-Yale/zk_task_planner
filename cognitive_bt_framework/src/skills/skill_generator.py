@@ -789,11 +789,6 @@ class SkillGenerator:
                     1. FIRST IMAGE: The object with surface segments highlighted in different colors, each with an alphabetical label and normal vectors shown as arrows
                     2. SECOND IMAGE: The same object with points of interest marked by colored circles, each with an alphabetical label
 
-                    Points of interest:
-                    {chr(10).join(point_descriptions)}
-
-                    Surface segments with calculated normal vectors:
-                    {chr(10).join(surface_descriptions)}
 
                     First, determine the specific subtype of the action based on the object's visual characteristics.
                     The skill name should follow the format: action_targetobject_mechanism
@@ -801,7 +796,7 @@ class SkillGenerator:
                     AVAILABLE ACTION PRIMITIVES AND PARAMETERS:
 
                     1. move_gripper_to_pose('point_label', is_top_down_grasp, is_side_grasp)
-                    - point_label: The labeled point (a, b, c, etc.) from the SECOND IMAGE where the gripper should move to
+                    - point_label: The labeled point (a, b, c, etc.) from the SECOND IMAGE where the gripper will move
                     - is_top_down_grasp: Boolean (true/false) indicating if the gripper should approach from above
                     - is_side_grasp: Boolean (true/false) indicating if the gripper should approach from the side
                     - Example: move_gripper_to_pose('a', true, false) - Move to point 'a' with a top-down approach
@@ -908,6 +903,7 @@ class SkillGenerator:
                     - Prerequisites should include any conditions that must be met before execution
                     - Constraints should include any safety limits or operating constraints
                     - BE VERY CAREFUL SELECTING POINTS, always take your time and DOUBLE CHECK that they are in the spacial location you think they are in
+                    - the point chosen corresponds to the exact grasp so only choose points that will enable grasping
 
                     Base all values on the visual appearance of the object.
                     Return only the raw JSON object with no additional text or formatting. the output should start with an open bracket and end with a close bracket."""},

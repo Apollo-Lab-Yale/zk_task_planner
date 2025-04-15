@@ -1153,7 +1153,7 @@ class PerceptionSystem:
         self,
         image: np.ndarray,
         obj_info: ObjectInfo,
-        method: str = 'shi_tomasi',
+        method: str = 'orb',
         max_points: int = 20,
         quality_level: float = 0.01,
         min_distance: int = 50,
