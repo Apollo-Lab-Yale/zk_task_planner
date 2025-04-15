@@ -69,7 +69,7 @@ def test_skill_handler_sync():
         cv2.waitKey(1000)  # Display for 1 second
         
         action = 'open'
-        target_object = 'book'
+        target_object = 'metal cabinet'
 
         print("\nProcessing request...")
         print(f"Target: {target_object}")

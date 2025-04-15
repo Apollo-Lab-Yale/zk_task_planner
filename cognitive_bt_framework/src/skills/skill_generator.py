@@ -12,7 +12,7 @@ import time
 import pprint
 
 from cognitive_bt_framework.src.llm_interface import LLMInterfaceOpenAI
-from cognitive_bt_framework.src.vision.perception_system import ObjectInfo
+from cognitive_bt_framework.src.vision.perception_system import ObjectInfo, get_alpha_id
 
 @dataclass
 class PointOfInterest:
@@ -20,7 +20,7 @@ class PointOfInterest:
     label: str  # Alphabetical label (a, b, c, etc.)
     position: Tuple[float, float]  # Normalized (x, y) coordinates
     description: str = ""  # Optional description of the point
-    pixel_coords: List[Tuple[float, float]]
+    pixel_coords: Tuple[Tuple[float, float]]=()
     
 @dataclass
 class Skill:
@@ -550,108 +550,10 @@ class SkillGenerator:
         
         return surface_img, points_img
     
-    def _categorize_points_in_bounding_box(self, 
-                                      image: np.ndarray,
-                                      pixel_coords: List[Tuple[float, float]],
-                                      object_info: Optional[ObjectInfo] = None,
-                                      ids: Optional[List[str]] = None,
-                                      scores: Optional[List[float]] = None) -> List[str]:
-        """
-        Categorize points based on their position within the object's bounding box.
-        
-        Args:
-            image: Input image of the object
-            pixel_coords: List of (x, y) coordinates for points of interest
-            object_info: ObjectInfo containing additional object data including bounding box
-            ids: Optional list of point IDs
-            scores: Optional list of confidence scores for each point
-            
-        Returns:
-            List of point descriptions with spatial categorization
-        """
-        # Use provided IDs or generate default alphabetical IDs
-        if ids is None:
-            ids = [f"{chr(97 + i)}" for i in range(len(pixel_coords))]
-            
-        # Use provided scores or default to 1.0
-        if scores is None:
-            scores = [1.0] * len(pixel_coords)
-        
-        # Get object bounding box - either from object_info or calculate from points
-        if object_info is not None and object_info.bbox is not None:
-            x_min, y_min, x_max, y_max = object_info.bbox
-        else:
-            # Calculate approximate bounding box from points
-            if len(pixel_coords) > 0:
-                x_points = [p[0] for p in pixel_coords]
-                y_points = [p[1] for p in pixel_coords]
-                x_min, x_max = min(x_points), max(x_points)
-                y_min, y_max = min(y_points), max(y_points)
-                # Add padding to ensure points on the edge are covered
-                padding = 0.05  # 5% padding
-                width = x_max - x_min
-                height = y_max - y_min
-                x_min = max(0, x_min - padding * width)
-                y_min = max(0, y_min - padding * height)
-                x_max = min(image.shape[1], x_max + padding * width)
-                y_max = min(image.shape[0], y_max + padding * height)
-            else:
-                # Fallback to full image if no points
-                x_min, y_min = 0, 0
-                x_max, y_max = image.shape[1], image.shape[0]
-        
-        # Define regions of the bounding box
-        width = x_max - x_min
-        height = y_max - y_min
-        # Horizontal divisions
-        left_bound = x_min + width * 0.25
-        right_bound = x_max - width * 0.25
-        # Vertical divisions
-        top_bound = y_min + height * 0.25
-        bottom_bound = y_max - height * 0.25
-        # Edge margin (for detecting points close to edges)
-        edge_margin = min(width, height) * 0.1
-        
-        point_descriptions = []
-        for i, ((x, y), score, point_id) in enumerate(zip(pixel_coords, scores, ids)):
-            # Normalize coordinates for description
-            norm_x, norm_y = x / image.shape[1], y / image.shape[0]
-            
-            # Determine horizontal position
-            if x < left_bound:
-                h_pos = "left"
-            elif x > right_bound:
-                h_pos = "right"
-            else:
-                h_pos = "center"
-            
-            # Determine vertical position
-            if y < top_bound:
-                v_pos = "top"
-            elif y > bottom_bound:
-                v_pos = "bottom"
-            else:
-                v_pos = "middle"
-            
-            # Check if point is near an edge
-            is_edge = (x < x_min + edge_margin or 
-                    x > x_max - edge_margin or 
-                    y < y_min + edge_margin or 
-                    y > y_max - edge_margin)
-            
-            position_desc = f"{v_pos} {h_pos}"
-            if is_edge:
-                position_desc += " (edge)"
-            
-            desc = f"Point {point_id}: Located at normalized coordinates ({norm_x:.2f}, {norm_y:.2f}), position: {position_desc}, confidence score: {score:.2f}"
-            point_descriptions.append(desc)
-        
-        return point_descriptions
-
     def _categorize_points_from_point_objects(self,
-                                            image: np.ndarray,
-                                            point_objects: Dict[str, Any],
-                                            object_info: Optional[ObjectInfo] = None) -> List[str]:
+                                        image: np.ndarray,
+                                        point_objects: Dict[str, Any],
+                                        object_info: Optional[ObjectInfo] = None) -> List[str]:
         """
         Categorize points from PointOfInterest objects based on their position within the object's bounding box.
         
@@ -663,78 +565,108 @@ class SkillGenerator:
         Returns:
             List of point descriptions with spatial categorization
         """
-        # First gather all points to calculate bounding box
-        point_positions = [point.position for point in point_objects.values()]
-        labels = list(point_objects.keys())
+        h, w = image.shape[:2]
         
-        # Get object bounding box - either from object_info or calculate from points
+        # Get object bounding box from object_info
         if object_info is not None and object_info.bbox is not None:
-            x_min, y_min, x_max, y_max = object_info.bbox
-        elif point_positions:
-            # Calculate approximate bounding box from points
-            x_points = [p[0] for p in point_positions]
-            y_points = [p[1] for p in point_positions]
-            # These are already normalized coordinates
-            x_min, x_max = min(x_points), max(x_points)
-            y_min, y_max = min(y_points), max(y_points)
-            # Add padding
-            padding = 0.05  # 5% padding
-            width = x_max - x_min
-            height = y_max - y_min
-            x_min = max(0, x_min - padding * width)
-            y_min = max(0, y_min - padding * height)
-            x_max = min(1.0, x_max + padding * width)
-            y_max = min(1.0, y_max + padding * height)
+            # Note: ObjectInfo.bbox is in [x, y, w, h] format, convert to [x_min, y_min, x_max, y_max]
+            bbox_x, bbox_y, bbox_w, bbox_h = object_info.bbox
+            x_min, y_min = bbox_x, bbox_y
+            x_max, y_max = bbox_x + bbox_w, bbox_y + bbox_h
         else:
-            # Fallback to full image if no points
-            x_min, y_min = 0, 0
-            x_max, y_max = 1.0, 1.0
+            # If no bounding box provided, calculate from point pixel coordinates
+            pixel_coords = []
+            for point in point_objects.values():
+                # Always use pixel_coords if available
+                if hasattr(point, 'pixel_coords') and point.pixel_coords:
+                    pixel_coords.append(point.pixel_coords)
+                else:
+                    # Convert normalized position to pixel coordinates as fallback
+                    norm_x, norm_y = point.position
+                    pixel_x = int(norm_x * w)
+                    pixel_y = int(norm_y * h)
+                    pixel_coords.append((pixel_x, pixel_y))
+            
+            if pixel_coords:
+                # Calculate bounding box from pixel coordinates
+                x_points = [p[0] for p in pixel_coords]
+                y_points = [p[1] for p in pixel_coords]
+                x_min, x_max = min(x_points), max(x_points)
+                y_min, y_max = min(y_points), max(y_points)
+                
+                # Add padding
+                padding_x = int(0.05 * (x_max - x_min))  # 5% padding
+                padding_y = int(0.05 * (y_max - y_min))
+                x_min = max(0, x_min - padding_x)
+                y_min = max(0, y_min - padding_y)
+                x_max = min(w, x_max + padding_x)
+                y_max = min(h, y_max + padding_y)
+            else:
+                # Fallback to full image if no points
+                x_min, y_min = 0, 0
+                x_max, y_max = w, h
         
-        # Define regions of the bounding box
+        # Define regions of the bounding box in pixel coordinates
         width = x_max - x_min
         height = y_max - y_min
+        
         # Horizontal divisions
         left_bound = x_min + width * 0.25
         right_bound = x_max - width * 0.25
+        
         # Vertical divisions
         top_bound = y_min + height * 0.25
         bottom_bound = y_max - height * 0.25
+        
         # Edge margin (for detecting points close to edges)
         edge_margin = min(width, height) * 0.1
         
         point_descriptions = []
         for label, point in point_objects.items():
-            x, y = point.position  # These are normalized coordinates
+            # Always get pixel coordinates for positioning
+            if hasattr(point, 'pixel_coords') and point.pixel_coords:
+                pixel_x, pixel_y = point.pixel_coords
+            else:
+                # Convert normalized position to pixel coordinates as fallback
+                norm_x, norm_y = point.position
+                pixel_x = int(norm_x * w)
+                pixel_y = int(norm_y * h)
             
-            # Determine horizontal position
-            if x < left_bound:
+            # Get normalized coordinates for description
+            norm_x, norm_y = point.position
+            
+            # Determine horizontal position using pixel coordinates
+            if pixel_x < left_bound:
                 h_pos = "left"
-            elif x > right_bound:
+            elif pixel_x > right_bound:
                 h_pos = "right"
             else:
                 h_pos = "center"
             
-            # Determine vertical position
-            if y < top_bound:
+            # Determine vertical position using pixel coordinates
+            if pixel_y < top_bound:
                 v_pos = "top"
-            elif y > bottom_bound:
+            elif pixel_y > bottom_bound:
                 v_pos = "bottom"
             else:
                 v_pos = "middle"
             
             # Check if point is near an edge
-            is_edge = (x < x_min + edge_margin or 
-                    x > x_max - edge_margin or 
-                    y < y_min + edge_margin or 
-                    y > y_max - edge_margin)
+            is_edge = (pixel_x < x_min + edge_margin or 
+                    pixel_x > x_max - edge_margin or 
+                    pixel_y < y_min + edge_margin or 
+                    pixel_y > y_max - edge_margin)
             
             position_desc = f"{v_pos} {h_pos}"
             if is_edge:
                 position_desc += " (edge)"
             
-            desc = (f"Point {label}: {point.description}, position: {position_desc}" 
-                    if hasattr(point, 'description') and point.description 
-                    else f"Point {label}: Located at normalized coordinates ({x:.2f}, {y:.2f}), position: {position_desc}")
+            # Use description if available, otherwise generate one
+            if hasattr(point, 'description') and point.description:
+                desc = f"Point {label}: {point.description}, position: {position_desc}"
+            else:
+                desc = f"Point {label}: Located at normalized coordinates ({norm_x:.2f}, {norm_y:.2f}), position: {position_desc}"
+            
             point_descriptions.append(desc)
         
         return point_descriptions
@@ -805,28 +737,13 @@ class SkillGenerator:
         surface_descriptions = []
 
         # Handle points
-        if 'pixel_coords' in points_of_interest:
-            # New format from detect_regions_of_interest
-            pixel_coords = points_of_interest['pixel_coords']
-            scores = points_of_interest.get('scores', [1.0] * len(pixel_coords))
-            ids = points_of_interest.get('ids', [f"{chr(97 + i)}" for i in range(len(pixel_coords))])
-            
-            # Use the new function to categorize points
-            point_descriptions = self._categorize_points_in_bounding_box(
-                image=image,
-                pixel_coords=pixel_coords,
-                object_info=object_info,
-                ids=ids,
-                scores=scores
-            )
-        else:
-            # Original format with PointOfInterest objects
-            # Use the new function to categorize points
-            point_descriptions = self._categorize_points_from_point_objects(
-                image=image,
-                point_objects=points_of_interest,
-                object_info=object_info
-            )
+        # Original format with PointOfInterest objects
+        # Use the new function to categorize points
+        point_descriptions = self._categorize_points_from_point_objects(
+            image=image,
+            point_objects=points_of_interest,
+            object_info=object_info
+        )
         # Handle surfaces with normals if available
         if object_info is not None and object_info.surface_masks is not None:
             # Sort surface masks by size (as a confidence proxy) and take top N

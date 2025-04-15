@@ -1303,7 +1303,7 @@ class PerceptionSystem:
             elif method.lower() == 'orb':
                 # ORB detector
                 try:
-                    orb = cv2.ORB_create(nfeatures=max_points, edgeThreshold=1, patchSize=1)
+                    orb = cv2.ORB_create(nfeatures=max_points, edgeThreshold=2, patchSize=2)
                     
                     # Apply mask to limit detection region
                     mask_uint8 = mask.astype(np.uint8) * 255
