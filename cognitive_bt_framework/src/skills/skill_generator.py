@@ -9,6 +9,7 @@ from PIL import Image
 from io import BytesIO
 import base64
 import time
+import pprint
 
 from cognitive_bt_framework.src.llm_interface import LLMInterfaceOpenAI
 from cognitive_bt_framework.src.vision.perception_system import ObjectInfo
@@ -19,6 +20,7 @@ class PointOfInterest:
     label: str  # Alphabetical label (a, b, c, etc.)
     position: Tuple[float, float]  # Normalized (x, y) coordinates
     description: str = ""  # Optional description of the point
+    pixel_coords: List[Tuple[float, float]]
     
 @dataclass
 class Skill:
@@ -1015,7 +1017,7 @@ class SkillGenerator:
                     "url": f"data:image/png;base64,{self._encode_image(points_img)}"
                 }}
             ]}]
-        print(combined_prompt[0])
+        pprint.pp(point_descriptions)
         # Get response
         skill_response = self.llm.query_llm_sync(combined_prompt)
         try:

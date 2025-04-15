@@ -1,0 +1,115 @@
+{
+  "name": "open_book_pulling",
+  "abstract_action": "open",
+  "target_object": "book",
+  "primitive_sequence": [
+    "move_gripper_to_pose('fip', true, false)",
+    "close_gripper()",
+    "pull('hek', 'parallel', false, false, '')",
+    "retract_gripper()",
+    "open_gripper()"
+  ],
+  "parameters": {
+    "force_threshold": "low",
+    "precision_required": "high",
+    "speed_requirement": "slow"
+  },
+  "prerequisites": [
+    "The book must be positioned such that the spine is accessible and not blocked.",
+    "Ensure the robot's gripper is calibrated and has sufficient grip strength for paper materials."
+  ],
+  "constraints": [
+    "Avoid excessive force to prevent damaging the book.",
+    "Ensure the book is not tightly wedged against other objects to allow for easy pulling."
+  ],
+  "image_id": "open_book_1744669763_7c881d",
+  "points_of_interest": {
+    "vvc": {
+      "label": "vvc",
+      "position": [
+        0.15,
+        0.5395833333333333
+      ],
+      "description": "Interest point vvc at normalized position (0.15, 0.5395833333333333)"
+    },
+    "xcq": {
+      "label": "xcq",
+      "position": [
+        0.3765625,
+        0.39166666666666666
+      ],
+      "description": "Interest point xcq at normalized position (0.3765625, 0.39166666666666666)"
+    },
+    "tmt": {
+      "label": "tmt",
+      "position": [
+        0.3515625,
+        0.6
+      ],
+      "description": "Interest point tmt at normalized position (0.3515625, 0.6)"
+    },
+    "fip": {
+      "label": "fip",
+      "position": [
+        0.25625,
+        0.51875
+      ],
+      "description": "Interest point fip at normalized position (0.25625, 0.51875)"
+    },
+    "wog": {
+      "label": "wog",
+      "position": [
+        0.3234375,
+        0.30625
+      ],
+      "description": "Interest point wog at normalized position (0.3234375, 0.30625)"
+    },
+    "ifi": {
+      "label": "ifi",
+      "position": [
+        0.2171875,
+        0.375
+      ],
+      "description": "Interest point ifi at normalized position (0.2171875, 0.375)"
+    },
+    "akt": {
+      "label": "akt",
+      "position": [
+        0.3765625,
+        0.21875
+      ],
+      "description": "Interest point akt at normalized position (0.3765625, 0.21875)"
+    },
+    "acy": {
+      "label": "acy",
+      "position": [
+        0.059375,
+        0.5166666666666667
+      ],
+      "description": "Interest point acy at normalized position (0.059375, 0.5166666666666667)"
+    },
+    "qfr": {
+      "label": "qfr",
+      "position": [
+        0.2125,
+        0.26875
+      ],
+      "description": "Interest point qfr at normalized position (0.2125, 0.26875)"
+    },
+    "dft": {
+      "label": "dft",
+      "position": [
+        0.0875,
+        0.38958333333333334
+      ],
+      "description": "Interest point dft at normalized position (0.0875, 0.38958333333333334)"
+    }
+  },
+  "explanations": [
+    "The gripper moves to 'fip' to grasp the top left edge of the book, which is a strategic point for initiating the opening.",
+    "A top-down grasp is used for a secure grip on the surface of the book cover.",
+    "Pulling action on surface 'hek' is set to parallel to mimic the natural action of opening a book by pulling one cover away from the other.",
+    "Retracting the gripper ensures that the book remains open while minimizing mechanical stress on the binding.",
+    "Opening the gripper at the end of the sequence releases the book and completes the task."
+  ]
+}

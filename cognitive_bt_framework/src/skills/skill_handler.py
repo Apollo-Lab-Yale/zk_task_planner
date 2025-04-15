@@ -129,7 +129,8 @@ class SkillHandler:
             points_of_interest[label] = PointOfInterest(
                 label=label,
                 position=(norm_x, norm_y),
-                description=f"Interest point {label} at normalized position {(norm_x, norm_y)}"
+                description=f"Interest point {label} at normalized position {(norm_x, norm_y)}",
+                pixel_coords=roi_results['pixel_coords']
             )
         
         # Get or generate skill using SkillGenerator

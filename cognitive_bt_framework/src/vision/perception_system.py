@@ -1912,7 +1912,7 @@ class PerceptionSystem:
         try:
             # First detect initial surface masks
             initial_surfaces = self.detect_object_surfaces(image, obj_info, depth_image=depth_image)
-            
+            return initial_surfaces
             if not initial_surfaces:
                 if self.debug:
                     print("No initial surfaces detected")
