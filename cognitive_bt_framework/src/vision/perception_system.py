@@ -11,8 +11,9 @@ import traceback
 
 # Import the FastSAMMaskGenerator and FastSAMConfig instead of FastSAMWithCLIP
 from cognitive_bt_framework.src.vision.sam.fast_sam import FastSAMMaskGenerator, FastSAMConfig
-from cognitive_bt_framework.src.vision.realsense import Camera
+from cognitive_bt_framework.src.vision.contour_shape_detector import ContourShapeDetector, ContourInfo
 from cognitive_bt_framework.utils.time_profiler import IterationTimeProfiler
+from cognitive_bt_framework.src.vision.interaction_point_detector import RobustInteractionDetector
 from ultralytics import YOLOWorld, YOLOE
 
 
@@ -80,7 +81,7 @@ class PerceptionSystem:
                 
             self.detector = YOLOE()
             self.default_conf = default_conf
-            
+            self.interaction_detector = RobustInteractionDetector(debug=self.debug)
             # Set default classes if provided
             if default_classes:
                 self.detector.set_classes(default_classes)
@@ -96,30 +97,31 @@ class PerceptionSystem:
                     print("FastSAM segmenter initialized")
             
             # Initialize camera parameters
-            if camera_matrix is None:
-                self.camera_matrix = np.array([
-                    [429.92523193359375, 0.0, 431.7160339355469],
-                    [0.0, 429.92523193359375, 233.39739990234375],
-                    [0.0, 0.0, 1.0]
-                ])
-            else:
-                self.camera_matrix = camera_matrix
+            self.camera_matrix = camera_matrix
                 
             # Pre-calculate camera matrix inverse for faster back-projection
             self.fx = self.camera_matrix[0, 0]
             self.fy = self.camera_matrix[1, 1]
             self.cx = self.camera_matrix[0, 2]
             self.cy = self.camera_matrix[1, 2]
+            self.camera_intrinsics = {"fx": self.fx, 'fy':self.fy, 'cx':self.cx, 'cy': self.cy}
             self.fx_inv = 1.0 / self.fx
             self.fy_inv = 1.0 / self.fy
-            
+            self.shape_detector = ContourShapeDetector(
+                min_area=100,
+                max_area=100000,
+                min_circularity=0.5,  # Fairly circular objects
+                min_vertices=3,
+                max_vertices=20,
+                debug=False
+            )
             self.depth_scale = depth_scale
             self._object_cache = {}  # Cache for detected objects
             self._next_mask_id = 1  # Counter for assigning IDs to masks
             
             if self.debug:
                 print(f"PerceptionSystem initialized with debug={debug}")
-                
+            self.__pixel_to_3d = self._estimate_point_pose
         except Exception as e:
             if self.debug:
                 print(f"Error in PerceptionSystem initialization: {str(e)}")
@@ -152,12 +154,13 @@ class PerceptionSystem:
             self.profiler.start("detect_objects")
         
         try:
+            import copy
             # Use provided parameters or defaults
             if classes is not None:
                 self.detector.set_classes(classes, self.detector.get_text_pe(classes))
                 if self.debug:
                     print(f"Set detection classes: {classes}")
-            
+            temp_img = copy.deepcopy(image)
             conf_threshold = conf if conf is not None else self.default_conf
             
             # Run YOLO-World detection
@@ -165,7 +168,7 @@ class PerceptionSystem:
                 self.profiler.start("yolo_detection")
                 print(f"Running YOLO-World detection with confidence threshold {conf_threshold}")
             
-            results = self.detector.predict(image, verbose=False)
+            results = self.detector.predict(temp_img, verbose=False)
             
             if self.debug:
                 self.profiler.stop("yolo_detection")
@@ -232,8 +235,9 @@ class PerceptionSystem:
                     image=image,
                     depth_image=depth_image,
                     alpha_id=alpha_id,
+                    camera_intrinsics=self.camera_intrinsics
                 )
-                obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=10)
+                obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=10, min_distance=50)
                 # Initialize surface_masks
                 obj_info.surface_masks = {}
 
@@ -244,7 +248,7 @@ class PerceptionSystem:
                         print(f"Generating surface segmentation for object {i} ({class_name})")
                     
                     obj_info.surface_masks = self.segment_surfaces_by_plane_fitting(
-                        image=image,
+                        image=temp_img,
                         obj_info=obj_info,
                         depth_image=depth_image,
                     )
@@ -252,27 +256,6 @@ class PerceptionSystem:
                     if self.debug:
                         self.profiler.stop(f"segment_surfaces_{i}")
                         print(f"Detected {len(obj_info.surface_masks)} surfaces for object {i}")
-                # Generate segmentation mask if requested
-                # if segment and self.segmenter is not None:
-                #     if self.debug:
-                #         self.profiler.start(f"segment_obj_{i}")
-                #         print(f"Generating segmentation for object {i} ({class_name})")
-                    
-                #     # mask = self._generate_segmentation(image, obj_info)
-                #     mask = None
-                #     # Fallback to bbox mask if segmentation failed
-                #     if mask is None:
-                #         if self.debug:
-                #             print(f"Segmentation failed for object {i}, falling back to bbox mask")
-                        
-                #         # Create a simple binary mask from bbox
-                #         mask = np.zeros(image.shape[:2], dtype=bool)
-                #         x, y, w, h = bbox
-                #         mask[y:y+h, x:x+w] = True
-                    
-                #     obj_info.mask = mask
-                    
-                #     obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=10)
                 
                 # Estimate pose if depth image is provided
                 if depth_image is not None:
@@ -313,9 +296,6 @@ class PerceptionSystem:
             if self.debug:
                 self.profiler.stop("detect_objects")
                 self.profiler.end_iteration(preserve_current=True)
-    
-    
-    
     
     
     def detect_object(
@@ -380,174 +360,371 @@ class PerceptionSystem:
                 self.profiler.stop("detect_object")
                 self.profiler.end_iteration(preserve_current=True)
 
-    def detect_object_parts(
+
+    def detect_regions_of_interest(
         self,
         image: np.ndarray,
-        bbox: List[int],
-        conf_threshold: float = 0.01,
-        depth_image: Optional[np.ndarray] = None
-    ) -> Dict[int, ObjectInfo]:
+        obj_info: ObjectInfo,
+        method: str = 'robust',  # Default is still 'robust'
+        max_points: int = 20,
+        quality_level: float = 0.01,
+        min_distance: int = 50,
+        visualize: bool = False,
+        orb_params: Dict[str, Any] = None  # New parameter for ORB configuration
+    ) -> Dict[str, Any]:
         """
-        Detect parts within a region of interest using FastSAM
+        Detect points of interest within a specific object mask.
         
         Args:
-            image: Input image
-            bbox: Bounding box of the region of interest [x, y, w, h]
-            conf_threshold: Confidence threshold for part detection
-            depth_image: Optional depth image
+            image: RGB input image
+            obj_info: ObjectInfo containing the object mask
+            method: Feature detection method ('robust', 'orb', 'contour', 'legacy')
+            max_points: Maximum number of points to detect
+            quality_level: Quality level parameter (not used for robust method)
+            min_distance: Minimum distance between detected points
+            visualize: Whether to generate visualization
+            orb_params: Optional dictionary of ORB parameters:
+                - nfeatures: Max features to retain (default: max_points)
+                - scaleFactor: Pyramid decimation ratio (default: 1.2)
+                - nlevels: Number of pyramid levels (default: 8)
+                - edgeThreshold: Size of border where features not detected (default: 31)
+                - firstLevel: Level of pyramid to put source image (default: 0)
+                - WTA_K: Number of points used to produce oriented BRIEF (default: 2)
+                - scoreType: Type of score for ordering features (default: cv2.ORB_HARRIS_SCORE)
+                - patchSize: Size of patch used for descriptor (default: 31)
+                - fastThreshold: Fast detector threshold (default: 20)
             
         Returns:
-            Dictionary mapping mask IDs to ObjectInfo objects
+            Dictionary containing:
+                - 'keypoints': List of cv2.KeyPoint objects
+                - 'descriptors': Descriptors if available (None for contour method)
+                - 'pixel_coords': List of (x,y) pixel coordinates
+                - 'scores': Confidence scores for each point
+                - 'interaction_points': List of InteractionPoint objects (if robust method)
+                - 'visualization': Visualization image (if visualize=True)
         """
-        if self.segmenter is None:
-            if self.debug:
-                print("Cannot detect parts: FastSAM segmenter not initialized")
-            return {}
-            
         if self.debug:
             self.profiler.start_iteration()
-            self.profiler.start("detect_parts")
+            self.profiler.start("detect_regions_of_interest")
         
         try:
-            # Extract region of interest with padding
-            x, y, w, h = bbox
-            pad = int(max(w, h) * 0.05)  # 5% padding
-            
-            # Ensure coordinates are within image bounds
-            x_roi = max(0, x - pad)
-            y_roi = max(0, y - pad)
-            w_roi = min(image.shape[1] - x_roi, w + 2*pad)
-            h_roi = min(image.shape[0] - y_roi, h + 2*pad)
-            
-            # Store ROI coordinates for later use
-            roi_coords = (x_roi, y_roi, w_roi, h_roi)
-            
-            # Extract ROI
-            roi = image[y_roi:y_roi+h_roi, x_roi:x_roi+w_roi]
-            
-            if roi.size == 0:
+            # Check if the object has a mask
+            if obj_info.mask is None:
                 if self.debug:
-                    print(f"Invalid ROI with dimensions {roi.shape}")
-                return {}
-            
-            # Generate masks for everything in the ROI
-            if self.debug:
-                self.profiler.start("generate_masks")
+                    print(f"No mask available for object '{obj_info.name}', generating one...")
                 
-            try:
-                # Use "everything" prompt to segment all parts
-                labeled_masks, metadata = self.segmenter.generate_masks(
-                    roi,
-                    prompt_type="everything"
-                )
-                
-                if self.debug:
-                    print(f"FastSAM returned {len(metadata)} potential parts in object region")
-                    self.profiler.stop("generate_masks")
-            except Exception as e:
-                if self.debug:
-                    print(f"Error generating masks: {e}")
-                    self.profiler.stop("generate_masks")
-                return {}
-            
-            # Process the masks to create ObjectInfo objects
-            if self.debug:
-                self.profiler.start("process_parts")
-                
-            parts = {}
-            
-            # Implement filtering to remove very small masks and masks that are too large 
-            # (likely the whole object rather than a part)
-            total_roi_area = w_roi * h_roi
-            min_part_area = total_roi_area * 0.01  # Parts should be at least 1% of ROI
-            max_part_area = total_roi_area * 0.8   # Parts shouldn't be more than 80% of ROI
-                
-            for mask_id, meta in metadata.items():
-                # Skip parts that are too small or too large
-                area = meta.get('area', 0)
-                if area < min_part_area or area > max_part_area:
+                # Generate a mask if not available
+                mask = self._generate_segmentation(image, obj_info)
+                if mask is None:
+                    # Fallback to bounding box mask
                     if self.debug:
-                        print(f"Skipping mask {mask_id}: area={area:.0f} (outside range [{min_part_area:.0f}, {max_part_area:.0f}])")
-                    continue
-
-                # Create a full image mask
-                full_mask = np.zeros(image.shape[:2], dtype=bool)
+                        print("Using bounding box as fallback mask")
+                    x, y, w, h = obj_info.bbox
+                    mask = np.zeros(image.shape[:2], dtype=bool)
+                    mask[y:y+h, x:x+w] = True
+            else:
+                mask = obj_info.mask
+            
+            # Convert boolean mask to uint8 for OpenCV operations
+            mask_uint8 = mask.astype(np.uint8) * 255
+            
+            # Use the new robust detection method
+            if method == 'robust':
+                if self.debug:
+                    self.profiler.start("robust_detection")
                 
-                # Get the mask from labeled masks
-                roi_mask = labeled_masks == mask_id
+                # Get depth data if available
+                depth_data = obj_info.depth_image if hasattr(obj_info, 'depth_image') else None
                 
-                # Try to place ROI mask in the correct position in the full image
-                try:
-                    full_mask[y_roi:y_roi+h_roi, x_roi:x_roi+w_roi] = roi_mask
-                except ValueError as e:
-                    # Handle potential size mismatch
-                    if self.debug:
-                        print(f"Error placing mask in full image: {e}")
-                        
-                    try:
-                        # Resize mask to match ROI dimensions
-                        resized_mask = cv2.resize(
-                            roi_mask.astype(np.uint8), 
-                            (w_roi, h_roi), 
-                            interpolation=cv2.INTER_NEAREST
-                        ).astype(bool)
-                        
-                        full_mask[y_roi:y_roi+h_roi, x_roi:x_roi+w_roi] = resized_mask
-                    except Exception as resize_err:
-                        if self.debug:
-                            print(f"Failed to resize mask: {resize_err}")
-                        continue  # Skip this mask if we can't resize it properly
-                
-                # Convert bounding box to image coordinates
-                part_bbox = meta['bbox']
-                img_bbox = [
-                    part_bbox[0] + x_roi,
-                    part_bbox[1] + y_roi,
-                    part_bbox[2],
-                    part_bbox[3]
-                ]
-                
-                # Create a new ID and alpha ID for this part
-                part_id = self._next_mask_id
-                self._next_mask_id += 1
-                alpha_id = get_alpha_id(part_id)
-                
-                # Create ObjectInfo for this part
-                part_info = ObjectInfo(
-                    id=part_id,
-                    name=f"part_{alpha_id}",
-                    bbox=img_bbox,
-                    confidence=conf_threshold,  # Default confidence
+                # Detect interaction points using the robust method
+                interaction_points = self.interaction_detector.detect_interaction_points(
                     image=image,
-                    mask=full_mask,
-                    depth_image=depth_image,
-                    alpha_id=alpha_id
+                    mask=mask,
+                    min_distance=min_distance,
+                    obj_info=obj_info,
+                    max_points=max_points,
+                    depth_data=obj_info.depth_image if hasattr(obj_info, 'depth_image') else None,
+                    apply_center_shift=True,     # Enable center shifting
+                    edge_threshold=15.0,         # Points within 15px of edge get shifted  
+                    shift_factor=0.4 
                 )
                 
-                # Estimate pose if depth image is provided
-                if depth_image is not None:
-                    pose, pixel_pose = self._estimate_object_pose(full_mask, depth_image)
-                    part_info.pose = pose
-                    part_info.pixel_pose = pixel_pose
+                if self.debug:
+                    self.profiler.stop("robust_detection")
+                    print(f"Detected {len(interaction_points)} interaction points using robust method")
                 
-                parts[part_id] = part_info
+                # Convert InteractionPoint objects to cv2.KeyPoint format for backward compatibility
+                final_keypoints = []
+                pixel_coords = []
+                scores = []
+                point_types = []
+                
+                for point in interaction_points:
+                    # Create cv2.KeyPoint object
+                    kp = cv2.KeyPoint(
+                        float(point.x), float(point.y), 
+                        size=5.0, 
+                        response=point.score
+                    )
+                    final_keypoints.append(kp)
+                    pixel_coords.append((point.x, point.y))
+                    scores.append(point.score)
+                    point_types.append(point.interaction_type.value)
+                
+                # Create results dictionary
+                results = {
+                    'keypoints': final_keypoints,
+                    'descriptors': None,  # No descriptors for robust method
+                    'pixel_coords': pixel_coords,
+                    'scores': scores,
+                    'object_name': obj_info.name,
+                    'method': "robust",
+                    'mask_area': np.sum(mask),
+                    'ids': [get_alpha_id(i) for i in range(len(final_keypoints))],
+                    'point_types': point_types,
+                    'interaction_points': interaction_points  # Rich interaction data
+                }
             
-            if self.debug:
-                self.profiler.stop("process_parts")
-                print(f"Processed {len(parts)} parts")
+            # New ORB-based method
+            elif method == 'orb':
+                if self.debug:
+                    self.profiler.start("orb_detection")
+                
+                # Set default ORB parameters if none provided
+                if orb_params is None:
+                    orb_params = {}
+                
+                # Configure ORB detector
+                nfeatures = orb_params.get('nfeatures', max_points)
+                scaleFactor = orb_params.get('scaleFactor', 1.2)
+                nlevels = orb_params.get('nlevels', 8)
+                edgeThreshold = orb_params.get('edgeThreshold', 31)
+                firstLevel = orb_params.get('firstLevel', 0)
+                WTA_K = orb_params.get('WTA_K', 2)
+                scoreType = orb_params.get('scoreType', cv2.ORB_HARRIS_SCORE)
+                patchSize = orb_params.get('patchSize', 31)
+                fastThreshold = orb_params.get('fastThreshold', 20)
+                
+                # Create ORB detector
+                orb = cv2.ORB_create(
+                    nfeatures=nfeatures,
+                    scaleFactor=scaleFactor,
+                    nlevels=nlevels,
+                    edgeThreshold=edgeThreshold,
+                    firstLevel=firstLevel,
+                    WTA_K=WTA_K,
+                    scoreType=scoreType,
+                    patchSize=patchSize,
+                    fastThreshold=fastThreshold
+                )
+                
+                # Apply mask to the image
+                masked_image = cv2.bitwise_and(image, image, mask=mask_uint8)
+                
+                # Convert to grayscale for ORB (which requires grayscale input)
+                gray = cv2.cvtColor(masked_image, cv2.COLOR_BGR2GRAY)
+                
+                # Detect keypoints and compute descriptors
+                keypoints, descriptors = orb.detectAndCompute(gray, mask=mask_uint8)
+                
+                # Limit the number of keypoints based on their response (strongest first)
+                keypoints = sorted(keypoints, key=lambda x: x.response, reverse=True)[:max_points]
+                
+                # If descriptors were computed, filter them to match the keypoints
+                if descriptors is not None and len(keypoints) < len(descriptors):
+                    descriptors = descriptors[:len(keypoints)]
+                
+                # Apply min_distance filtering
+                if min_distance > 0 and len(keypoints) > 1:
+                    filtered_keypoints = [keypoints[0]]  # Start with the strongest keypoint
+                    for kp in keypoints[1:]:
+                        # Check distance to all already filtered keypoints
+                        too_close = False
+                        for existing_kp in filtered_keypoints:
+                            dist = np.sqrt((kp.pt[0] - existing_kp.pt[0])**2 + 
+                                          (kp.pt[1] - existing_kp.pt[1])**2)
+                            if dist < min_distance:
+                                too_close = True
+                                break
+                        if not too_close:
+                            filtered_keypoints.append(kp)
+                            if len(filtered_keypoints) >= max_points:
+                                break
+                    
+                    # Update keypoints and descriptors
+                    if descriptors is not None:
+                        # Create a mapping of original indices to filtered indices
+                        indices = [keypoints.index(kp) for kp in filtered_keypoints]
+                        descriptors = descriptors[indices]
+                    
+                    keypoints = filtered_keypoints
+                
+                # Extract pixel coordinates and scores
+                pixel_coords = [(int(kp.pt[0]), int(kp.pt[1])) for kp in keypoints]
+                scores = [kp.response for kp in keypoints]
+                
+                if self.debug:
+                    self.profiler.stop("orb_detection")
+                    print(f"Detected {len(keypoints)} ORB keypoints")
+                
+                # Create results dictionary
+                results = {
+                    'keypoints': keypoints,
+                    'descriptors': descriptors,
+                    'pixel_coords': pixel_coords,
+                    'scores': scores,
+                    'object_name': obj_info.name,
+                    'method': "orb",
+                    'mask_area': np.sum(mask),
+                    'ids': [get_alpha_id(i) for i in range(len(keypoints))],
+                    'point_types': ['ORB'] * len(keypoints)
+                }
+                
+                # Create InteractionPoint objects for compatibility with robust method
+                interaction_points = []
+                for i, (kp, score) in enumerate(zip(keypoints, scores)):
+                    # Default to GENERIC type for ORB points
+                    from enum import Enum
+                    # Assuming InteractionPointType is an Enum defined elsewhere
+                    # If not available, this would need to be adjusted
+                    try:
+                        interaction_type = InteractionPointType.GENERIC
+                    except:
+                        # Fallback if enum not defined
+                        class DummyEnum(Enum):
+                            GENERIC = "generic"
+                        interaction_type = DummyEnum.GENERIC
+                    
+                    # Create an InteractionPoint-like object with required attributes
+                    interaction_point = type('InteractionPoint', (), {
+                        'x': int(kp.pt[0]),
+                        'y': int(kp.pt[1]),
+                        'score': score,
+                        'interaction_type': interaction_type,
+                        'size': kp.size,
+                        'angle': kp.angle,
+                        'id': get_alpha_id(i)
+                    })
+                    
+                    interaction_points.append(interaction_point)
+                
+                results['interaction_points'] = interaction_points
+                
+            elif method == 'contour' or method == 'legacy':
+                # Fall back to the original contour-based method
+                results = self._detect_regions_legacy(
+                    image, obj_info, mask, max_points, min_distance
+                )
+                
+            else:
+                raise ValueError(f"Unknown detection method: {method}")
             
-            return parts
+            # Create visualization if requested
+            if visualize:
+                if self.debug:
+                    self.profiler.start("roi_visualization")
+                
+                visualization = self.visualize_interest_points(
+                    image=image,
+                    obj_info=obj_info,
+                    keypoints=results['keypoints'],
+                    scores=results['scores'],
+                    method=method,
+                    max_points=max_points,
+                    descriptors=results.get('descriptors')  # Pass descriptors for ORB visualization
+                )
+                
+                results['visualization'] = visualization
+                
+                if self.debug:
+                    self.profiler.stop("roi_visualization")
+            
+            # For the orb method, combine with robust method if needed
+            if method == 'orb' and orb_params and orb_params.get('combine_with_robust', False):
+                if self.debug:
+                    self.profiler.start("combined_detection")
+                
+                # Call the robust method with reduced max_points
+                robust_max_points = max(1, max_points // 2)
+                robust_results = self.detect_regions_of_interest(
+                    image=image,
+                    obj_info=obj_info,
+                    method='robust',
+                    max_points=robust_max_points,
+                    min_distance=min_distance,
+                    visualize=False
+                )
+                
+                # Merge the results
+                combined_keypoints = results['keypoints'] + robust_results['keypoints']
+                combined_pixel_coords = results['pixel_coords'] + robust_results['pixel_coords']
+                combined_scores = results['scores'] + robust_results['scores']
+                combined_types = results['point_types'] + robust_results['point_types']
+                combined_ids = [get_alpha_id(i) for i in range(len(combined_keypoints))]
+                
+                # ORB has descriptors, robust doesn't, so we pad with zeros for robust points
+                if results['descriptors'] is not None and len(results['descriptors']) > 0:
+                    descriptor_size = results['descriptors'].shape[1]
+                    padded_descriptors = np.zeros((len(robust_results['keypoints']), descriptor_size), 
+                                                 dtype=results['descriptors'].dtype)
+                    combined_descriptors = np.vstack([results['descriptors'], padded_descriptors])
+                else:
+                    combined_descriptors = None
+                
+                # Combine interaction points
+                combined_interaction_points = results['interaction_points'] + robust_results['interaction_points']
+                
+                # Update results
+                results = {
+                    'keypoints': combined_keypoints,
+                    'descriptors': combined_descriptors,
+                    'pixel_coords': combined_pixel_coords,
+                    'scores': combined_scores,
+                    'object_name': obj_info.name,
+                    'method': "orb+robust",
+                    'mask_area': np.sum(mask),
+                    'ids': combined_ids,
+                    'point_types': combined_types,
+                    'interaction_points': combined_interaction_points
+                }
+                
+                # Create new visualization if requested
+                if visualize:
+                    visualization = self.visualize_interest_points(
+                        image=image,
+                        obj_info=obj_info,
+                        keypoints=results['keypoints'],
+                        scores=results['scores'],
+                        method="orb+robust",
+                        max_points=max_points,
+                        descriptors=results.get('descriptors')
+                    )
+                    
+                    results['visualization'] = visualization
+                
+                if self.debug:
+                    self.profiler.stop("combined_detection")
+                    print(f"Combined detection resulted in {len(combined_keypoints)} points")
+            
+            return results
             
         except Exception as e:
             if self.debug:
-                print(f"Error in detect_object_parts: {str(e)}")
+                print(f"Error in detect_regions_of_interest: {str(e)}")
                 traceback.print_exc()
-            return {}
+            return {
+                'keypoints': [],
+                'descriptors': None,
+                'pixel_coords': [],
+                'scores': [],
+                'error': str(e)
+            }
             
         finally:
             if self.debug:
-                self.profiler.stop("detect_parts")
+                self.profiler.stop("detect_regions_of_interest")
                 self.profiler.end_iteration(preserve_current=True)
+
             
     def _generate_segmentation(
         self,
@@ -912,15 +1089,22 @@ class PerceptionSystem:
         self,
         point: Tuple[int, int],  # (x, y) pixel coordinates
         depth_image: np.ndarray,
-        region_size: int = 5  # Size of region around point to sample (half-width)
+        region_size: int = 1,  # Size of region around point to sample (half-width)
+        temporal_smoothing: bool = False,  # Enable temporal smoothing
+        smoothing_factor: float = 0.7,  # Weight for current measurement in temporal smoothing
+        edge_preservation: bool = False,  # Preserve depth edges during filtering
+        label: str = None
     ) -> Tuple[np.ndarray, float]:
         """
-        Estimate 3D position of a specific point using depth information
+        Estimate 3D position of a specific point using depth information with enhanced filtering
         
         Args:
             point: (x, y) pixel coordinates of the point
             depth_image: Depth image aligned with RGB
             region_size: Half-width of the square region to sample around the point
+            temporal_smoothing: Whether to apply temporal smoothing with previous estimates
+            smoothing_factor: Weight for current measurement (0-1), lower values = more smoothing
+            edge_preservation: Whether to apply edge-aware filtering
             
         Returns:
             Tuple containing:
@@ -929,7 +1113,6 @@ class PerceptionSystem:
         """
         if self.debug:
             self.profiler.start("_estimate_point_pose")
-        
         try:
             # Extract pixel coordinates
             pixel_x, pixel_y = point
@@ -949,15 +1132,17 @@ class PerceptionSystem:
             
             # Extract depth values in the region
             region_depths = depth_image[y_min:y_max+1, x_min:x_max+1] * self.depth_scale
-            
+            print(f"converting point to 3d {label}")
             # Filter valid depth values (non-zero and within reasonable range)
             MAX_DEPTH = 2.0  # Maximum reasonable depth in meters
             MIN_DEPTH = 0.05  # Minimum reasonable depth in meters
-            
-            valid_depths = region_depths[(region_depths > MIN_DEPTH) & (region_depths < MAX_DEPTH)]
-            
+            print(f"Region depths {region_depths}, {len(region_depths)}")
+            # Create mask of valid depths
+            valid_mask = (region_depths > MIN_DEPTH) & (region_depths < MAX_DEPTH)
+            valid_depths = region_depths[valid_mask]
+            print(f"Valid depths: {valid_depths}, {len(valid_depths)}")
             # Check if we have enough valid depth values
-            if len(valid_depths) < 3:
+            if len(valid_depths) < 1:
                 # If exact point has valid depth, use it despite few valid neighbors
                 center_depth = depth_image[pixel_y, pixel_x] * self.depth_scale
                 if MIN_DEPTH < center_depth < MAX_DEPTH:
@@ -967,8 +1152,75 @@ class PerceptionSystem:
                         print(f"Too few valid depth points for ({pixel_x}, {pixel_y}): {len(valid_depths)}")
                     return np.zeros(3), 0.0
             
-            # Calculate robust depth estimate using median (more robust to outliers than mean)
-            depth = np.median(valid_depths)
+            # Create distance weights (pixels closer to target point have higher weights)
+            if len(valid_depths) >= 3:
+                # Get coordinates of valid points
+                y_indices, x_indices = np.where(valid_mask)
+                
+                # Calculate distance from center point
+                center_y = pixel_y - y_min
+                center_x = pixel_x - x_min
+                distances = np.sqrt((y_indices - center_y)**2 + (x_indices - center_x)**2)
+                
+                # Convert distances to weights (closer points get higher weights)
+                weights = 1.0 / (distances + 0.1)  # Adding 0.1 to avoid division by zero
+                weights = weights / np.sum(weights)  # Normalize weights to sum to 1
+                
+                # Apply edge-aware filtering if enabled
+                if edge_preservation:
+                    # Calculate depth differences from center point
+                    center_depth = region_depths[center_y, center_x] if 0 <= center_y < region_depths.shape[0] and 0 <= center_x < region_depths.shape[1] else np.median(valid_depths)
+                    if center_depth < MIN_DEPTH or center_depth > MAX_DEPTH:
+                        center_depth = np.median(valid_depths)
+                    
+                    depth_diffs = np.abs(region_depths[valid_mask] - center_depth)
+                    
+                    # Calculate edge weights (smaller differences get higher weights)
+                    edge_sigma = 0.1  # Controls sensitivity to depth discontinuities
+                    edge_weights = np.exp(-depth_diffs**2 / (2 * edge_sigma**2))
+                    
+                    # Combine distance and edge weights
+                    weights = weights * edge_weights
+                    weights = weights / np.sum(weights)  # Re-normalize
+                
+                # Apply weighted median or mean
+                # Option 1: Weighted mean (faster but less robust to outliers)
+                depth = np.sum(valid_depths * weights)
+                
+                # Option 2: Weighted median (more robust but slower)
+                # Uncomment to use weighted median instead of mean
+                # sorted_indices = np.argsort(valid_depths)
+                # cumsum = np.cumsum(weights[sorted_indices])
+                # idx = np.searchsorted(cumsum, 0.5)
+                # depth = valid_depths[sorted_indices[idx]]
+                
+                # Enhanced outlier rejection using MAD (Median Absolute Deviation)
+                median_depth = np.median(valid_depths)
+                mad = np.median(np.abs(valid_depths - median_depth))
+                inlier_mask = np.abs(valid_depths - median_depth) < (3.0 * mad)  # 3.0 is a common threshold
+                
+                if np.sum(inlier_mask) >= 3:
+                    # Recalculate with outliers removed
+                    valid_depths = valid_depths[inlier_mask]
+                    if edge_preservation:
+                        weights = weights[inlier_mask]
+                        weights = weights / np.sum(weights)
+                        depth = np.sum(valid_depths * weights)
+                    else:
+                        depth = np.median(valid_depths)
+            else:
+                # Fall back to simple median for few points
+                depth = np.median(valid_depths)
+            
+            # Apply temporal smoothing if enabled and we have previous estimates
+            if temporal_smoothing and hasattr(self, '_prev_depth') and hasattr(self, '_prev_position'):
+                if self._prev_depth > 0:
+                    # Blend current and previous depth
+                    smoothed_depth = smoothing_factor * depth + (1 - smoothing_factor) * self._prev_depth
+                    depth = smoothed_depth
+            
+            # Store current depth for next frame's temporal smoothing
+            self._prev_depth = depth
             
             # Calculate confidence based on percentage of valid points and depth variance
             confidence_valid_ratio = len(valid_depths) / region_depths.size
@@ -993,6 +1245,14 @@ class PerceptionSystem:
             # Create 3D position array
             position_3d = np.array([x_3d, y_3d, z_3d])
             
+            # Store position for temporal smoothing
+            if temporal_smoothing:
+                # Apply smoothing to 3D position if we have previous position
+                if hasattr(self, '_prev_position') and np.any(self._prev_position):
+                    position_3d = smoothing_factor * position_3d + (1 - smoothing_factor) * self._prev_position
+                
+                self._prev_position = position_3d.copy()
+            
             return position_3d, confidence
             
         except Exception as e:
@@ -1006,484 +1266,6 @@ class PerceptionSystem:
                 self.profiler.stop("_estimate_point_pose")
     
     
-    def visualize_interest_points(
-        self,
-        image: np.ndarray,
-        obj_info: 'ObjectInfo',
-        keypoints: List[cv2.KeyPoint],
-        scores: List[float] = None,
-        method: str = "Unknown",
-        max_points: int = 100
-    ) -> np.ndarray:
-        """
-        Create a visualization of interest points on an object with alphabetical labels.
-        
-        Args:
-            image: Original RGB image
-            obj_info: ObjectInfo with object details including mask
-            keypoints: List of cv2.KeyPoint objects
-            scores: Optional list of scores for each keypoint
-            method: Point detection method used
-            max_points: Maximum points parameter used
-            
-        Returns:
-            Visualization image showing points of interest with alphabetical labels
-        """
-        # Create a copy of the image
-        vis_img = image.copy()
-        
-        # If no scores provided, use response from keypoints or default to 1.0
-        if scores is None:
-            scores = [kp.response if hasattr(kp, 'response') and kp.response is not None else 1.0 
-                    for kp in keypoints]
-        
-        # Ensure we have at least one keypoint
-        if not keypoints:
-            # Add a "no points detected" message
-            cv2.putText(
-                vis_img,
-                f"No interest points detected with {method}",
-                (int(image.shape[1]/2 - 200), int(image.shape[0]/2)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0, 0, 255),
-                2
-            )
-            return vis_img
-        
-        # Draw object bounding box and mask
-        if obj_info.bbox is not None:
-            x, y, w, h = obj_info.bbox
-            cv2.rectangle(vis_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        
-        # Draw semi-transparent mask if available
-        if obj_info.mask is not None:
-            mask_overlay = np.zeros_like(vis_img, dtype=np.uint8)
-            mask_overlay[obj_info.mask] = [0, 100, 0]  # Light green
-            vis_img = cv2.addWeighted(vis_img, 1.0, mask_overlay, 0.3, 0)
-        
-        # Calculate score range for coloring
-        min_score = min(scores) if scores else 0
-        max_score = max(scores) if scores else 1
-        score_range = max_score - min_score if max_score > min_score else 1
-        
-        # Create a list of keypoints with their scores for sorting
-        keypoints_with_scores = [(kp, score) for kp, score in zip(keypoints, scores)]
-        
-        # Sort by score (highest first)
-        keypoints_with_scores.sort(key=lambda x: x[1], reverse=True)
-        
-        # Limit to the maximum number of points
-        keypoints_with_scores = keypoints_with_scores[:max_points]
-        
-        # Draw keypoints with colors based on score and alphabetical labels
-        for i, (kp, score) in enumerate(keypoints_with_scores):
-            # Normalize score to [0, 1]
-            norm_score = (score - min_score) / score_range if score_range > 0 else 0.5
-            
-            # Map to color (blue to red based on score)
-            color = (
-                int(255 * (1 - norm_score)),  # B
-                0,                           # G
-                int(255 * norm_score)         # R
-            )
-            
-            # Draw circle for keypoint
-            cv2.circle(
-                vis_img, 
-                (int(kp.pt[0]), int(kp.pt[1])), 
-                radius=3, 
-                color=color, 
-                thickness=-1
-            )
-            
-            # Generate alphabetical label (a-z, then aa, ab, etc.)
-            alpha_id = get_alpha_id(i + 1)
-            
-            # Draw label
-            cv2.putText(
-                vis_img,
-                alpha_id,
-                (int(kp.pt[0]) + 5, int(kp.pt[1]) + 5),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.4,
-                (255, 255, 255),
-                1
-            )
-        
-        # Add title with method and point count
-        cv2.putText(
-            vis_img,
-            f"{method.upper()} Interest Points: {len(keypoints_with_scores)}",
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 255),
-            2
-        )
-        
-        # Add object name
-        alpha_id = obj_info.alpha_id if obj_info.alpha_id else ""
-        obj_text = f"Object: {alpha_id} {obj_info.name}"
-        cv2.putText(
-            vis_img,
-            obj_text,
-            (10, 60),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 255, 255),
-            2
-        )
-        
-        # Add method and max points info at the bottom
-        method_text = f"Method: {method.upper()}, Max Points: {max_points}"
-        cv2.putText(
-            vis_img,
-            method_text,
-            (10, vis_img.shape[0] - 20),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 255, 255),
-            2
-        )
-        
-        return vis_img
-    
-    def detect_regions_of_interest(
-        self,
-        image: np.ndarray,
-        obj_info: ObjectInfo,
-        method: str = 'orb',
-        max_points: int = 20,
-        quality_level: float = 0.01,
-        min_distance: int = 50,
-        visualize: bool = False
-    ) -> Dict[str, Any]:
-        """
-        Detect points of interest within a specific object mask.
-        
-        Args:
-            image: RGB input image
-            obj_info: ObjectInfo containing the object mask
-            method: Feature detection method ('harris', 'shi_tomasi', 'sift', 'orb', 'fast')
-            max_points: Maximum number of points to detect
-            quality_level: Quality level parameter for some detectors (0.0-1.0)
-            min_distance: Minimum distance between detected points
-            visualize: Whether to generate visualization
-            
-        Returns:
-            Dictionary containing:
-                - 'keypoints': List of cv2.KeyPoint objects
-                - 'descriptors': Descriptors if available (None for some methods)
-                - 'pixel_coords': List of (x,y) pixel coordinates
-                - 'scores': Confidence scores for each point (if available)
-                - 'visualization': Visualization image (if visualize=True)
-        """
-        if self.debug:
-            self.profiler.start_iteration()
-            self.profiler.start("detect_regions_of_interest")
-        
-        try:
-            # Check if the object has a mask
-            if obj_info.mask is None:
-                if self.debug:
-                    print(f"No mask available for object '{obj_info.name}', generating one...")
-                
-                # Generate a mask if not available
-                mask = self._generate_segmentation(image, obj_info)
-                if mask is None:
-                    # Fallback to bounding box mask
-                    if self.debug:
-                        print("Using bounding box as fallback mask")
-                    x, y, w, h = obj_info.bbox
-                    mask = np.zeros(image.shape[:2], dtype=bool)
-                    mask[y:y+h, x:x+w] = True
-            else:
-                mask = obj_info.mask
-            
-            # Convert image to grayscale
-            if len(image.shape) == 3:
-                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            else:
-                gray = image.copy()
-            
-            # Apply mask to gray image (mask everything outside object)
-            masked_gray = np.zeros_like(gray)
-            masked_gray[mask] = gray[mask]
-            
-            # Select feature detection method
-            keypoints = []
-            descriptors = None
-            
-            if self.debug:
-                self.profiler.start(f"feature_detection_{method}")
-            
-            if method.lower() == 'harris':
-                # Harris corner detector
-                # Convert mask to uint8 for cornerHarris
-                mask_uint8 = mask.astype(np.uint8) * 255
-                
-                # Detect corners
-                corner_response = cv2.cornerHarris(masked_gray, blockSize=3, ksize=3, k=0.04)
-                
-                # Normalize response
-                cv2.normalize(corner_response, corner_response, 0, 255, cv2.NORM_MINMAX)
-                corner_response = np.uint8(corner_response)
-                
-                # Threshold and find centroids
-                threshold = 0.01 * corner_response.max()
-                corner_mask = corner_response > threshold
-                
-                # Additional filtering with mask
-                corner_mask = np.logical_and(corner_mask, mask)
-                
-                # Get corner coordinates
-                corners = np.where(corner_mask)
-                
-                # Create KeyPoint objects
-                for y, x in zip(corners[0], corners[1]):
-                    response = corner_response[y, x]
-                    keypoints.append(cv2.KeyPoint(float(x), float(y), size=3, response=float(response)))
-                
-                # Sort by response and limit to max_points
-                keypoints = sorted(keypoints, key=lambda kp: kp.response, reverse=True)[:max_points]
-                
-            elif method.lower() == 'shi_tomasi':
-                # Shi-Tomasi corner detector (goodFeaturesToTrack)
-                mask_uint8 = mask.astype(np.uint8) * 255
-                corners = cv2.goodFeaturesToTrack(
-                    masked_gray, 
-                    maxCorners=max_points,
-                    qualityLevel=quality_level,
-                    minDistance=min_distance,
-                    mask=mask_uint8
-                )
-                
-                if corners is not None:
-                    for corner in corners:
-                        x, y = corner.ravel()
-                        keypoints.append(cv2.KeyPoint(float(x), float(y), size=3))
-                        
-            elif method.lower() == 'sift':
-                # SIFT detector
-                try:
-                    sift = cv2.SIFT_create(nfeatures=max_points)
-                    
-                    # Apply mask to limit detection region
-                    mask_uint8 = mask.astype(np.uint8) * 255
-                    keypoints, descriptors = sift.detectAndCompute(gray, mask=mask_uint8)
-                    
-                    # Filter out keypoints outside the mask (just to be sure)
-                    valid_keypoints = []
-                    valid_descriptors = []
-                    
-                    for i, kp in enumerate(keypoints):
-                        x, y = int(kp.pt[0]), int(kp.pt[1])
-                        if 0 <= x < mask.shape[1] and 0 <= y < mask.shape[0] and mask[y, x]:
-                            valid_keypoints.append(kp)
-                            if descriptors is not None:
-                                valid_descriptors.append(descriptors[i])
-                    
-                    keypoints = valid_keypoints
-                    if descriptors is not None and len(valid_descriptors) > 0:
-                        descriptors = np.array(valid_descriptors)
-                    else:
-                        descriptors = None
-                        
-                except Exception as e:
-                    if self.debug:
-                        print(f"SIFT detection error: {e}")
-                    # Fallback to Shi-Tomasi
-                    return self.detect_regions_of_interest(
-                        image, obj_info, method='shi_tomasi', 
-                        max_points=max_points, quality_level=quality_level, 
-                        min_distance=min_distance, visualize=visualize
-                    )
-                    
-            elif method.lower() == 'orb':
-                # ORB detector
-                try:
-                    orb = cv2.ORB_create(nfeatures=max_points, edgeThreshold=2, patchSize=2)
-                    
-                    # Apply mask to limit detection region
-                    mask_uint8 = mask.astype(np.uint8) * 255
-                    keypoints, descriptors = orb.detectAndCompute(gray, mask=mask_uint8)
-                    
-                    # Filter out keypoints outside the mask
-                    valid_keypoints = []
-                    valid_descriptors = []
-                    valid_indices = []
-                    
-                    for i, kp in enumerate(keypoints):
-                        x, y = int(kp.pt[0]), int(kp.pt[1])
-                        if 0 <= x < mask.shape[1] and 0 <= y < mask.shape[0] and mask[y, x]:
-                            valid_keypoints.append(kp)
-                            valid_indices.append(i)
-                            if descriptors is not None:
-                                valid_descriptors.append(descriptors[i])
-                    
-                    # Apply minimum distance filtering to ensure spatial distribution
-                    if min_distance > 0 and len(valid_keypoints) > 1:
-                        # Sort keypoints by response strength (strongest first)
-                        sorted_keypoints = sorted(
-                            [(i, kp) for i, kp in enumerate(valid_keypoints)], 
-                            key=lambda x: x[1].response, 
-                            reverse=True
-                        )
-                        
-                        filtered_keypoints = []
-                        filtered_descriptors = []
-                        filtered_indices = []
-                        
-                        # Always keep the strongest keypoint
-                        strongest_idx, strongest_kp = sorted_keypoints[0]
-                        filtered_keypoints.append(strongest_kp)
-                        filtered_indices.append(valid_indices[strongest_idx])
-                        if descriptors is not None:
-                            filtered_descriptors.append(valid_descriptors[strongest_idx])
-                        
-                        # For each remaining keypoint, check if it's far enough from already-selected keypoints
-                        for idx, kp in sorted_keypoints[1:]:
-                            # Check minimum distance to all previously filtered keypoints
-                            too_close = False
-                            kp_x, kp_y = kp.pt
-                            
-                            for filtered_kp in filtered_keypoints:
-                                f_x, f_y = filtered_kp.pt
-                                distance = np.sqrt((kp_x - f_x)**2 + (kp_y - f_y)**2)
-                                if distance < min_distance:
-                                    too_close = True
-                                    break
-                            
-                            if not too_close:
-                                filtered_keypoints.append(kp)
-                                filtered_indices.append(valid_indices[idx])
-                                if descriptors is not None:
-                                    filtered_descriptors.append(valid_descriptors[idx])
-                        
-                        # Update keypoints and descriptors with filtered ones
-                        keypoints = filtered_keypoints
-                        if descriptors is not None and len(filtered_descriptors) > 0:
-                            descriptors = np.array(filtered_descriptors)
-                        else:
-                            descriptors = None
-                    else:
-                        # No min_distance filtering needed
-                        keypoints = valid_keypoints
-                        if descriptors is not None and len(valid_descriptors) > 0:
-                            descriptors = np.array(valid_descriptors)
-                        else:
-                            descriptors = None
-                            
-                    if self.debug and len(keypoints) == 0:
-                        print("ORB detection found no keypoints after filtering")
-                        
-                except Exception as e:
-                    if self.debug:
-                        print(f"ORB detection error: {e}")
-                    # Fallback to Shi-Tomasi
-                    return self.detect_regions_of_interest(
-                        image, obj_info, method='shi_tomasi', 
-                        max_points=max_points, quality_level=quality_level, 
-                        min_distance=min_distance, visualize=visualize
-                    )
-                    
-            elif method.lower() == 'fast':
-                # FAST corner detector
-                try:
-                    fast = cv2.FastFeatureDetector_create(threshold=10)
-                    
-                    # Detect points in masked image
-                    keypoints = fast.detect(masked_gray, None)
-                    
-                    # Keep only points within mask (redundant but helps ensure correctness)
-                    valid_keypoints = []
-                    for kp in keypoints:
-                        x, y = int(kp.pt[0]), int(kp.pt[1])
-                        if 0 <= x < mask.shape[1] and 0 <= y < mask.shape[0] and mask[y, x]:
-                            valid_keypoints.append(kp)
-                    
-                    keypoints = valid_keypoints[:max_points]
-                    
-                    # Compute descriptors using ORB if needed
-                    if len(keypoints) > 0:
-                        orb = cv2.ORB_create()
-                        _, descriptors = orb.compute(gray, keypoints)
-                        
-                except Exception as e:
-                    if self.debug:
-                        print(f"FAST detection error: {e}")
-                    # Fallback to Shi-Tomasi
-                    return self.detect_regions_of_interest(
-                        image, obj_info, method='shi_tomasi', 
-                        max_points=max_points, quality_level=quality_level, 
-                        min_distance=min_distance, visualize=visualize
-                    )
-            else:
-                raise ValueError(f"Unsupported method: {method}")
-            
-            if self.debug:
-                self.profiler.stop(f"feature_detection_{method}")
-                print(f"Detected {len(keypoints)} keypoints using {method} method")
-            
-            # Extract pixel coordinates
-            pixel_coords = [(int(kp.pt[0]), int(kp.pt[1])) for kp in keypoints]
-            
-            # Extract scores if available
-            scores = [kp.response if hasattr(kp, 'response') else 1.0 for kp in keypoints]
-            
-            # Create visualization if requested
-            visualization = None
-            if visualize:
-                if self.debug:
-                    self.profiler.start("roi_visualization")
-                
-                # Use the dedicated visualization function
-                visualization = self.visualize_interest_points(
-                    image=image,
-                    obj_info=obj_info,
-                    keypoints=keypoints,
-                    scores=scores,
-                    method=method,
-                    max_points=max_points
-                )
-                
-                if self.debug:
-                    self.profiler.stop("roi_visualization")
-            
-            # Create results dictionary
-            results = {
-                'keypoints': keypoints,
-                'descriptors': descriptors,
-                'pixel_coords': pixel_coords,
-                'scores': scores,
-                'object_name': obj_info.name,
-                'method': method,
-                'mask_area': np.sum(mask),
-                'ids': [get_alpha_id(i) for i in range(len(keypoints))]
-            }
-            
-            if visualize:
-                results['visualization'] = visualization
-                
-            return results
-            
-        except Exception as e:
-            if self.debug:
-                print(f"Error in detect_regions_of_interest: {str(e)}")
-                traceback.print_exc()
-            return {
-                'keypoints': [],
-                'descriptors': None,
-                'pixel_coords': [],
-                'scores': [],
-                'error': str(e)
-            }
-            
-        finally:
-            if self.debug:
-                self.profiler.stop("detect_regions_of_interest")
-                self.profiler.end_iteration(preserve_current=True)
     
     def visualize_detections(
         self,
@@ -1885,6 +1667,176 @@ class PerceptionSystem:
             if self.debug:
                 self.profiler.stop("detect_surfaces")
                 self.profiler.end_iteration(preserve_current=True)
+
+
+    def calculate_surface_normal(
+        self,
+        depth_image: np.ndarray,
+        mask: np.ndarray,
+        method: str = 'ransac',
+        max_plane_distance: float = 0.01,
+        ransac_iterations: int = 100,
+        sample_count: int = 1000
+    ) -> Tuple[np.ndarray, float]:
+        """
+        Calculate the surface normal for a given mask using the depth image
+        
+        Args:
+            depth_image: Depth image aligned with RGB
+            mask: Binary mask of the surface area
+            method: Method to use for normal calculation ('ransac' or 'pca')
+            max_plane_distance: Maximum distance for a point to be considered inlier (meters)
+            ransac_iterations: Number of RANSAC iterations
+            sample_count: Maximum number of points to sample (for efficiency)
+            
+        Returns:
+            Tuple containing:
+            - Normal vector as a 3D unit vector [nx, ny, nz]
+            - Confidence value (0-1) based on inlier ratio
+        """
+        if self.debug:
+            self.profiler.start("calculate_surface_normal")
+        
+        try:
+            # Ensure mask and depth image have same dimensions
+            if mask.shape != depth_image.shape:
+                # Resize mask to match depth image dimensions
+                mask = cv2.resize(
+                    mask.astype(np.uint8),
+                    (depth_image.shape[1], depth_image.shape[0]),
+                    interpolation=cv2.INTER_NEAREST
+                ).astype(bool)
+            
+            # Get masked points
+            y_coords, x_coords = np.where(mask)
+            if len(y_coords) < 10:  # Need at least 10 points for reliable estimation
+                if self.debug:
+                    print(f"Too few points in mask: {len(y_coords)}")
+                return np.array([0, 0, 1]), 0.0  # Default to upward normal with zero confidence
+            
+            # Get corresponding depth values
+            depth_values = depth_image[y_coords, x_coords] * self.depth_scale
+            
+            # Filter out invalid depth values
+            valid = (depth_values > 0.05) & (depth_values < 10.0)  # 5cm to 10m range
+            if np.sum(valid) < 10:
+                if self.debug:
+                    print(f"Too few valid depth points: {np.sum(valid)}/{len(depth_values)}")
+                return np.array([0, 0, 1]), 0.0
+            
+            # Use filtered values
+            x_coords = x_coords[valid]
+            y_coords = y_coords[valid]
+            depth_values = depth_values[valid]
+            
+            # If we have too many points, sample a subset for efficiency
+            if len(depth_values) > sample_count:
+                indices = np.random.choice(len(depth_values), sample_count, replace=False)
+                x_coords = x_coords[indices]
+                y_coords = y_coords[indices]
+                depth_values = depth_values[indices]
+            
+            # Convert to 3D points
+            points_3d = np.zeros((len(x_coords), 3))
+            points_3d[:, 0] = (x_coords - self.cx) * depth_values / self.fx
+            points_3d[:, 1] = (y_coords - self.cy) * depth_values / self.fy
+            points_3d[:, 2] = depth_values
+            
+            # Use method selected to calculate normal
+            if method == 'ransac':
+                # RANSAC plane fitting
+                best_inliers = 0
+                best_normal = np.array([0, 0, 1])  # Default to upward normal
+                best_d = 0
+                
+                # Run RANSAC iterations
+                for _ in range(ransac_iterations):
+                    # Sample 3 random points
+                    sample_indices = np.random.choice(len(points_3d), 3, replace=False)
+                    p1, p2, p3 = points_3d[sample_indices]
+                    
+                    # Calculate normal from cross product of two vectors in the plane
+                    v1 = p2 - p1
+                    v2 = p3 - p1
+                    normal = np.cross(v1, v2)
+                    
+                    # Skip if normal is too small (collinear points)
+                    normal_length = np.linalg.norm(normal)
+                    if normal_length < 1e-6:
+                        continue
+                    
+                    # Normalize the normal vector
+                    normal = normal / normal_length
+                    
+                    # Calculate d in the plane equation ax + by + cz + d = 0
+                    d = -np.dot(normal, p1)
+                    
+                    # Count inliers
+                    distances = np.abs(np.dot(points_3d, normal) + d)
+                    inliers = np.sum(distances < max_plane_distance)
+                    
+                    if inliers > best_inliers:
+                        best_inliers = inliers
+                        best_normal = normal
+                        best_d = d
+                
+                # Calculate confidence as inlier ratio
+                confidence = best_inliers / len(points_3d)
+                
+                # Ensure normal points toward camera (positive z)
+                if best_normal[2] < 0:
+                    best_normal = -best_normal
+                
+                return best_normal, confidence
+                
+            elif method == 'pca':
+                # PCA-based normal estimation
+                # Compute the centroid
+                centroid = np.mean(points_3d, axis=0)
+                
+                # Center the points
+                centered_points = points_3d - centroid
+                
+                # Compute covariance matrix
+                cov = np.dot(centered_points.T, centered_points) / centered_points.shape[0]
+                
+                # Compute eigenvalues and eigenvectors
+                eigenvalues, eigenvectors = np.linalg.eigh(cov)
+                
+                # The normal is the eigenvector corresponding to the smallest eigenvalue
+                normal = eigenvectors[:, 0]
+                
+                # Ensure normal points toward camera (positive z)
+                if normal[2] < 0:
+                    normal = -normal
+                
+                # Normalize the vector
+                normal = normal / np.linalg.norm(normal)
+                
+                # Calculate confidence based on eigenvalue ratio
+                # If smallest eigenvalue is much smaller than others, the surface is more planar
+                if eigenvalues[1] > 0:
+                    planarity = 1.0 - (eigenvalues[0] / eigenvalues[1])
+                    confidence = min(1.0, max(0.0, planarity))
+                else:
+                    confidence = 0.0
+                
+                return normal, confidence
+            
+            else:
+                if self.debug:
+                    print(f"Unknown normal calculation method: {method}")
+                return np.array([0, 0, 1]), 0.0
+                
+        except Exception as e:
+            if self.debug:
+                print(f"Error in calculate_surface_normal: {str(e)}")
+                traceback.print_exc()
+            return np.array([0, 0, 1]), 0.0
+            
+        finally:
+            if self.debug:
+                self.profiler.stop("calculate_surface_normal")
                            
     def segment_surfaces_by_plane_fitting(
         self,
@@ -1913,322 +1865,6 @@ class PerceptionSystem:
             # First detect initial surface masks
             initial_surfaces = self.detect_object_surfaces(image, obj_info, depth_image=depth_image)
             return initial_surfaces
-            if not initial_surfaces:
-                if self.debug:
-                    print("No initial surfaces detected")
-                return {}
-            
-            # Store surface normals in the obj_info
-            if not hasattr(obj_info, 'surface_normals'):
-                obj_info.surface_normals = {}
-                
-            # Get camera intrinsics
-            fx = self.fx
-            fy = self.fy
-            cx = self.cx
-            cy = self.cy
-            
-            refined_surfaces = {}
-            plane_count = 0
-            
-            # Process each detected surface
-            for surface_id, surface_mask in initial_surfaces.items():
-                if self.debug:
-                    print(f"Processing surface {surface_id}")
-                    
-                # Get points corresponding to this surface
-                y_coords, x_coords = np.where(surface_mask)
-                
-                if len(y_coords) < min_points_per_plane:
-                    if self.debug:
-                        print(f"Surface {surface_id} has too few points: {len(y_coords)}")
-                    refined_surfaces[surface_id] = surface_mask  # Keep the original mask
-                    continue
-                
-                # Downsample points for speed
-                if downsample_factor > 1:
-                    # Use systematic sampling instead of random
-                    indices = np.arange(0, len(y_coords), downsample_factor)
-                    y_coords = y_coords[indices]
-                    x_coords = x_coords[indices]
-                    
-                    if len(y_coords) < min_points_per_plane:
-                        # If downsampling leaves too few points, adjust the factor
-                        downsample_factor = max(1, len(y_coords) // min_points_per_plane)
-                        indices = np.arange(0, len(y_coords), downsample_factor)
-                        y_coords = y_coords[indices]
-                        x_coords = x_coords[indices]
-                
-                # Pre-allocate arrays for speed
-                surface_points = np.zeros((len(y_coords), 3), dtype=np.float32)
-                valid_mask = np.zeros(len(y_coords), dtype=bool)
-                
-                # Vectorized depth to point cloud conversion
-                depth_values = depth_image[y_coords, x_coords] * self.depth_scale
-                
-                # Filter valid depths
-                valid_mask = (depth_values > 0.001) & (depth_values < 2.0)
-                
-                if np.sum(valid_mask) < min_points_per_plane:
-                    if self.debug:
-                        print(f"Surface {surface_id} has too few valid points: {np.sum(valid_mask)}")
-                    refined_surfaces[surface_id] = surface_mask
-                    continue
-                
-                # Only process valid points
-                valid_y = y_coords[valid_mask]
-                valid_x = x_coords[valid_mask]
-                valid_depths = depth_values[valid_mask]
-                
-                # Vectorized conversion to 3D
-                surface_points = np.column_stack([
-                    (valid_x - cx) * valid_depths / fx,
-                    (valid_y - cy) * valid_depths / fy,
-                    valid_depths
-                ])
-                
-                # Create mapping from point indices to pixel coordinates
-                pixel_indices = np.arange(len(valid_y))
-                pixel_map = list(zip(valid_y, valid_x))
-                
-                # Use Open3D for faster plane segmentation if available
-                try:
-                    import open3d as o3d
-                    
-                    # Create Open3D point cloud
-                    pcd = o3d.geometry.PointCloud()
-                    pcd.points = o3d.utility.Vector3dVector(surface_points)
-                    
-                    # Use Open3D's built-in plane segmentation
-                    remaining_points = surface_points
-                    remaining_indices = pixel_indices
-                    remaining_pixel_map = pixel_map
-                    
-                    plane_masks = []
-                    plane_normals = []
-                    plane_centroids = []
-                    
-                    for _ in range(max_planes_per_surface):
-                        if len(remaining_points) < min_points_per_plane:
-                            break
-                            
-                        # Create Open3D point cloud from remaining points
-                        current_pcd = o3d.geometry.PointCloud()
-                        current_pcd.points = o3d.utility.Vector3dVector(remaining_points)
-                        
-                        # Use Open3D's plane segmentation (much faster than manual RANSAC)
-                        plane_model, inliers = current_pcd.segment_plane(
-                            distance_threshold=max_plane_distance,
-                            ransac_n=3,
-                            num_iterations=ransac_iterations
-                        )
-                        
-                        if len(inliers) < min_points_per_plane:
-                            break
-                            
-                        # Extract plane parameters and inlier points
-                        a, b, c, d = plane_model
-                        normal = np.array([a, b, c])
-                        
-                        # Ensure normal points towards camera
-                        if normal[2] > 0:
-                            normal = -normal
-                            
-                        inlier_points = np.asarray(current_pcd.points)[inliers]
-                        centroid = np.mean(inlier_points, axis=0)
-                        
-                        # Create mask for these inlier points
-                        plane_mask = np.zeros_like(surface_mask, dtype=bool)
-                        inlier_coords = [remaining_pixel_map[i] for i in inliers]
-                        for y, x in inlier_coords:
-                            plane_mask[y, x] = True
-                        
-                        # Check for similar existing planes
-                        should_merge = False
-                        merge_idx = -1
-                        
-                        for i, existing_normal in enumerate(plane_normals):
-                            # Calculate cosine similarity
-                            similarity = np.abs(np.dot(normal, existing_normal))
-                            
-                            if similarity > normal_similarity_threshold:
-                                # Planes have similar orientation
-                                should_merge = True
-                                merge_idx = i
-                                break
-                        
-                        if should_merge:
-                            # Merge with existing plane
-                            plane_masks[merge_idx] = plane_masks[merge_idx] | plane_mask
-                            
-                            # Update centroid
-                            existing_count = np.sum(plane_masks[merge_idx])
-                            new_count = np.sum(plane_mask)
-                            total_count = existing_count + new_count
-                            
-                            plane_centroids[merge_idx] = (
-                                (existing_count * plane_centroids[merge_idx] + 
-                                new_count * centroid) / total_count
-                            )
-                        else:
-                            # Add as a new plane
-                            plane_masks.append(plane_mask)
-                            plane_normals.append(normal)
-                            plane_centroids.append(centroid)
-                        
-                        # Remove inliers from remaining points
-                        non_inliers = np.ones(len(remaining_points), dtype=bool)
-                        non_inliers[inliers] = False
-                        remaining_points = remaining_points[non_inliers]
-                        remaining_indices = remaining_indices[non_inliers]
-                        remaining_pixel_map = [remaining_pixel_map[i] for i in range(len(remaining_pixel_map)) if non_inliers[i]]
-                    
-                except ImportError:
-                    # Fallback to optimized numpy-based RANSAC if Open3D is not available
-                    remaining_points = np.ones(len(surface_points), dtype=bool)
-                    plane_masks = []
-                    plane_normals = []
-                    plane_centroids = []
-                    
-                    for plane_idx in range(max_planes_per_surface):
-                        # Stop if too few points remain
-                        if np.sum(remaining_points) < min_points_per_plane:
-                            break
-                            
-                        # Get current points
-                        current_points = surface_points[remaining_points]
-                        current_indices = pixel_indices[remaining_points]
-                        
-                        # Fast RANSAC implementation with early stopping
-                        best_inliers = None
-                        best_normal = None
-                        most_inliers = min_points_per_plane  # Set threshold for early stopping
-                        min_samples = 3
-                        
-                        # Pre-select random samples for speed
-                        if len(current_points) > min_samples:
-                            sample_indices = np.random.choice(
-                                len(current_points), 
-                                min_samples * ransac_iterations, 
-                                replace=True
-                            ).reshape(ransac_iterations, min_samples)
-                        else:
-                            break
-                        
-                        for i in range(ransac_iterations):
-                            # Get sample points
-                            idx = sample_indices[i]
-                            p1, p2, p3 = current_points[idx]
-                            
-                            # Calculate plane normal
-                            v1 = p2 - p1
-                            v2 = p3 - p1
-                            normal = np.cross(v1, v2)
-                            norm = np.linalg.norm(normal)
-                            
-                            # Skip if points are collinear
-                            if norm < 1e-6:
-                                continue
-                                
-                            normal = normal / norm
-                            d = -np.dot(normal, p1)
-                            
-                            # Calculate distances (vectorized)
-                            distances = np.abs(np.dot(current_points, normal) + d)
-                            inliers = distances < max_plane_distance
-                            num_inliers = np.sum(inliers)
-                            
-                            if num_inliers > most_inliers:
-                                most_inliers = num_inliers
-                                best_inliers = inliers
-                                best_normal = normal
-                                
-                                # Early stopping if we found a good plane
-                                if num_inliers > len(current_points) * 0.8:
-                                    break
-                        
-                        # If no good plane found, stop
-                        if best_inliers is None:
-                            break
-                        
-                        # Calculate centroid and refine normal
-                        inlier_points = current_points[best_inliers]
-                        centroid = np.mean(inlier_points, axis=0)
-                        
-                        # Create mask for these inlier points
-                        inlier_indices = current_indices[best_inliers]
-                        plane_mask = np.zeros_like(surface_mask, dtype=bool)
-                        for idx in inlier_indices:
-                            y, x = pixel_map[idx]
-                            plane_mask[y, x] = True
-                        
-                        # Check for similar existing planes
-                        should_merge = False
-                        merge_idx = -1
-                        
-                        for i, existing_normal in enumerate(plane_normals):
-                            similarity = np.abs(np.dot(best_normal, existing_normal))
-                            if similarity > normal_similarity_threshold:
-                                should_merge = True
-                                merge_idx = i
-                                break
-                        
-                        if should_merge:
-                            # Merge with existing plane
-                            plane_masks[merge_idx] = plane_masks[merge_idx] | plane_mask
-                            
-                            # Update centroid
-                            existing_count = np.sum(plane_masks[merge_idx])
-                            new_count = np.sum(plane_mask)
-                            total_count = existing_count + new_count
-                            
-                            plane_centroids[merge_idx] = (
-                                (existing_count * plane_centroids[merge_idx] + 
-                                new_count * centroid) / total_count
-                            )
-                        else:
-                            # Add as a new plane
-                            plane_masks.append(plane_mask)
-                            plane_normals.append(best_normal)
-                            plane_centroids.append(centroid)
-                        
-                        # Mark these points as processed
-                        current_remaining = np.where(remaining_points)[0]
-                        remaining_points[current_remaining[best_inliers]] = False
-                
-                # Add planes to output dictionary
-                if len(plane_masks) > 0:
-                    # If we found multiple planes, create new entries
-                    if len(plane_masks) > 1:
-                        for i, (mask, normal, centroid) in enumerate(zip(plane_masks, plane_normals, plane_centroids)):
-                            plane_count += 1
-                            alpha_id = get_alpha_id(plane_count)
-                            plane_id = f"surface_{alpha_id}"
-                            
-                            # Add to refined surfaces
-                            refined_surfaces[plane_id] = mask
-                            
-                            # Store normal information
-                            obj_info.surface_normals[plane_id] = {
-                                'normal': normal,
-                                'centroid': centroid,
-                                'parent_surface': surface_id
-                            }
-                    else:
-                        # Single plane - keep original ID
-                        refined_surfaces[surface_id] = plane_masks[0]
-                        
-                        # Store normal information
-                        obj_info.surface_normals[surface_id] = {
-                            'normal': plane_normals[0],
-                            'centroid': plane_centroids[0],
-                            'parent_surface': None
-                        }
-                else:
-                    # No planes found - keep original surface
-                    refined_surfaces[surface_id] = surface_mask
-            
-            return refined_surfaces
             
         except Exception as e:
             if self.debug:

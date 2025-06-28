@@ -52,7 +52,7 @@ class SkillGenerator:
         self.image_dir.mkdir(exist_ok=True)
         self.skills_cache: Dict[str, Skill] = {}
         self.debug = False
-        self._load_stored_skills()
+        # self._load_stored_skills()
 
     def _load_stored_skills(self):
         """Load previously stored skills from disk"""
@@ -220,12 +220,14 @@ class SkillGenerator:
             image: np.ndarray, 
             obj_info: ObjectInfo,
             points: Dict[str, Any] = None,
-            top_n_surfaces: int = 5  # Number of most confident surface masks to visualize
+            top_n_surfaces: int = 5,  # Number of most confident surface masks to visualize
+            image_id = None
         ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Create two separate visualizations:
+        Create three separate visualizations:
         1. Image with surface masks and their normals as arrows
         2. Points of interest visualization
+        3. Depth visualization with small point markers (saved locally)
         
         Args:
             image: Input image
@@ -237,34 +239,28 @@ class SkillGenerator:
             Tuple of (surface_img, points_img)
         """
         h, w = image.shape[:2]
+
+        # Ensure mask has same dimensions as visualization image
+        if obj_info.mask is not None and obj_info.mask.shape[:2] != (h, w):
+            obj_info.mask = cv2.resize(
+                obj_info.mask.astype(np.uint8),
+                (w, h),
+                interpolation=cv2.INTER_NEAREST
+            ).astype(bool)
+        
+        # Ensure all surface masks have same dimensions as visualization image
+        if obj_info.surface_masks is not None:
+            for surface_name in list(obj_info.surface_masks.keys()):
+                surface_mask = obj_info.surface_masks[surface_name]
+                if surface_mask.shape[:2] != (h, w):
+                    obj_info.surface_masks[surface_name] = cv2.resize(
+                        surface_mask.astype(np.uint8),
+                        (w, h),
+                        interpolation=cv2.INTER_NEAREST
+                    ).astype(bool)
         
         # Create the first image: Surface masks overlay with normals
         surface_img = image.copy()
-        
-        # Draw object mask as a semi-transparent overlay
-        if obj_info.mask is not None:
-            mask_overlay = np.zeros_like(surface_img, dtype=np.uint8)
-            mask_overlay[obj_info.mask] = [0, 255, 0]  # Green for object mask
-            surface_img = cv2.addWeighted(surface_img, 1.0, mask_overlay, 0.2, 0)
-            
-            # Draw object label with alphabetical ID
-            alpha_id = obj_info.alpha_id if obj_info.alpha_id else get_alpha_id(obj_info.id)
-            # Find centroid of the object mask for label placement
-            y_coords, x_coords = np.where(obj_info.mask)
-            if len(y_coords) > 0:
-                centroid_y = int(np.mean(y_coords))
-                centroid_x = int(np.mean(x_coords))
-                
-                # Add object ID and name at centroid
-                cv2.putText(
-                    surface_img,
-                    f"{alpha_id}: {obj_info.name}",
-                    (centroid_x, centroid_y),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 0, 0),  # Black text
-                    2
-                )
         
         # Check if depth image is available in obj_info
         has_depth = hasattr(obj_info, 'depth_image') and obj_info.depth_image is not None
@@ -313,80 +309,28 @@ class SkillGenerator:
                         alpha_id = surface_name.split("_")[1]
                     else:
                         alpha_id = get_alpha_id(idx + 1)
-                    
-                    # Calculate normal for this surface using depth if available
-                    if has_depth:
-                        normal = self._calculate_surface_normals(
-                            surface_mask, 
-                            obj_info.depth_image,
-                            getattr(obj_info, 'camera_intrinsics', None)
-                        )
-                    else:
-                        # Fallback to PCA-based estimation without depth
-                        from sklearn.decomposition import PCA
-                        
-                        # Find coordinates of points in the mask
-                        surf_y, surf_x = np.where(surface_mask)
-                        
-                        if len(surf_y) >= 10:  # Enough points for PCA
-                            # Create points array with z-coordinate estimated as constant
-                            points = np.column_stack((surf_x, surf_y, np.ones_like(surf_x)))
-                            
-                            # Fit PCA to find the principal components
-                            pca = PCA(n_components=3)
-                            pca.fit(points)
-                            
-                            # The normal is perpendicular to the first two principal components
-                            normal = pca.components_[2]
-                            
-                            # Ensure the normal points toward the camera (positive z direction)
-                            if normal[2] < 0:
-                                normal = -normal
-                                
-                            # Normalize the vector
-                            normal = normal / np.linalg.norm(normal)
-                            normal = tuple(normal)
-                        else:
-                            normal = (0, 0, 1)  # Default to pointing out from camera
-                    
-                    # Project normal to image plane
-                    arrow_end = self._project_normal_to_image(
-                        normal, centroid_x, centroid_y, arrow_length=40
-                    )
-                    
-                    # Draw normal as an arrow
-                    cv2.arrowedLine(
-                        surface_img,
-                        (centroid_x, centroid_y),
-                        arrow_end,
-                        color_map[color_idx],
-                        2,
-                        tipLength=0.3
-                    )
-                    
-                    # Add surface ID at centroid
                     cv2.putText(
                         surface_img,
                         alpha_id,
                         (centroid_x, centroid_y),
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
+                        0.5,
+                        (0, 0, 0),  # White text
+                        4
+                    )
+                    
+                    # # Add surface ID at centroid
+                    cv2.putText(
+                        surface_img,
+                        alpha_id,
+                        (centroid_x, centroid_y),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
                         (255, 255, 255),  # White text
                         2
                     )
                     
-                    # Add normal vector information
-                    normal_text = f"n: ({normal[0]:.2f}, {normal[1]:.2f}, {normal[2]:.2f})"
-                    cv2.putText(
-                        surface_img,
-                        normal_text,
-                        (centroid_x + 5, centroid_y + 20),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.4,
-                        (255, 255, 255),  # White text
-                        1
-                    )
-            
+                    
             # Add surface overlay with transparency
             surface_img = cv2.addWeighted(surface_img, 1.0, surface_overlay, 0.3, 0)
             
@@ -466,15 +410,28 @@ class SkillGenerator:
                     if not point_id.isalpha():
                         # If ID is not already alphabetical, generate one
                         point_id = get_alpha_id(i + 1)
-                        
+                    
                     cv2.putText(
                         points_img,
-                        point_id,
-                        (px, py),
+                        alpha_id,
+                        (px, py ),
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
+                        0.6,
+                        (0, 0, 0),
+                        4,
+                        cv2.LINE_AA
+                    )
+                    
+                    # Draw label
+                    cv2.putText(
+                        points_img,
+                        alpha_id,
+                        (px, py ),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
                         (255, 255, 255),
-                        1
+                        2,
+                        cv2.LINE_AA
                     )
                     
                     
@@ -499,7 +456,17 @@ class SkillGenerator:
                         alpha_id = label
                     
                     # Draw circle for point
-                    cv2.circle(points_img, (px, py), 5, (0, 0, 255), -1)
+                    cv2.circle(points_img, (px, py), 5, (0, 0, 255), 2)
+                    cv2.putText(
+                        points_img,
+                        alpha_id,
+                        (px, py ),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (0, 0, 0),
+                        4,
+                        cv2.LINE_AA
+                    )
                     
                     # Draw label
                     cv2.putText(
@@ -507,9 +474,10 @@ class SkillGenerator:
                         alpha_id,
                         (px, py ),
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.9,
+                        0.6,
                         (255, 255, 255),
-                        2
+                        1,
+                        cv2.LINE_AA
                     )
         
         # Add title to the points image
@@ -523,30 +491,162 @@ class SkillGenerator:
             2
         )
         
-        # Add object name and ID
-        alpha_id = obj_info.alpha_id if obj_info.alpha_id else get_alpha_id(obj_info.id)
-        obj_text = f"Object: {alpha_id} {obj_info.name}"
-        cv2.putText(
-            points_img,
-            obj_text,
-            (10, 60),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 255, 255),
-            2
-        )
-        
-        # If depth is available, add this information
-        if has_depth:
+        # Create the third image: Depth visualization with points
+        depth_img = None
+        if hasattr(obj_info, 'depth_image') and obj_info.depth_image is not None:
+            # Normalize depth for visualization
+            depth = obj_info.depth_image.copy()
+            
+            # Handle potential NaN or inf values
+            depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            # Normalize to 0-1 range for valid depth values
+            valid_mask = depth > 0
+            if np.any(valid_mask):
+                min_val = np.min(depth[valid_mask])
+                max_val = np.max(depth[valid_mask])
+                
+                # Avoid division by zero
+                if max_val > min_val:
+                    # Apply contrast enhancement with histogram equalization
+                    # Convert to 8-bit for histogram equalization
+                    depth_8bit = np.zeros_like(depth, dtype=np.uint8)
+                    depth_8bit[valid_mask] = (255 * (depth[valid_mask] - min_val) / (max_val - min_val)).astype(np.uint8)
+                    
+                    # Apply histogram equalization to enhance contrast
+                    depth_eq = cv2.equalizeHist(depth_8bit)
+                    
+                    # Use PLASMA or VIRIDIS colormap for better depth perception
+                    colorized_depth = cv2.applyColorMap(depth_eq, cv2.COLORMAP_PLASMA)
+                    
+                    # Create base visualization
+                    depth_img = colorized_depth.copy()
+                    
+                    # Add contour lines for better depth boundaries
+                    # Calculate normalized depth for contour generation
+                    normalized_depth = np.zeros_like(depth)
+                    normalized_depth[valid_mask] = (depth[valid_mask] - min_val) / (max_val - min_val)
+                    
+                    # Generate contours at regular intervals
+                    contour_levels = 10  # Number of contour levels
+                    for i in range(1, contour_levels):
+                        level = i / contour_levels
+                        contour_mask = np.logical_and(
+                            normalized_depth >= (level - 0.01), 
+                            normalized_depth <= (level + 0.01)
+                        )
+                        depth_img[contour_mask] = (255, 255, 255)  # White contour lines
+                    
+                    # Add colorbar on the right side
+                    colorbar_width = 30
+                    colorbar = np.zeros((h, colorbar_width, 3), dtype=np.uint8)
+                    for i in range(h):
+                        # Map position to color
+                        norm_pos = 1.0 - (i / h)
+                        colorbar[i, :, :] = cv2.applyColorMap(
+                            np.array([[int(norm_pos * 255)]], dtype=np.uint8), 
+                            cv2.COLORMAP_PLASMA
+                        )[0, 0, :]
+                    
+                    # Add depth values to the colorbar
+                    for i in range(0, 6):
+                        y_pos = int(h * (5-i) / 5)
+                        depth_val = min_val + (i / 5) * (max_val - min_val)
+                        cv2.putText(
+                            colorbar,
+                            f"{depth_val:.0f}",
+                            (2, y_pos), 
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.4,
+                            (255, 255, 255),
+                            1
+                        )
+                    
+                    # Combine image and colorbar
+                    combined_width = w + colorbar_width
+                    depth_with_colorbar = np.zeros((h, combined_width, 3), dtype=np.uint8)
+                    depth_with_colorbar[:, :w, :] = depth_img
+                    depth_with_colorbar[:, w:, :] = colorbar
+                    
+                    depth_img = depth_with_colorbar
+                    
+                    # Add title and depth range information
+                    cv2.putText(
+                        depth_img,
+                        "Depth Visualization",
+                        (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (255, 255, 255),
+                        2
+                    )
+                    
+                    cv2.putText(
+                        depth_img,
+                        f"Depth range: {min_val:.2f} to {max_val:.2f}",
+                        (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (255, 255, 255),
+                        1
+                    )
+                    
+                    # Draw points of interest if provided (with smaller markers and no labels)
+                    if points is not None and len(points) > 0:
+                        # If 'pixel_coords' is in points, use that
+                        if 'pixel_coords' in points and points['pixel_coords']:
+                            pixel_coords = points['pixel_coords']
+                            
+                            # Draw each point with a small white circle with black outline for visibility
+                            for px, py in pixel_coords:
+                                # Black outline
+                                cv2.circle(
+                                    depth_img, 
+                                    (px, py), 
+                                    radius=4,  
+                                    color=(0, 0, 0),  # Black
+                                    thickness=2  
+                                )
+                                # White center
+                                cv2.circle(
+                                    depth_img, 
+                                    (px, py), 
+                                    radius=3,  
+                                    color=(255, 255, 255),  # White
+                                    thickness=1  
+                                )
+                        else:
+                            # Handle dictionary of named points (original format)
+                            for label, point in points.items():
+                                if hasattr(point, 'position'):
+                                    # Handle PointOfInterest objects
+                                    # Convert normalized coordinates to pixel coordinates if needed
+                                    if max(point.position) <= 1.0:
+                                        px, py = int(point.position[0] * w), int(point.position[1] * h)
+                                    else:
+                                        px, py = int(point.position[0]), int(point.position[1])
+                                else:
+                                    # Handle direct (x,y) tuples
+                                    px, py = int(point[0]), int(point[1])
+                                
+                                # Draw small circle with black outline for visibility
+                                cv2.circle(depth_img, (px, py), 4, (0, 0, 0), 2)  # Black outline
+                                cv2.circle(depth_img, (px, py), 3, (255, 255, 255), 1)  # White center
+
+        # If depth image is not available, create a placeholder with a message
+        if depth_img is None:
+            depth_img = np.zeros_like(image)
             cv2.putText(
-                points_img,
-                "Depth data available",
-                (10, 80),
+                depth_img,
+                "Depth data not available",
+                (int(w/2) - 100, int(h/2)),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
+                0.7,
                 (255, 255, 255),
-                1
+                2
             )
+        
+        self._save_image(depth_img, f"depth_image_{image_id}")
         
         return surface_img, points_img
     
@@ -677,7 +777,8 @@ class SkillGenerator:
                     points_of_interest: Dict[str, Any],
                     abstract_action: str,
                     target_object: str,
-                    object_info: Optional[ObjectInfo] = None) -> Optional[Skill]:
+                    object_info: Optional[ObjectInfo] = None,
+                    ) -> Optional[Skill]:
         """
         Generate a new skill using the LLM interface based on image input with labeled points and surfaces
         
@@ -691,22 +792,6 @@ class SkillGenerator:
         Returns:
             Generated skill if successful, None otherwise
         """
-        if object_info is None:
-            if self.debug:
-                self.get_logger().warn("No object_info provided for skill generation, visualizations will be limited")
-            # Create dummy object_info for visualization
-            object_info = ObjectInfo(
-                id=0,
-                name=target_object,
-                mask=None,
-                bbox=None,
-                surface_masks=None
-            )
-            # Create visualization of just points of interest (legacy mode)
-            surface_img, points_img = self._visualize_points_of_interest(image, object_info, points_of_interest)
-        else:
-            # Create the separate visualizations for surfaces with normals and points
-            surface_img, points_img = self._visualize_points_of_interest(image, object_info, points_of_interest)
         
         # Generate unique ID for this image
         timestamp = int(time.time())
@@ -721,6 +806,22 @@ class SkillGenerator:
         
         image_id = f"{abstract_action}_{target_object}_{timestamp}_{point_hash:06x}"
         
+        if object_info is None:
+            if self.debug:
+                self.get_logger().warn("No object_info provided for skill generation, visualizations will be limited")
+            # Create dummy object_info for visualization
+            object_info = ObjectInfo(
+                id=0,
+                name=target_object,
+                mask=None,
+                bbox=None,
+                surface_masks=None
+            )
+            # Create visualization of just points of interest (legacy mode)
+            surface_img, points_img = self._visualize_points_of_interest(image, object_info, points_of_interest, image_id=image_id)
+        else:
+            # Create the separate visualizations for surfaces with normals and points
+            surface_img, points_img = self._visualize_points_of_interest(image, object_info, points_of_interest,image_id=image_id)
         # Save each visualization separately
         surface_img_path = self._save_image(surface_img, f"surface_{image_id}")
         points_img_path = self._save_image(points_img, f"points_{image_id}")
@@ -779,161 +880,146 @@ class SkillGenerator:
                     # Normalize coordinates for description
                     norm_x, norm_y = centroid_x / image.shape[1], centroid_y / image.shape[0]
                     
-                    desc = f"Surface {alpha_id}: Normal vector ({normal[0]:.2f}, {normal[1]:.2f}, {normal[2]:.2f}), covers {area_percentage:.1f}% of image area"
+                    desc = f"Surface {alpha_id}"
                     surface_descriptions.append(desc)
         
         # Create prompt for skill definition
-        combined_prompt = [{"role": "system", "content": f"""Analyze the object visually and generate a complete skill definition for performing {abstract_action} on a {target_object}.
+        combined_prompt = [
+            {
+                "role": "system",
+                "content": f"""You are a grounded visual skill planner.
 
-                    You will be provided with two separate visualizations:
-                    1. FIRST IMAGE: The object with surface segments highlighted in different colors, each with an alphabetical label and normal vectors shown as arrows
-                    2. SECOND IMAGE: The same object with points of interest marked by colored circles, each with an alphabetical label
+                Your task is to generate a complete, structured skill definition for performing **{abstract_action}** on a **{target_object}**, using only the provided visual inputs.
 
+                --- VISUAL INPUT FORMAT ---
+                You are provided with two images:
+                1. **FIRST IMAGE** – Surface segments (labeled a, b, c...) with **normal vectors** shown as arrows.
+                2. **SECOND IMAGE** – Points of interest (labeled a, b, c...) indicated with colored circles.
 
-                    First, determine the specific subtype of the action based on the object's visual characteristics.
-                    The skill name should follow the format: action_targetobject_mechanism
+                SURFACE LABELS → FIRST IMAGE ONLY  
+                POINT LABELS → SECOND IMAGE ONLY  
 
-                    AVAILABLE ACTION PRIMITIVES AND PARAMETERS:
+                {surface_descriptions}
 
-                    1. move_gripper_to_pose('point_label', is_top_down_grasp, is_side_grasp)
-                    - point_label: The labeled point (a, b, c, etc.) from the SECOND IMAGE where the gripper will move
-                    - is_top_down_grasp: Boolean (true/false) indicating if the gripper should approach from above
-                    - is_side_grasp: Boolean (true/false) indicating if the gripper should approach from the side
-                    - Example: move_gripper_to_pose('a', true, false) - Move to point 'a' with a top-down approach
+                --- TASK ---
+                1. Determine the **appropriate subtype** of `{abstract_action}` based on object geometry.
+                2. Select a **sequence of action primitives** to achieve it.
+                3. Set **precise parameters** based only on the visible surfaces, normals, and geometry.
+                4. Return a **single valid raw JSON** with no text or formatting outside of it.
 
-                    2. push('surface_label', 'force_direction', is_button, has_pivot, 'pivot_point_label')
-                    - surface_label: The labeled surface (a, b, c, etc.) from the FIRST IMAGE that the robot should push against
-                    - force_direction: Either 'perpendicular' (push directly into the surface) or 'parallel' (push along the surface)
-                    - is_button: Boolean (true/false) indicating if this is a button push (short distance, low force)
-                    - has_pivot: Boolean (true/false) indicating if the push should pivot around another point
-                    - pivot_point_label: If has_pivot is true, the labeled point to pivot around; otherwise use empty string ''
-                    - Example: push('b', 'perpendicular', true, false, '') - Push surface 'b' like a button
+                --- AVAILABLE PRIMITIVES ---
+                - move_gripper_to_pose('point_label', is_top_down_grasp, is_side_grasp)
+                - push('surface_label', 'force_direction', is_button, has_pivot, 'pivot_point_label')
+                - pull('surface_label', 'force_direction', is_button, has_pivot, 'pivot_point_label')
+                - close_gripper()
+                - open_gripper()
+                - retract_gripper()
+                - twist('direction') // 'clockwise' or 'counterclockwise'
 
-                    3. pull('surface_label', 'force_direction', is_button, has_pivot, 'pivot_point_label')
-                    - surface_label: The labeled surface (a, b, c, etc.) from the FIRST IMAGE that the robot should pull
-                    - force_direction: Either 'perpendicular' (pull directly away from the surface) or 'parallel' (pull along the surface)
-                    - is_button: Boolean (true/false) indicating if this is a button-like pull (short distance, low force)
-                    - has_pivot: Boolean (true/false) indicating if the pull should pivot around another point
-                    - pivot_point_label: If has_pivot is true, the labeled point to pivot around; otherwise use empty string ''
-                    - Example: pull('c', 'parallel', false, true, 'd') - Pull surface 'c' along the surface, pivoting around point 'd'
+                --- PUSH / PULL PARAMETER GUIDE ---
 
-                    4. close_gripper()
-                    - Closes the robot's gripper to grasp an object
-                    - No parameters required
-                    - Example: close_gripper()
+                **1. force_direction ('perpendicular' | 'parallel')**
+                - Use `'perpendicular'` if the force should act **into or out of the surface** — e.g., pushing a button, pulling a latch straight out.
+                - Use `'parallel'` if the interaction requires a **sliding or dragging** motion along the surface — e.g., sliding a door, rotating a lid.
+                - Align the direction with the **normal vector** shown in the FIRST IMAGE.
 
-                    5. open_gripper()
-                    - Opens the robot's gripper to release an object
-                    - No parameters required
-                    - Example: open_gripper()
+                **2. is_button (true | false)**
+                - Use `true` when the push/pull is:
+                - **Short distance**
+                - Requires **low force**
+                - Used to **activate or toggle** a mechanism (e.g., press a button, release a spring)
+                - Use `false` when the action involves sustained contact or continuous movement (e.g., sliding, opening).
 
-                    6. retract_gripper()
-                    - Moves the gripper away from the current position to a safe position
-                    - No parameters required
-                    - Example: retract_gripper()
+                **3. has_pivot (true | false)**
+                - Use `true` when the action requires **rotating around a fixed point** on the object (e.g., opening a hinged lid, rotating a handle).
+                - Use `false` when the force applies evenly across the surface (no clear rotation axis).
 
-                    SKILL PARAMETERS:
+                **4. pivot_point_label ('a', 'b', ..., or '')**
+                - Provide a **point label from the SECOND IMAGE** if `has_pivot = true`, representing the center or hinge of rotation.
+                - Use `''` (empty string) if `has_pivot = false`.
 
-                    1. force_threshold:
-                    - low: For delicate objects or precise operations (1-5N)
-                    - medium: For standard operations (5-15N)
-                    - high: For operations requiring significant force (15-30N)
+                --- EXAMPLES ---
+                - push('a', 'perpendicular', true, false, '') → Push a surface straight in like a button
+                - pull('b', 'parallel', false, true, 'd') → Slide or rotate a surface around point 'd'
 
-                    2. precision_required:
-                    - low: For operations where exact positioning is not critical (±10mm)
-                    - medium: For standard operations requiring good accuracy (±5mm)
-                    - high: For operations requiring very precise positioning (±1mm)
+                --- OUTPUT FORMAT ---
 
-                    3. speed_requirement:
-                    - slow: For delicate operations or where safety is paramount (0.1-0.2m/s)
-                    - medium: For standard operations (0.2-0.4m/s)
-                    - high: For operations where time efficiency is important (0.4-0.6m/s)
+                <start_json>
+                {{
+                "skill_name": "action_targetobject_mechanism",
+                "primitive_sequence": [
+                    "move_gripper_to_pose('a', true, false)",
+                    "push('b', 'perpendicular', true, false, '')",
+                    "pull('c', 'parallel', false, true, 'd')",
+                    ...
+                ],
+                "parameters": {{
+                    "force_threshold": "low" | "medium" | "high",
+                    "precision_required": "low" | "medium" | "high",
+                    "speed_requirement": "slow" | "medium" | "high"
+                }},
+                "prerequisites": ["list of preconditions"],
+                "constraints": ["list of safety or collision limits"],
+                "explanations": ["detailed explaination for why you chose each primitive and each parameter chosen"]
+                }}
+                <end_json>
 
-                    IMPORTANT: You must output ONLY a valid JSON object with the following structure:
+                --- CRITICAL RULES ---
+                - DO NOT invent new functions or primitives.
+                - ONLY use surface labels for push/pull, point labels for move_gripper_to_pose.
+                - All parameters must match physical and geometric properties shown in the images.
+                - close/open gripper are the only methods that affect the gripper they must be called individually no other method will close/open the gripper
+                - NEVER include markdown, explanation outside of the JSON block, or invalid syntax.
+                - Keep in mind you may need to close the gripper before pushing/pulling to interact with an object at the tcp
+                - GRIPPER ORIENTATION RULE:
+                    - For HORIZONTAL movements (drawers, pushing/pulling along surfaces, sliding): USE SIDE GRASP
+                    - For VERTICAL movements (lifting, pressing down): USE TOP-DOWN GRASP
+                    - Always orient the gripper's z-axis to maximize force transmission in the intended direction
+                
+                When in doubt, choose the best grounded option based on visible contact affordances and robot camera constraints (e.g., collision with the wrist camera).
 
-                    {{{{
-                        "skill_name": "specific_action_name_with_mechanism",
-                        "primitive_sequence": [
-                            "EACH PRIMITIVE MUST USE EXACTLY ONE OF THESE FORMATS:",
-                            "move_gripper_to_pose('point_label', is_top_down_grasp, is_side_grasp)",
-                            "push('surface_label', 'force_direction', is_button, has_pivot, 'pivot_point_label')",
-                            "pull('surface_label', 'force_direction', is_button, has_pivot, 'pivot_point_label')",
-                            "close_gripper()",
-                            "open_gripper()",
-                            "retract_gripper()"
-                        ],
-                        "parameters": {{{{
-                            "force_threshold": "low/medium/high",
-                            "precision_required": "low/medium/high",
-                            "speed_requirement": "slow/medium/fast"
-                        }}}},
-                        "prerequisites": [
-                            "list of required conditions"
-                        ],
-                        "constraints": [
-                            "list of safety limits and constraints"
-                        ],
-                        "explanations": [
-                            "list of detailed explanations for primitives and parameter choices"
-                        ]
-                    }}}}
-
-                    CRITICAL FORMATTING RULES:
-                    1. All point and surface labels MUST be in single quotes (e.g., 'a', 'b', etc.)
-                    2. force_direction MUST be in single quotes and be either 'parallel' or 'perpendicular'
-                    3. is_button, has_pivot, is_top_down_grasp, is_side_grasp MUST be boolean values (true or false) WITHOUT quotes
-                    4. pivot_point_label MUST be in single quotes, even if empty (e.g., '', 'c')
-                    5. The syntax must match EXACTLY one of these patterns:
-                    - move_gripper_to_pose('a', true, false)
-                    - push('b', 'perpendicular', true, false, '')
-                    - pull('c', 'parallel', false, true, 'd')
-                    - close_gripper()
-                    - open_gripper()
-                    - retract_gripper()
-
-                    IMPORTANT DISTINCTION:
-                    - For move_gripper_to_pose: use a point label from the SECOND IMAGE (points of interest)
-                    - For push and pull: use a surface label from the FIRST IMAGE (surface segments)
-                    - Use the normal vector information shown in the FIRST IMAGE to determine the best direction for pushing or pulling
-
-                    Note:
-                    - The chosen point for move_gripper_to_pose should be the BEST location for grasping or manipulating the object
-                    - The chosen surface for push/pull should be the CLEAREST INDICATOR of the surface to align the force with
-                    - Use the calculated normal vectors shown as arrows to determine the appropriate force direction
-                    - Prerequisites should include any conditions that must be met before execution
-                    - Constraints should include any safety limits or operating constraints
-                    - BE VERY CAREFUL SELECTING POINTS, always take your time and DOUBLE CHECK that they are in the spacial location you think they are in
-                    - the point chosen corresponds to the exact grasp so only choose points that will enable grasping
-
-                    Base all values on the visual appearance of the object.
-                    Return only the raw JSON object with no additional text or formatting. the output should start with an open bracket and end with a close bracket."""},
-            {"role": "user", "content": [
-                {"type": "text", "text": f"""
+                Carefully verify label references and syntax. Output must be complete and syntactically valid.
+                """
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"""
                 Abstract Action: {abstract_action}
                 Target Object: {target_object}
-                
-                Generate a complete skill definition for this task based on the object's visual appearance.
-                First determine the specific subtype of action needed based on the object's
-                characteristics, then generate the complete skill definition.
-                
-                FIRST IMAGE shows surface segments with alphabetical labels and normal vectors displayed as arrows.
-                SECOND IMAGE shows points of interest with alphabetical labels.
-                
-                For move_gripper_to_pose: use a point label from the SECOND IMAGE.
-                For push and pull: use a surface label from the FIRST IMAGE.
-                Use the normal vector arrows to determine appropriate force directions.
-                """},
-                {"type": "image_url", "image_url": {
-                    "url": f"data:image/png;base64,{self._encode_image(surface_img)}"
-                }},
-                {"type": "image_url", "image_url": {
-                    "url": f"data:image/png;base64,{self._encode_image(points_img)}"
-                }}
-            ]}]
+
+                Please analyze the two visualizations:
+                - FIRST IMAGE: Surface segments with normal vectors (for push/pull)
+                - SECOND IMAGE: Points of interest (for grasping/manipulation)
+
+                Use only the predefined action primitives.
+                Output must be a raw JSON object between '{{' and '}}'. No extra text or formatting.
+                """
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{self._encode_image(surface_img)}"
+                        }
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{self._encode_image(points_img)}"
+                        }
+                    }
+                ]
+            }
+        ]
+
+
         pprint.pp(point_descriptions)
         # Get response
         skill_response = self.llm.query_llm_sync(combined_prompt)
         try:
+            skill_response = skill_response.replace('```json', '').replace('```', '')
             skill_data = json.loads(skill_response)
         except json.JSONDecodeError:
             print("Error parsing skill definition")
@@ -1158,7 +1244,7 @@ class SkillGenerator:
         skill_path = self.skills_dir / f"{skill.name}.json"
         with open(skill_path, 'w') as f:
             json.dump(asdict(skill), f, indent=2)
-
+            
     def list_skills(self) -> List[str]:
         """Return a list of all available skill names"""
         return list(self.skills_cache.keys())

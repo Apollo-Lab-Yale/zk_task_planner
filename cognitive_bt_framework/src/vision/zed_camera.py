@@ -1,4 +1,4 @@
-import pyrealsense2 as rs
+import pyzed.sl as sl
 import numpy as np
 import cv2
 import threading
@@ -14,7 +14,7 @@ class Camera:
     def __init__(self, width: int = 640, height: int = 480, fps: int = 30, 
                  depth_averaging_frames: int = 1, debug=True):
         """
-        Simple camera that just works - no complex filtering that causes artifacts
+        ZED camera wrapper with EXACT same interface as RealSense wrapper
         """
         self.width = width
         self.height = height
@@ -22,15 +22,22 @@ class Camera:
         self.debug = debug
         self.depth_averaging_frames = depth_averaging_frames
         
-        # Core RealSense components
-        self.pipeline = rs.pipeline()
-        self.config = rs.config()
-        self.align = rs.align(rs.stream.color)
-        self.point_cloud = rs.pointcloud()
+        # Core ZED components (matching RealSense structure)
+        self.pipeline = None  # Not used in ZED but kept for interface compatibility
+        self.config = None    # Not used in ZED but kept for interface compatibility
+        self.align = None     # Not used in ZED but kept for interface compatibility
+        self.point_cloud = None  # Will be initialized in start()
         
-        # Configure streams - use native 640x480 (no decimation!)
-        self.config.enable_stream(rs.stream.depth, width, height, rs.format.z16, fps)
-        self.config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
+        # ZED-specific components
+        self.zed = sl.Camera()
+        self.init_params = sl.InitParameters()
+        self.runtime_params = sl.RuntimeParameters()
+        
+        # ZED matrices for data storage
+        self.image_mat = sl.Mat()
+        self.depth_mat = sl.Mat()
+        self.depth_display_mat = sl.Mat()
+        self.point_cloud_mat = sl.Mat()
 
         # Threading components
         self._frame_queue = queue.Queue(maxsize=5)
@@ -42,10 +49,10 @@ class Camera:
         self._buffer_lock = threading.Lock()
 
         # Camera parameters
-        self.depth_scale = None
+        self.depth_scale = 0.001  # ZED depth is in mm, convert to meters
         self.intrinsics = None
         
-        # MINIMAL post-processing - only what's essential
+        # Filter placeholders (for interface compatibility with RealSense)
         self.hole_filling_filter = None
         self.spatial_filter = None
         
@@ -54,35 +61,56 @@ class Camera:
         self.colormap = cv2.COLORMAP_JET
         self.colormaps = [cv2.COLORMAP_JET, cv2.COLORMAP_TURBO, cv2.COLORMAP_VIRIDIS, cv2.COLORMAP_PLASMA]
         self.colormap_index = 0
-        self.clipping_distance_m = 1.0
+        self.clipping_distance_m = 5.0  # ZED has longer range than RealSense
         
         # Mouse callback variables
         self.mouse_x = 0
         self.mouse_y = 0
         self.current_color_image = None
         self.current_depth_image = None
+        
+        # Frame counter
+        self.frame_count = 0
+        
+        # ZED-specific attributes
+        self.camera_info = None
+        self._resolution_map = {
+            (2208, 1242): sl.RESOLUTION.HD2K,
+            (1920, 1080): sl.RESOLUTION.HD1080,
+            (1280, 720): sl.RESOLUTION.HD720,
+            (672, 376): sl.RESOLUTION.VGA
+        }
 
     def _init_minimal_filters(self):
-        """Initialize only essential filters with conservative settings"""
-        try:
-            # Only hole filling - very conservative
-            self.hole_filling_filter = rs.hole_filling_filter()
-            
-            # Very light spatial filter - minimal settings
-            self.spatial_filter = rs.spatial_filter()
-            self.spatial_filter.set_option(rs.option.filter_magnitude, 1)  # Minimal
-            self.spatial_filter.set_option(rs.option.filter_smooth_alpha, 0.25)  # Very light
-            self.spatial_filter.set_option(rs.option.filter_smooth_delta, 10)   # Conservative
-            self.spatial_filter.set_option(rs.option.holes_fill, 0)  # Don't fill holes aggressively
-            
-            if self.debug:
-                print("Minimal filters initialized (very conservative settings)")
-                
-        except Exception as e:
-            if self.debug:
-                print(f"Failed to initialize filters: {e}")
-            self.hole_filling_filter = None
-            self.spatial_filter = None
+        """Initialize filters - kept for interface compatibility, no-op for ZED"""
+        # ZED doesn't use the same filter system as RealSense
+        # This is kept for interface compatibility
+        if self.debug:
+            print("ZED camera: filter initialization (no-op)")
+
+    def _get_best_zed_resolution(self):
+        """Get the best matching ZED resolution for requested width/height"""
+        target_res = (self.width, self.height)
+        
+        # Exact match
+        if target_res in self._resolution_map:
+            return self._resolution_map[target_res], target_res
+        
+        # Find closest resolution
+        best_match = None
+        best_diff = float('inf')
+        
+        for (w, h), zed_res in self._resolution_map.items():
+            diff = abs(w - self.width) + abs(h - self.height)
+            if diff < best_diff:
+                best_diff = diff
+                best_match = (zed_res, (w, h))
+        
+        if self.debug and best_match:
+            actual_res = best_match[1]
+            print(f"Requested: {self.width}x{self.height}, using closest: {actual_res[0]}x{actual_res[1]}")
+        
+        return (sl.RESOLUTION.HD720, (1280, 720)) #best_match if best_match else (sl.RESOLUTION.HD720, (1280, 720))
 
     def start(self) -> bool:
         """Start camera with verified resolution"""
@@ -90,42 +118,67 @@ class Camera:
             return False
 
         try:
-            profile = self.pipeline.start(self.config)
+            # Configure ZED parameters
+            zed_resolution, actual_resolution = self._get_best_zed_resolution()
+            self.init_params.camera_resolution = zed_resolution
+            self.init_params.camera_fps = self.fps
+            self.init_params.depth_mode = sl.DEPTH_MODE.NEURAL_PLUS
+            self.init_params.coordinate_units = sl.UNIT.MILLIMETER
+            self.init_params.depth_stabilization = 1
             
-            # Get intrinsics and verify everything
-            depth_profile = profile.get_stream(rs.stream.depth).as_video_stream_profile()
-            color_profile = profile.get_stream(rs.stream.color).as_video_stream_profile()
+            # Runtime parameters
+            self.runtime_params.confidence_threshold = 50
+            self.runtime_params.texture_confidence_threshold = 100
             
-            self.intrinsics = depth_profile.get_intrinsics()
-            depth_sensor = profile.get_device().first_depth_sensor()
-            self.depth_scale = depth_sensor.get_depth_scale()
+            # Open camera
+            err = self.zed.open(self.init_params)
+            if err != sl.ERROR_CODE.SUCCESS:
+                print(f"Failed to open ZED camera: {err}")
+                return False
             
-            # Verify resolutions match expectations
-            actual_depth_res = (depth_profile.width(), depth_profile.height())
-            actual_color_res = (color_profile.width(), color_profile.height())
+            # Get camera information
+            self.camera_info = self.zed.get_camera_information()
+            res = self.camera_info.camera_configuration.resolution
+            actual_width, actual_height = res.width, res.height
+            
+            # Update our resolution to match what we actually got
+            if actual_width != self.width or actual_height != self.height:
+                if self.debug:
+                    print(f"Resolution adjusted: requested {self.width}x{self.height}, got {actual_width}x{actual_height}")
+                self.width = actual_width
+                self.height = actual_height
+            
+            # Get camera intrinsics
+            calib_params = self.camera_info.camera_configuration.calibration_parameters.left_cam
+            
+            # Create intrinsics object compatible with RealSense format
+            class Intrinsics:
+                def __init__(self, fx, fy, cx, cy, coeffs):
+                    self.fx = fx
+                    self.fy = fy
+                    self.ppx = cx  # RealSense uses ppx/ppy instead of cx/cy
+                    self.ppy = cy
+                    self.coeffs = coeffs
+            
+            self.intrinsics = Intrinsics(
+                fx=calib_params.fx,
+                fy=calib_params.fy,
+                cx=calib_params.cx,
+                cy=calib_params.cy,
+                coeffs=[calib_params.disto[i] for i in range(5)]
+            )
+            
+            # Initialize point cloud object for compatibility
+            self.point_cloud = sl.Camera()  # Placeholder
             
             if self.debug:
-                print(f"Camera started successfully:")
-                print(f"  Depth resolution: {actual_depth_res}")
-                print(f"  Color resolution: {actual_color_res}")
-                print(f"  Expected: ({self.width}, {self.height})")
+                print(f"ZED Camera started successfully:")
+                print(f"  Resolution: {self.width}x{self.height}")
+                print(f"  FPS: {self.fps}")
                 print(f"  Depth scale: {self.depth_scale}")
+                print(f"  Intrinsics: fx={self.intrinsics.fx:.1f}, fy={self.intrinsics.fy:.1f}")
             
-            # Verify we got what we asked for
-            if actual_depth_res != (self.width, self.height):
-                print(f"WARNING: Got depth {actual_depth_res}, expected ({self.width}, {self.height})")
-            if actual_color_res != (self.width, self.height):
-                print(f"WARNING: Got color {actual_color_res}, expected ({self.width}, {self.height})")
-            
-            # Configure depth sensor for better quality (but don't go crazy)
-            try:
-                if depth_sensor.supports(rs.option.visual_preset):
-                    depth_sensor.set_option(rs.option.visual_preset, 3)  # High accuracy
-            except Exception as e:
-                if self.debug:
-                    print(f"Warning: Could not set visual preset: {e}")
-            
-            # Initialize minimal filters
+            # Initialize filters for compatibility
             self._init_minimal_filters()
             
             # Start processing thread
@@ -135,71 +188,66 @@ class Camera:
             
             return True
 
-        except RuntimeError as e:
-            print(f"Failed to start camera: {e}")
+        except Exception as e:
+            print(f"Failed to start ZED camera: {e}")
             return False
 
     def _apply_minimal_processing(self, depth_frame):
-        """Apply only essential processing - no decimation, minimal filtering"""
-        if depth_frame is None:
-            return None
-            
-        try:
-            processed_frame = depth_frame
-            
-            # Apply only light spatial filtering (optional)
-            if self.spatial_filter:
-                processed_frame = self.spatial_filter.process(processed_frame)
-            
-            # Apply hole filling only if really needed
-            if self.hole_filling_filter:
-                processed_frame = self.hole_filling_filter.process(processed_frame)
-            
-            return processed_frame
-            
-        except Exception as e:
-            if self.debug:
-                print(f"Error in minimal processing: {e}")
-            return depth_frame  # Return original on error
+        """Apply minimal processing - kept for interface compatibility"""
+        # ZED doesn't need the same processing as RealSense
+        # This method is kept for interface compatibility
+        return depth_frame
 
     def _process_frames(self):
-        """Simple frame processing without aggressive filtering"""
+        """Frame processing thread"""
         while self._running:
             try:
-                frames = self.pipeline.wait_for_frames(timeout_ms=1000)
-                aligned_frames = self.align.process(frames)
-                
-                # Get depth frame with minimal processing
-                depth_frame = aligned_frames.get_depth_frame()
-                if depth_frame:
-                    # Apply minimal processing
-                    processed_frame = self._apply_minimal_processing(depth_frame)
+                if self.zed.grab(self.runtime_params) == sl.ERROR_CODE.SUCCESS:
+                    # Retrieve images
+                    self.zed.retrieve_image(self.image_mat, sl.VIEW.LEFT)
+                    self.zed.retrieve_measure(self.depth_mat, sl.MEASURE.DEPTH)
                     
-                    # Convert to numpy
-                    depth_image = np.asanyarray(processed_frame.get_data())
+                    # Convert to numpy arrays
+                    color_data = self.image_mat.get_data()
+                    depth_data = self.depth_mat.get_data()
                     
-                    # Verify shape every 100 frames
-                    if self.debug and hasattr(self, 'frame_count') and self.frame_count % 100 == 0:
-                        print(f"Depth frame shape: {depth_image.shape} (expected: ({self.height}, {self.width}))")
+                    # Handle NaN values in depth data
+                    depth_cleaned = np.nan_to_num(depth_data, nan=0.0, posinf=0.0, neginf=0.0)
                     
-                    # Add to buffer
+                    # Resize if needed to match requested resolution
+                    if color_data.shape[:2] != (self.height, self.width):
+                        color_data = cv2.resize(color_data, (self.width, self.height))
+                    if depth_cleaned.shape != (self.height, self.width):
+                        depth_cleaned = cv2.resize(depth_cleaned, (self.width, self.height))
+                    
+                    # Verify shape periodically
+                    if self.debug and self.frame_count % 100 == 0:
+                        print(f"Frame {self.frame_count}: Color {color_data.shape}, Depth {depth_cleaned.shape}")
+                    
+                    # Add to depth buffer
                     with self._buffer_lock:
-                        self._depth_buffer.append(depth_image)
-
-                if not self._frame_queue.full():
-                    self._frame_queue.put(aligned_frames)
+                        self._depth_buffer.append(depth_cleaned.astype(np.float32))
+                    
+                    # Create frames object for compatibility
+                    frames = {
+                        'color': color_data,
+                        'depth': depth_cleaned
+                    }
+                    
+                    if not self._frame_queue.full():
+                        self._frame_queue.put(frames)
+                    else:
+                        try:
+                            self._frame_queue.get_nowait()
+                            self._frame_queue.put(frames)
+                        except queue.Empty:
+                            pass
+                    
+                    self.frame_count += 1
                 else:
-                    try:
-                        self._frame_queue.get_nowait()
-                        self._frame_queue.put(aligned_frames)
-                    except queue.Empty:
-                        pass
-                        
-                if not hasattr(self, 'frame_count'):
-                    self.frame_count = 0
-                self.frame_count += 1
+                    time.sleep(0.01)
 
-            except RuntimeError as e:
+            except Exception as e:
                 if self.debug:
                     print(f"Frame acquisition error: {e}")
                 time.sleep(0.1)
@@ -207,31 +255,24 @@ class Camera:
     def get_frames(self, use_averaging=True):
         """Get frames with guaranteed correct resolution"""
         try:
-            aligned_frames = self._frame_queue.get(timeout=1.0)
-
-            color_frame = aligned_frames.get_color_frame()
-            if not color_frame:
-                return None
+            frames = self._frame_queue.get(timeout=1.0)
             
-            color_image = np.asanyarray(color_frame.get_data())
+            color_image = frames['color']
             
             if use_averaging:
                 depth_image = self._get_averaged_depth()
                 if depth_image is None:
-                    depth_frame = aligned_frames.get_depth_frame()
-                    if depth_frame:
-                        processed_frame = self._apply_minimal_processing(depth_frame)
-                        depth_image = np.asanyarray(processed_frame.get_data())
-                    else:
-                        return None
+                    depth_image = frames['depth']
             else:
-                depth_frame = aligned_frames.get_depth_frame()
-                if depth_frame:
-                    processed_frame = self._apply_minimal_processing(depth_frame)
-                    depth_image = np.asanyarray(processed_frame.get_data())
-                else:
-                    return None
-
+                depth_image = frames['depth']
+            
+            # Convert color from RGBA to BGR for consistency with RealSense
+            if len(color_image.shape) == 3:
+                if color_image.shape[2] == 4:  # RGBA
+                    color_image = cv2.cvtColor(color_image, cv2.COLOR_RGBA2BGR)
+                elif color_image.shape[2] == 3:  # RGB
+                    color_image = cv2.cvtColor(color_image, cv2.COLOR_RGB2BGR)
+            
             # Final shape verification
             if color_image.shape[:2] != (self.height, self.width):
                 if self.debug:
@@ -274,9 +315,9 @@ class Camera:
                 0 <= actual_x < self.width and 0 <= y < self.height):
                 
                 depth_value_raw = self.current_depth_image[y, actual_x]
-                if depth_value_raw > 0 and self.depth_scale:
+                if depth_value_raw > 0:
                     depth_value_m = depth_value_raw * self.depth_scale
-                    print(f"Depth at ({actual_x}, {y}): {depth_value_raw} units ({depth_value_m*1000:.1f} mm, {depth_value_m:.3f} m)")
+                    print(f"Depth at ({actual_x}, {y}): {depth_value_raw:.1f} units ({depth_value_m*1000:.1f} mm, {depth_value_m:.3f} m)")
                 else:
                     print(f"No valid depth data at ({actual_x}, {y})")
 
@@ -309,7 +350,7 @@ class Camera:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         # Create output directory if it doesn't exist
-        output_dir = "realsense_captures"
+        output_dir = "zed_captures"
         os.makedirs(output_dir, exist_ok=True)
         
         # Save RGB image (convert BGR to RGB for proper saving)
@@ -321,21 +362,19 @@ class Camera:
         depth_raw_filename = f"{output_dir}/depth_raw_{timestamp}.npy"
         np.save(depth_raw_filename, self.current_depth_image)
         
-        # Save colorized depth image (ensure consistent RGB format)
+        # Save colorized depth image
         depth_colored = self.create_depth_colormap(self.current_depth_image)
-        # Convert depth colormap to RGB format for consistency with ZED
         depth_colored_rgb = cv2.cvtColor(depth_colored, cv2.COLOR_BGR2RGB)
         depth_colored_filename = f"{output_dir}/depth_colored_{timestamp}.png"
         cv2.imwrite(depth_colored_filename, cv2.cvtColor(depth_colored_rgb, cv2.COLOR_RGB2BGR))
         
         # Save depth in millimeters as 16-bit PNG
-        if self.depth_scale:
-            depth_mm = (self.current_depth_image * self.depth_scale * 1000).astype(np.uint16)
-            depth_mm_filename = f"{output_dir}/depth_mm_{timestamp}.png"
-            cv2.imwrite(depth_mm_filename, depth_mm)
+        depth_mm = np.clip(self.current_depth_image, 0, 65535).astype(np.uint16)
+        depth_mm_filename = f"{output_dir}/depth_mm_{timestamp}.png"
+        cv2.imwrite(depth_mm_filename, depth_mm)
         
         print(f"Data saved to {output_dir}/ with timestamp {timestamp}")
-        print(f"  RGB image saved in proper color order (matching ZED format)")
+        print(f"  RGB image saved in proper color order (matching RealSense format)")
 
     def display_info_overlay(self, image):
         """Add information overlay to the image."""
@@ -354,7 +393,7 @@ class Camera:
         mode_name = mode_names[self.display_mode] if self.display_mode < len(mode_names) else "Unknown"
         
         info_text = [
-            f"RealSense: {self.width}x{self.height} @ {self.fps}fps",
+            f"ZED: {self.width}x{self.height} @ {self.fps}fps",
             f"Mode: {mode_name}",
             f"Colormap: {colormap_name}",
             f"Clip: {self.clipping_distance_m:.1f}m",
@@ -378,20 +417,20 @@ class Camera:
     def visualize(self, use_averaging=True):
         """Advanced visualization with multiple modes and interactive features"""
         frames = self.get_frames(use_averaging=use_averaging)
-        if not frames or not self.depth_scale:
+        if not frames:
             return
         
         color_image, depth_image = frames
         
-        # Convert BGR to RGB for consistent color representation with ZED camera
+        # Convert BGR to RGB for consistent color representation
         color_image_rgb = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
         self.current_color_image = color_image.copy()  # Keep original BGR for saving
         self.current_depth_image = depth_image.copy()
         
         try:
             if self.display_mode == 0:
-                # Background removal mode (original behavior)
-                clipping_distance = self.clipping_distance_m / self.depth_scale
+                # Background removal mode
+                clipping_distance = self.clipping_distance_m / self.depth_scale  # Convert to mm
                 depth_image_3d = np.dstack((depth_image,) * 3)
                 viz_left = np.where(
                     (depth_image_3d > clipping_distance) | (depth_image_3d <= 0),
@@ -402,7 +441,6 @@ class Camera:
                 # Simple depth colorization
                 depth_normalized = np.clip(depth_image.astype(np.float32) * self.depth_scale * 50, 0, 255).astype(np.uint8)
                 viz_right = cv2.applyColorMap(depth_normalized, self.colormap)
-                # Convert depth colormap from BGR to RGB to match
                 viz_right = cv2.cvtColor(viz_right, cv2.COLOR_BGR2RGB)
                 
             elif self.display_mode == 1:
@@ -422,18 +460,16 @@ class Camera:
                     depth_normalized = np.zeros_like(depth_image, dtype=np.uint8)
                 
                 viz_right = cv2.applyColorMap(depth_normalized, self.colormap)
-                # Convert depth colormap from BGR to RGB to match
                 viz_right = cv2.cvtColor(viz_right, cv2.COLOR_BGR2RGB)
                 
             else:  # display_mode == 2
                 # Raw depth values mode
                 viz_left = color_image_rgb.copy()
                 
-                # Use raw depth values with clipping
-                depth_clipped = np.clip(depth_image.astype(np.float32) * self.depth_scale * 1000, 0, 5000)  # mm
-                depth_norm = (depth_clipped / 5000 * 255).astype(np.uint8)
+                # Use raw depth values with clipping (ZED depth is in mm)
+                depth_clipped = np.clip(depth_image.astype(np.float32), 0, 10000)  # Clip to 10m
+                depth_norm = (depth_clipped / 10000 * 255).astype(np.uint8)
                 viz_right = cv2.applyColorMap(depth_norm, self.colormap)
-                # Convert depth colormap from BGR to RGB to match
                 viz_right = cv2.cvtColor(viz_right, cv2.COLOR_BGR2RGB)
             
             # Mark invalid regions in depth image
@@ -446,18 +482,18 @@ class Camera:
             # Add info overlay
             combined = self.display_info_overlay(combined)
             
-            # Convert back to BGR for OpenCV display (OpenCV expects BGR)
+            # Convert back to BGR for OpenCV display
             combined_bgr = cv2.cvtColor(combined, cv2.COLOR_RGB2BGR)
             
             # Display the image
-            cv2.imshow('RealSense Advanced Visualization', combined_bgr)
+            cv2.imshow('ZED Advanced Visualization', combined_bgr)
             
         except Exception as e:
             if self.debug:
                 print(f"Visualization error: {e}")
             # Fallback to simple display
             simple_combined = np.hstack([color_image, cv2.cvtColor(depth_image, cv2.COLOR_GRAY2BGR)])
-            cv2.imshow('RealSense Advanced Visualization', simple_combined)
+            cv2.imshow('ZED Advanced Visualization', simple_combined)
 
     def run_advanced_visualization(self, use_averaging=True):
         """Run interactive visualization with keyboard controls"""
@@ -465,7 +501,7 @@ class Camera:
             print("Camera not started!")
             return
         
-        print("\nStarting advanced visualization...")
+        print("\nStarting ZED advanced visualization...")
         print("Controls:")
         print("  'q' or ESC: Quit")
         print("  's': Save current data")
@@ -476,8 +512,8 @@ class Camera:
         print()
         
         # Set up OpenCV window
-        cv2.namedWindow("RealSense Advanced Visualization", cv2.WINDOW_AUTOSIZE)
-        cv2.setMouseCallback("RealSense Advanced Visualization", self.mouse_callback)
+        cv2.namedWindow("ZED Advanced Visualization", cv2.WINDOW_AUTOSIZE)
+        cv2.setMouseCallback("ZED Advanced Visualization", self.mouse_callback)
         
         try:
             while True:
@@ -499,22 +535,22 @@ class Camera:
                     colormap_names = ["JET", "TURBO", "VIRIDIS", "PLASMA"]
                     print(f"Switched to {colormap_names[self.colormap_index]} colormap")
                 elif key == ord('+') or key == ord('='):
-                    self.clipping_distance_m = min(5.0, self.clipping_distance_m + 0.1)
+                    self.clipping_distance_m = min(20.0, self.clipping_distance_m + 0.5)
                     print(f"Clipping distance: {self.clipping_distance_m:.1f}m")
                 elif key == ord('-'):
-                    self.clipping_distance_m = max(0.1, self.clipping_distance_m - 0.1)
+                    self.clipping_distance_m = max(0.5, self.clipping_distance_m - 0.5)
                     print(f"Clipping distance: {self.clipping_distance_m:.1f}m")
                     
         except KeyboardInterrupt:
             print("\nInterrupted by user")
         finally:
             cv2.destroyAllWindows()
-            print("Advanced visualization stopped")
+            print("ZED advanced visualization stopped")
 
     def get_closest_blob(self, use_averaging=True):
         """Simple closest blob detection"""
         frames = self.get_frames(use_averaging=use_averaging)
-        if frames is None or self.depth_scale is None:
+        if frames is None:
             return None
 
         _, depth_image = frames
@@ -542,7 +578,7 @@ class Camera:
         Args:
             use_averaging: Whether to use averaged depth frames
             manual_calculation: If True, calculate manually using intrinsics.
-                               If False, use RealSense built-in point cloud.
+                               If False, use ZED built-in point cloud.
         
         Returns:
             numpy array of 3D points (N, 3) where each row is [x, y, z]
@@ -551,49 +587,47 @@ class Camera:
             if manual_calculation:
                 return self._get_point_cloud_manual(use_averaging)
             else:
-                return self._get_point_cloud_realsense(use_averaging)
+                return self._get_point_cloud_zed(use_averaging)
         except Exception as e:
             if self.debug:
                 print(f"Error getting point cloud: {e}")
             return np.array([])
 
-    def _get_point_cloud_realsense(self, use_averaging=True):
-        """Get point cloud using RealSense built-in calculation"""
+    def _get_point_cloud_zed(self, use_averaging=True):
+        """Get point cloud using ZED built-in calculation"""
         try:
-            aligned_frames = self._frame_queue.get(timeout=1.0)
-            depth_frame = aligned_frames.get_depth_frame()
-            
-            if not depth_frame:
-                return np.array([])
-            
-            # If using averaging, we need to create a synthetic frame
-            # For simplicity with RealSense point cloud, use the current frame
-            if use_averaging:
-                # Apply minimal processing to current frame
-                processed_frame = self._apply_minimal_processing(depth_frame)
+            # For ZED, we need to retrieve the point cloud directly
+            if self.zed.grab(self.runtime_params) == sl.ERROR_CODE.SUCCESS:
+                self.zed.retrieve_measure(self.point_cloud_mat, sl.MEASURE.XYZ)
+                points = self.point_cloud_mat.get_data()
+                
+                # Reshape and filter valid points
+                h, w = points.shape[:2]
+                pts = points.reshape(-1, 3)
+                
+                # Filter out invalid points (NaN, inf, or zero)
+                valid_mask = np.isfinite(pts).all(axis=1) & (np.linalg.norm(pts, axis=1) > 0.1)
+                pts_filtered = pts[valid_mask]
+                
+                # Convert to meters (ZED uses millimeters)
+                pts_filtered = pts_filtered * self.depth_scale
+                
+                return pts_filtered
             else:
-                processed_frame = self._apply_minimal_processing(depth_frame)
-            
-            # Calculate point cloud using RealSense
-            points = self.point_cloud.calculate(processed_frame)
-            pts = np.asanyarray(points.get_vertices()).view(np.float32).reshape(-1, 3)
-            
-            # Filter out zero/invalid points
-            valid_mask = ~np.all(pts == 0, axis=1)
-            pts_filtered = pts[valid_mask]
-            
-            return pts_filtered
-            
+                if self.debug:
+                    print("Failed to grab ZED frame for point cloud")
+                return self._get_point_cloud_manual(use_averaging)
+                
         except Exception as e:
             if self.debug:
-                print(f"RealSense point cloud failed: {e}, falling back to manual calculation")
+                print(f"ZED point cloud failed: {e}, falling back to manual calculation")
             return self._get_point_cloud_manual(use_averaging)
 
     def _get_point_cloud_manual(self, use_averaging=True):
         """Manually calculate point cloud using camera intrinsics and depth data"""
         try:
             frames = self.get_frames(use_averaging=use_averaging)
-            if not frames or not self.intrinsics or not self.depth_scale:
+            if not frames or not self.intrinsics:
                 return np.array([])
             
             color_image, depth_image = frames
@@ -605,8 +639,8 @@ class Camera:
             # Convert depth to meters
             depth_m = depth_image.astype(np.float32) * self.depth_scale
             
-            # Filter valid depths (> 0 and < reasonable max distance)
-            valid_mask = (depth_m > 0.1) & (depth_m < 5.0)  # 10cm to 5m range
+            # Filter valid depths
+            valid_mask = (depth_m > 0.1) & (depth_m < 20.0)  # ZED has longer range
             
             if np.sum(valid_mask) == 0:
                 return np.array([])
@@ -642,7 +676,7 @@ class Camera:
         """
         try:
             frames = self.get_frames(use_averaging=use_averaging)
-            if not frames or not self.intrinsics or not self.depth_scale:
+            if not frames or not self.intrinsics:
                 return np.array([]), np.array([])
             
             color_image, depth_image = frames
@@ -655,7 +689,7 @@ class Camera:
             depth_m = depth_image.astype(np.float32) * self.depth_scale
             
             # Filter valid depths
-            valid_mask = (depth_m > 0.1) & (depth_m < 5.0)
+            valid_mask = (depth_m > 0.1) & (depth_m < 20.0)
             
             if np.sum(valid_mask) == 0:
                 return np.array([]), np.array([])
@@ -665,7 +699,7 @@ class Camera:
             j_valid = j[valid_mask]
             depth_valid = depth_m[valid_mask]
             
-            # Get corresponding colors - RealSense outputs BGR, convert to RGB for consistency with ZED
+            # Get corresponding colors - convert BGR to RGB for consistency
             colors_bgr = color_image[j_valid, i_valid]  # Note: j,i for row,col indexing
             colors_rgb = colors_bgr[:, [2, 1, 0]]  # Convert BGR to RGB for consistent format
             
@@ -804,14 +838,15 @@ class Camera:
         self._running = False
         if self._thread:
             self._thread.join()
-        self.pipeline.stop()
+        
+        self.zed.close()
         cv2.destroyAllWindows()
         
         if self.debug:
-            print("Simple camera stopped")
+            print("ZED camera stopped")
 
 
-# Ultra-simple fallback if even the above doesn't work
+# Ultra-simple fallback (for interface compatibility)
 class UltraSimpleCamera:
     def __init__(self, width=640, height=480, fps=30, debug=True):
         self.width = width
@@ -819,29 +854,36 @@ class UltraSimpleCamera:
         self.fps = fps
         self.debug = debug
         
-        self.pipeline = rs.pipeline()
-        self.config = rs.config()
-        self.align = rs.align(rs.stream.color)
+        self.zed = sl.Camera()
+        self.init_params = sl.InitParameters()
+        self.runtime_params = sl.RuntimeParameters()
         
         # Bare minimum configuration
-        self.config.enable_stream(rs.stream.depth, width, height, rs.format.z16, fps)
-        self.config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
+        self.init_params.camera_resolution = sl.RESOLUTION.HD720
+        self.init_params.camera_fps = fps
+        self.init_params.depth_mode = sl.DEPTH_MODE.PERFORMANCE
         
-        self.depth_scale = None
+        self.depth_scale = 0.001
         self._running = False
+        
+        # ZED matrices
+        self.image_mat = sl.Mat()
+        self.depth_mat = sl.Mat()
 
     def start(self):
         try:
-            profile = self.pipeline.start(self.config)
-            depth_sensor = profile.get_device().first_depth_sensor()
-            self.depth_scale = depth_sensor.get_depth_scale()
+            err = self.zed.open(self.init_params)
+            if err != sl.ERROR_CODE.SUCCESS:
+                print(f"Failed to open ZED: {err}")
+                return False
+            
             self._running = True
             
             if self.debug:
-                print(f"Ultra-simple camera started: {self.width}x{self.height}")
+                print(f"Ultra-simple ZED camera started: {self.width}x{self.height}")
             return True
         except Exception as e:
-            print(f"Failed to start ultra-simple camera: {e}")
+            print(f"Failed to start ultra-simple ZED camera: {e}")
             return False
 
     def get_frames(self):
@@ -849,20 +891,24 @@ class UltraSimpleCamera:
             return None
         
         try:
-            frames = self.pipeline.wait_for_frames(timeout_ms=1000)
-            aligned_frames = self.align.process(frames)
-            
-            color_frame = aligned_frames.get_color_frame()
-            depth_frame = aligned_frames.get_depth_frame()
-            
-            if not color_frame or not depth_frame:
+            if self.zed.grab(self.runtime_params) == sl.ERROR_CODE.SUCCESS:
+                self.zed.retrieve_image(self.image_mat, sl.VIEW.LEFT)
+                self.zed.retrieve_measure(self.depth_mat, sl.MEASURE.DEPTH)
+                
+                color_image = self.image_mat.get_data()
+                depth_image = self.depth_mat.get_data()
+                
+                # Convert color from RGBA to BGR if needed
+                if len(color_image.shape) == 3 and color_image.shape[2] == 4:
+                    color_image = cv2.cvtColor(color_image, cv2.COLOR_RGBA2BGR)
+                
+                # Handle NaN values
+                depth_image = np.nan_to_num(depth_image, nan=0.0)
+                
+                return color_image, depth_image
+            else:
                 return None
                 
-            color_image = np.asanyarray(color_frame.get_data())
-            depth_image = np.asanyarray(depth_frame.get_data())
-            
-            return color_image, depth_image
-            
         except Exception as e:
             if self.debug:
                 print(f"Frame error: {e}")
@@ -870,14 +916,14 @@ class UltraSimpleCamera:
 
     def stop(self):
         self._running = False
-        self.pipeline.stop()
+        self.zed.close()
 
 
-# Test both cameras
+# Test the aligned ZED camera wrapper
 if __name__ == "__main__":
-    print("Testing advanced RealSense camera visualization...")
+    print("Testing aligned ZED camera wrapper...")
     
-    # Try the advanced camera
+    # Test the main camera with same interface as RealSense
     camera = Camera(
         width=640, 
         height=480, 
@@ -887,7 +933,7 @@ if __name__ == "__main__":
     )
     
     if camera.start():
-        print("Camera started! Testing advanced visualization...")
+        print("ZED camera started! Testing advanced visualization...")
         
         # Test a few frames first
         for i in range(3):
@@ -908,4 +954,4 @@ if __name__ == "__main__":
         
         camera.stop()
     else:
-        print("Failed to start camera")
+        print("Failed to start ZED camera")

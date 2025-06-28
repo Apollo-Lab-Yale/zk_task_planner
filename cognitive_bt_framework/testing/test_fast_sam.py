@@ -298,13 +298,13 @@ def main():
     fastsam_config = FastSAMConfig(
         model_type="FastSAM-x",
         max_image_size=640,
-        conf_threshold=0.5,  # Lower threshold for better book segmentation
-        iou_threshold=0.5,
+        conf_threshold=0.9,  # Lower threshold for better book segmentation
+        iou_threshold=0.8,
         retina_masks=True,
         remove_small_regions=False,
         merge_overlapping=False,
         overlap_threshold=0.5,
-        min_area=10.0,  # Smaller minimum area to capture book details
+        min_area=25.0,  # Smaller minimum area to capture book details
         draw_borders=True
     )
     

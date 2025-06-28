@@ -51,7 +51,7 @@ class FastSAMConfig:
     remove_small_regions: bool = False
     merge_overlapping: bool = False
     overlap_threshold: float = 0.5
-    min_area: float = 10.0  # Minimum area for mask retention
+    min_area: float = 25.0  # Minimum area for mask retention
     draw_borders: bool = True
 
 class FastSAMMaskGenerator:

@@ -24,8 +24,8 @@ def test_skill_handler_sync():
         # Initialize components
         config = FastSAMConfig(
             model_type="FastSAM-x",
-            conf_threshold=0.25,
-            iou_threshold=0.5,
+            conf_threshold=0.9,
+            iou_threshold=0.8,
             min_area=1.0,
         )
         
@@ -69,7 +69,7 @@ def test_skill_handler_sync():
         cv2.waitKey(1000)  # Display for 1 second
         
         action = 'open'
-        target_object = 'metal cabinet'
+        target_object = 'marker'
 
         print("\nProcessing request...")
         print(f"Target: {target_object}")
@@ -102,8 +102,8 @@ def test_skill_handler_sync():
         roi_results = perception_system.detect_regions_of_interest(
             image=color_image,
             obj_info=object_info,
-            method='shi_tomasi',  # Use SIFT for better feature detection
-            max_points=20,   # Limit to 8 key points to avoid clutter
+            method='contours',  # Use SIFT for better feature detection
+            max_points=10,   # Limit to 8 key points to avoid clutter
             visualize=True
         )
         

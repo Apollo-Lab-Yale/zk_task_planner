@@ -106,6 +106,13 @@ class PrimitiveParser:
             r'retract_gripper\(\)'
         ),
         
+        # NEW: Twist primitive with direction parameter
+        'twist': re.compile(
+            r'twist\('
+            r'(?:\'|")(?P<direction>clockwise|counterclockwise)(?:\'|")'
+            r'\)'
+        ),
+        
         # Additional pattern for the exact failing case
         'push_exact_fail_case': re.compile(
             r'push\('
@@ -165,6 +172,8 @@ class PrimitiveParser:
             action_type = 'open_gripper'
         elif pattern_name.startswith('retract_gripper'):
             action_type = 'retract_gripper'
+        elif pattern_name.startswith('twist'):
+            action_type = 'twist'
         
         # Get all named groups from the match
         match_dict = match.groupdict()
@@ -200,6 +209,10 @@ class PrimitiveParser:
                     if ((parameters[param].startswith("'") and parameters[param].endswith("'")) or 
                         (parameters[param].startswith('"') and parameters[param].endswith('"'))):
                         parameters[param] = parameters[param][1:-1]
+        elif pattern_name == 'twist':
+            # Process twist primitive
+            if 'direction' in match_dict and match_dict['direction'] is not None:
+                parameters['direction'] = match_dict['direction']
         else:
             # Process for point-based patterns (both positional and named)
             if 'point_label' in match_dict and match_dict['point_label'] is not None:
@@ -270,6 +283,11 @@ class PrimitiveParser:
         """
         if action_type in ['close_gripper', 'open_gripper', 'retract_gripper']:
             return f"{action_type}()"
+        
+        # Handle twist primitive
+        if action_type == 'twist':
+            direction = kwargs.get('direction', 'clockwise')
+            return f"twist('{direction}')"
         
         # Determine if using point-based or surface-based format
         if 'point_label' in kwargs:

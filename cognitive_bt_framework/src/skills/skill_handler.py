@@ -199,7 +199,7 @@ class SkillHandler:
                     ]
                     # Filter out zero/invalid depths
                     points_3d[label], _ = self.perception_system._estimate_point_pose(points_pixel[label],
-                                                                                   object_info.depth_image)
+                                                                                   object_info.depth_image, label=label)
                 except Exception as e:
                     print(f"Error estimating 3D position for point {label}: {e}")
                     points_3d[label] = object_pose[:3]
@@ -216,7 +216,8 @@ class SkillHandler:
                 object_pixel_pose,
                 points_3d,
                 points_pixel,
-                skill.parameters
+                skill.parameters,
+                object_info=object_info
             )
             if executable_action is None:
                 print(f"Failed to convert primitive: {primitive.raw_string}")
@@ -272,14 +273,13 @@ class SkillHandler:
         # Handle push/pull actions that now use surface labels
         if action_type in ['push', 'pull']:
             # Get target surface with case-insensitive lookup
-            surface_label = parameters.get('surface_label', '')
+            surface_label = parameters.get('point_label', '')
             surface_label_upper = surface_label.upper()
             
             # Calculate surface normal if object_info is available
             surface_normal = None
             surface_centroid_position = None
             surface_centroid_pixel = None
-            
             if object_info is not None and object_info.surface_masks is not None and object_info.depth_image is not None:
                 # Find the surface mask based on the label
                 surface_mask = None
@@ -289,12 +289,14 @@ class SkillHandler:
                     # Extract the alphabetical ID from the surface name
                     if "_" in name:
                         mask_id = name.split("_")[1].upper()
+                        print((mask_id, surface_label_upper))
                         if mask_id == surface_label_upper:
                             surface_mask = mask
                             break
                 
                 # If we found a matching surface mask
                 if surface_mask is not None:
+                    print('calculating surface normal')
                     # Calculate centroid of the surface mask
                     y_coords, x_coords = np.where(surface_mask)
                     if len(y_coords) > 0:
@@ -311,42 +313,25 @@ class SkillHandler:
                             # Note: This assumes we have access to camera intrinsics
                             # which should be available in the perception system
                             # For now, we'll use the object's own conversion method if available
-                            if hasattr(self, '_pixel_to_3d'):
-                                surface_centroid_position = self._pixel_to_3d(centroid_x, centroid_y, depth)
-                            else:
-                                # Fallback: Estimate position using simple pinhole model
-                                # This assumes fx, fy, cx, cy are available somewhere
-                                # You may need to adjust this based on your actual implementation
-                                fx = 429.92523193359375  # Default from perception system
-                                fy = 429.92523193359375
-                                cx = 431.7160339355469
-                                cy = 233.39739990234375
-                                depth_scale = 0.001  # Default scale factor (m/unit)
-                                
-                                # Convert to meters
-                                z = depth * depth_scale
-                                x = (centroid_x - cx) * z / fx
-                                y = (centroid_y - cy) * z / fy
-                                surface_centroid_position = np.array([x, y, z])
+                            print("converting point to 3d")
+                            surface_centroid_position = self.perception_system._estimate_point_pose((centroid_x, centroid_y), depth)
                         
                         # Calculate surface normal using the depth image and mask
-                        surface_normal = self._calculate_surface_normal(
+                        surface_normal, confidence = self.perception_system.calculate_surface_normal(
                             object_info.depth_image,
-                            surface_mask,
-                            depth_scale=0.001  # Default scale factor (m/unit)
+                            surface_mask
                         )
-            
+                        print(f"1************************************ {surface_normal}")
             # If we couldn't find the surface or calculate normal, use fallback
             if surface_centroid_position is None or surface_normal is None:
                 print(f"Surface '{surface_label}' not found or normal calculation failed")
                 
                 # Fall back to using a point if available
                 if points_3d:
-                    print(f"Using first available point as fallback")
                     fallback_label = list(points_3d.keys())[0]
+                    print(f"Using first available point as fallback: {fallback_label}")
                     surface_centroid_position = points_3d[fallback_label]
                     surface_centroid_pixel = points_pixel[fallback_label]
-                    
                     # Create a default normal pointing along Z-axis
                     surface_normal = np.array([0, 0, 1])
                 else:
@@ -452,6 +437,30 @@ class SkillHandler:
                 is_side_grasp=is_side_grasp
             )
         
+        # Handle twist action
+        elif action_type == 'twist':
+            direction = parameters.get('direction', 'clockwise')
+            
+            # Create parameters dictionary for twist
+            action_params = {
+                'direction': direction,
+                'angular_velocity': self._get_angular_velocity(skill_parameters.get('speed_requirement', 'medium')),
+                'precision': skill_parameters.get('precision_required', 'medium'),
+                'rotation_angle': self._get_default_rotation_angle()  # Default rotation amount
+            }
+            
+            # For twist, we don't need a specific position - it's performed at current gripper location
+            # But we'll use the object's position as reference
+            return ExecutableAction(
+                action_type=action_type,
+                position=object_pose[:3] if object_pose is not None else np.zeros(3),
+                orientation=np.array([0, 0, 0, 1]),  # No specific orientation needed for twist
+                pixel_position=object_pixel_pose,
+                parameters=action_params,
+                is_top_down_grasp=False,
+                is_side_grasp=False
+            )
+        
         # Handle simple actions without points
         elif action_type in ['close_gripper', 'open_gripper', 'retract_gripper']:
             return ExecutableAction(
@@ -486,6 +495,19 @@ class SkillHandler:
             'fast': 0.5
         }
         return speed_values.get(speed_requirement.lower(), 0.3)
+
+    def _get_angular_velocity(self, speed_requirement: str) -> float:
+        """Convert speed requirement to angular velocity for twist operations"""
+        angular_velocity_values = {
+            'slow': 0.2,    # radians per second
+            'medium': 0.5,  # radians per second  
+            'fast': 1.0     # radians per second
+        }
+        return angular_velocity_values.get(speed_requirement.lower(), 0.5)
+
+    def _get_default_rotation_angle(self) -> float:
+        """Get default rotation angle for twist operations (in radians)"""
+        return np.pi / 2  # 90 degrees default rotation
 
     def _generate_execution_parameters(self,
                                     skill_parameters: Dict[str, Any],
@@ -558,7 +580,8 @@ class SkillHandler:
             'move_gripper_to_pose': (255, 0, 0),  # Red
             'close_gripper': (0, 0, 255),      # Blue
             'release': (255, 165, 0),          # Orange
-            'retract_gripper': (128, 0, 128)    # Purple
+            'retract_gripper': (128, 0, 128),   # Purple
+            'twist': (255, 255, 0)             # Yellow
         }
         
         # Draw object center and pose axes
@@ -573,7 +596,7 @@ class SkillHandler:
             color = COLOR_MAP.get(action.action_type, (200, 200, 200))
             
             # For actions with position
-            if not np.all(action.position == 0):
+            if action.position is not None and not np.all(action.position == 0):
                 # Get action position relative to object center
                 rel_x = action.position[0] * image.shape[1]
                 rel_y = action.position[1] * image.shape[0]
@@ -632,6 +655,48 @@ class SkillHandler:
                                 (int(finger2_start[0] - finger_length * np.cos(angle)),
                                 int(finger2_start[1] - finger_length * np.sin(angle))),
                                 color, 2)
+                
+                # Special visualization for twist
+                elif action.action_type == 'twist':
+                    direction = action.parameters.get('direction', 'clockwise')
+                    label += f" ({direction})"
+                    
+                    # Draw rotation arrow around the position
+                    radius = 20
+                    start_angle = 0
+                    end_angle = 3 * np.pi / 2 if direction == 'clockwise' else -3 * np.pi / 2
+                    
+                    # Draw arc
+                    num_points = 20
+                    angles = np.linspace(start_angle, end_angle, num_points)
+                    arc_points = []
+                    for angle in angles:
+                        x = int(pos_2d[0] + radius * np.cos(angle))
+                        y = int(pos_2d[1] + radius * np.sin(angle))
+                        arc_points.append((x, y))
+                    
+                    # Draw the arc line
+                    for j in range(len(arc_points) - 1):
+                        cv2.line(vis_image, arc_points[j], arc_points[j+1], color, 2)
+                    
+                    # Draw arrow head at the end
+                    if arc_points:
+                        last_point = arc_points[-1]
+                        arrow_angle = end_angle
+                        arrow_length = 8
+                        
+                        # Calculate arrow head points
+                        arrow_head1 = (
+                            int(last_point[0] - arrow_length * np.cos(arrow_angle - 0.5)),
+                            int(last_point[1] - arrow_length * np.sin(arrow_angle - 0.5))
+                        )
+                        arrow_head2 = (
+                            int(last_point[0] - arrow_length * np.cos(arrow_angle + 0.5)),
+                            int(last_point[1] - arrow_length * np.sin(arrow_angle + 0.5))
+                        )
+                        
+                        cv2.line(vis_image, last_point, arrow_head1, color, 2)
+                        cv2.line(vis_image, last_point, arrow_head2, color, 2)
                 
                 cv2.putText(
                     vis_image,
@@ -756,10 +821,15 @@ class SkillHandler:
                         cv2.line(vis_image, pos_2d, pivot_pixel, (0, 255, 255), 1, cv2.LINE_AA)
             
             else:
-                # For actions without position (close_gripper, release, retract_gripper)
+                # For actions without position (close_gripper, release, retract_gripper, twist without position)
+                action_label = f"{i+1}. {action.action_type}"
+                if action.action_type == 'twist':
+                    direction = action.parameters.get('direction', 'clockwise')
+                    action_label += f" ({direction})"
+                
                 cv2.putText(
                     vis_image,
-                    f"{i+1}. {action.action_type}",
+                    action_label,
                     (10, text_offset),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.5,
@@ -1009,53 +1079,6 @@ class SkillHandler:
         
         # Convert to quaternion (if your system uses quaternions)
         # This is a simplified conversion and may need adjustment
-        from scipy.spatial.transform import Rotation
-        r = Rotation.from_matrix(rotation_matrix)
-        quaternion = r.as_quat()  # [x, y, z, w] format
-        
-        # Reorder to [w, x, y, z] if needed
-        # quaternion = np.array([quaternion[3], quaternion[0], quaternion[1], quaternion[2]])
-        
-        return quaternion
-    
-    def _calculate_side_grasp_orientation(self, target_position, object_pose):
-        """
-        Calculate orientation for a side grasp approach
-        
-        Args:
-            target_position: 3D position of the target point
-            object_pose: 3D pose of the object
-            
-        Returns:
-            Orientation quaternion for side grasp
-        """
-        # Calculate vector from object center to target position
-        if object_pose is not None:
-            object_position = object_pose[:3]  # Extract position part
-            approach_vector = target_position - object_position
-        else:
-            # If object pose is unknown, default to horizontal approach
-            approach_vector = np.array([1, 0, 0])
-        
-        # Project onto horizontal plane (ignore Z component)
-        approach_vector[2] = 0
-        
-        # If the vector is too small, use a default approach
-        if np.linalg.norm(approach_vector) < 0.001:
-            approach_vector = np.array([1, 0, 0])
-        
-        # Normalize the vector
-        approach_vector = approach_vector / np.linalg.norm(approach_vector)
-        
-        # Create a coordinate system
-        z_axis = np.array([0, 0, 1])  # Upward
-        x_axis = approach_vector  # Approach direction
-        y_axis = np.cross(z_axis, x_axis)  # Perpendicular to both
-        
-        # Create rotation matrix
-        rotation_matrix = np.column_stack((x_axis, y_axis, z_axis))
-        
-        # Convert to quaternion
         from scipy.spatial.transform import Rotation
         r = Rotation.from_matrix(rotation_matrix)
         quaternion = r.as_quat()  # [x, y, z, w] format
