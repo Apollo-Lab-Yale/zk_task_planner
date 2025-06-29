@@ -972,7 +972,7 @@ if __name__ == "__main__":
             marker_size=0.05,  # 5cm markers
             dictionary_type=cv2.aruco.DICT_6X6_250,
             min_markers_for_transform=1,  # Need at least 1 common marker
-            debug=False,  # Start with clean output
+            debug=True,  # Start with clean output
             show_axes=True  # Enable 3D axes visualization
         )
         

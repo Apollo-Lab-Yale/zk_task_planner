@@ -401,8 +401,6 @@ class CuRoboMotionPlanner:
             config = config.cuda("cuda")
             config = config.to(torch.float32)
             state = self.motion_gen.kinematics.get_state(config)
-            print(state)
-            print(config)
             # Extract end-effector pose and quaternion with better debugging
             camera_pose = state.links_position.cpu().numpy()[0][1]  # [x, y, z]
             camera_quat_raw = state.links_quaternion.cpu().numpy()[0][1]
