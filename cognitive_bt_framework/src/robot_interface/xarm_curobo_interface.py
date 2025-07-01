@@ -104,7 +104,8 @@ class CuRoboMotionPlanner:
         print('CuRobo Motion Planner initialized with xArm SDK')
         if self.static_camera_tf is not None:
             print('Using static camera transform for pose conversions')
-    
+            print(f"Transform: \n {self.static_camera_tf}")
+            
     def initialize_default_config(self) -> RobotConfig:
         """Initialize default configuration for the planner"""
         config = RobotConfig()
@@ -143,34 +144,6 @@ class CuRoboMotionPlanner:
                 self.static_camera_position = static_camera_tf[:3, 3]
                 self.static_camera_rotation = Rotation.from_matrix(static_camera_tf[:3, :3])
                 print(f"Parsed 4x4 static camera transform: pos={self.static_camera_position}, rot={self.static_camera_rotation.as_quat()}")
-                
-            elif isinstance(static_camera_tf, (list, tuple)) and len(static_camera_tf) == 2:
-                # (translation, rotation) tuple
-                translation, rotation = static_camera_tf
-                
-                # Parse translation
-                if isinstance(translation, (list, tuple, np.ndarray)) and len(translation) == 3:
-                    self.static_camera_position = np.array(translation)
-                else:
-                    raise ValueError(f"Translation must be 3D vector, got {translation}")
-                
-                # Parse rotation
-                if isinstance(rotation, np.ndarray):
-                    if rotation.shape == (3, 3):
-                        # 3x3 rotation matrix
-                        self.static_camera_rotation = Rotation.from_matrix(rotation)
-                    elif rotation.shape == (4,):
-                        # Quaternion [x, y, z, w]
-                        self.static_camera_rotation = Rotation.from_quat(rotation)
-                    else:
-                        raise ValueError(f"Unsupported rotation matrix shape: {rotation.shape}")
-                elif isinstance(rotation, (list, tuple)) and len(rotation) == 4:
-                    # Quaternion as list/tuple [x, y, z, w]
-                    self.static_camera_rotation = Rotation.from_quat(np.array(rotation))
-                else:
-                    raise ValueError(f"Unsupported rotation format: {type(rotation)}")
-                    
-                print(f"Parsed tuple static camera transform: pos={self.static_camera_position}, rot={self.static_camera_rotation.as_quat()}")
                 
             else:
                 raise ValueError(f"static_camera_tf must be 4x4 matrix or (translation, rotation) tuple, got {type(static_camera_tf)}")
@@ -400,7 +373,9 @@ class CuRoboMotionPlanner:
             config = torch.from_numpy(np.array(self.arm.angles))
             config = config.cuda("cuda")
             config = config.to(torch.float32)
+            
             state = self.motion_gen.kinematics.get_state(config)
+            print(state)
             # Extract end-effector pose and quaternion with better debugging
             camera_pose = state.links_position.cpu().numpy()[0][1]  # [x, y, z]
             camera_quat_raw = state.links_quaternion.cpu().numpy()[0][1]
@@ -431,12 +406,16 @@ class CuRoboMotionPlanner:
             import copy
             # Create transformation matrix from end-effector to base
             camera_quat_copy = copy.deepcopy(camera_quat)
-            camera_quat = np.array([camera_quat_copy[1], camera_quat_copy[2], camera_quat_copy[3], camera_quat_copy[0]])
+            camera_quat = np.array([camera_quat_raw[1], camera_quat_raw[2], camera_quat_raw[3], camera_quat_raw[0]])
             
             print(f"Debug - joint state: {config}")
             print(f"Debug - camera_pose shape: {camera_pose.shape}, value: {list(camera_pose)}")
             print(f"Debug - camera_quat_raw shape: {camera_quat.shape}")
             print(f"Debug - camera_quat_raw: {list(camera_quat)}")
+            print(f"Debug - camera_quat_raw norm: {np.linalg.norm(list(camera_quat_raw))}")
+            print()
+            print()
+            print()
             
             camera_rotation = Rotation.from_quat(camera_quat)
             return camera_pose, camera_rotation
@@ -463,7 +442,7 @@ class CuRoboMotionPlanner:
             else:
                 print("Using dynamic camera transform for pose conversion")
                 camera_pose, camera_rotation = self.get_camera_transform()
-           
+            print(f"Pose before conversion pose: {position}, {orientation}")
             # Convert input position to homogeneous coordinates
             if isinstance(position, (list, tuple)):
                 position = np.array(position)
@@ -473,7 +452,7 @@ class CuRoboMotionPlanner:
             print(f"Rotated pose: {transformed_position}")
             
             # Apply translation
-            if self.static_camera_tf is not None:
+            if self.static_camera_tf is not None and do_translation:
                 # For static camera, always apply translation
                 transformed_position += camera_pose
             else:
@@ -1471,11 +1450,11 @@ class CuRoboMotionPlanner:
                 target_position = target_position[0]
                 
             if target_position[1] < 0:
-                target_position[1] += 0.02
+                target_position[1] += 0.07
             else:
-                target_position[1] -= 0.02
+                target_position[1] -= 0.07
             # target_position[0] += 0.02
-            if  target_position[2] < 0:
+            if  target_position[2] < 0.03:
                 target_position[2] = -0.03
             # target_position = [target_position[0], target_position[1], target_position[2] + 0.04]
             print(f"Target pose shifted: {target_position}")
@@ -1497,8 +1476,8 @@ class CuRoboMotionPlanner:
                 enable_opt=True,
                 enable_graph=True,
                 enable_graph_attempt=2,
-                enable_finetune_trajopt=True,
-                parallel_finetune=True,
+                enable_finetune_trajopt=False,
+                parallel_finetune=False,
                 time_dilation_factor=0.99
             )
             

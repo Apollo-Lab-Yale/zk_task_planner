@@ -252,7 +252,7 @@ class Camera:
                     print(f"Frame acquisition error: {e}")
                 time.sleep(0.1)
 
-    def get_frames(self, use_averaging=True):
+    def get_frames(self, use_averaging=False):
         """Get frames with guaranteed correct resolution"""
         try:
             frames = self._frame_queue.get(timeout=1.0)

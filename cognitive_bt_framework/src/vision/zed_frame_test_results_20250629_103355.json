@@ -1,0 +1,386 @@
+[
+  {
+    "transform_name": "identity",
+    "transform_matrix": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "success_rate": 1.0,
+    "successful_detections": 20,
+    "total_attempts": 20
+  },
+  {
+    "transform_name": "x_180",
+    "transform_matrix": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        -1.0,
+        -1.2246467991473532e-16,
+        0.0
+      ],
+      [
+        0.0,
+        1.2246467991473532e-16,
+        -1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "success_rate": 1.0,
+    "successful_detections": 20,
+    "total_attempts": 20
+  },
+  {
+    "transform_name": "y_180",
+    "transform_matrix": [
+      [
+        -1.0,
+        0.0,
+        1.2246467991473532e-16,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        -1.2246467991473532e-16,
+        0.0,
+        -1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "success_rate": 1.0,
+    "successful_detections": 20,
+    "total_attempts": 20
+  },
+  {
+    "transform_name": "z_180",
+    "transform_matrix": [
+      [
+        -1.0,
+        -1.2246467991473532e-16,
+        0.0,
+        0.0
+      ],
+      [
+        1.2246467991473532e-16,
+        -1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "success_rate": 1.0,
+    "successful_detections": 20,
+    "total_attempts": 20
+  },
+  {
+    "transform_name": "x_90",
+    "transform_matrix": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        2.220446049250313e-16,
+        -1.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        2.220446049250313e-16,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "success_rate": 1.0,
+    "successful_detections": 20,
+    "total_attempts": 20
+  },
+  {
+    "transform_name": "x_-90",
+    "transform_matrix": [
+      [
+        1.0,
+        -0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        2.220446049250313e-16,
+        1.0,
+        0.0
+      ],
+      [
+        -0.0,
+        -1.0,
+        2.220446049250313e-16,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "success_rate": 1.0,
+    "successful_detections": 20,
+    "total_attempts": 20
+  },
+  {
+    "transform_name": "y_90",
+    "transform_matrix": [
+      [
+        2.220446049250313e-16,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        -1.0,
+        0.0,
+        2.220446049250313e-16,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "success_rate": 1.0,
+    "successful_detections": 20,
+    "total_attempts": 20
+  },
+  {
+    "transform_name": "y_-90",
+    "transform_matrix": [
+      [
+        2.220446049250313e-16,
+        -0.0,
+        -1.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        -0.0,
+        0.0
+      ],
+      [
+        1.0,
+        0.0,
+        2.220446049250313e-16,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "success_rate": 1.0,
+    "successful_detections": 20,
+    "total_attempts": 20
+  },
+  {
+    "transform_name": "z_90",
+    "transform_matrix": [
+      [
+        2.220446049250313e-16,
+        -1.0,
+        0.0,
+        0.0
+      ],
+      [
+        1.0,
+        2.220446049250313e-16,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "success_rate": 1.0,
+    "successful_detections": 20,
+    "total_attempts": 20
+  },
+  {
+    "transform_name": "z_-90",
+    "transform_matrix": [
+      [
+        2.220446049250313e-16,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        -1.0,
+        2.220446049250313e-16,
+        -0.0,
+        0.0
+      ],
+      [
+        -0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "success_rate": 1.0,
+    "successful_detections": 20,
+    "total_attempts": 20
+  },
+  {
+    "transform_name": "cv_to_robotics",
+    "transform_matrix": [
+      [
+        0,
+        0,
+        1,
+        0
+      ],
+      [
+        -1,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        -1,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        1
+      ]
+    ],
+    "success_rate": 1.0,
+    "successful_detections": 20,
+    "total_attempts": 20
+  },
+  {
+    "transform_name": "zed_standard",
+    "transform_matrix": [
+      [
+        1,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        -1,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        -1,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        1
+      ]
+    ],
+    "success_rate": 1.0,
+    "successful_detections": 20,
+    "total_attempts": 20
+  }
+]

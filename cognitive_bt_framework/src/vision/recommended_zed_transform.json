@@ -1,0 +1,35 @@
+{
+  "recommended_zed_transform": {
+    "name": "identity",
+    "matrix": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "success_rate": 1.0,
+    "description": "Best performing ZED coordinate frame transform"
+  },
+  "timestamp": 1751209245.8023536,
+  "test_summary": "Tested 31 different coordinate frame orientations"
+}

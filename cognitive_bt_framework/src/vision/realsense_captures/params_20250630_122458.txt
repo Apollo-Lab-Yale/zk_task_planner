@@ -1,0 +1,6 @@
+Timestamp: 20250630_122458
+Camera settings:
+  exposure: 7001
+  gain: 16
+  laser_power: 180
+  auto_exposure: False

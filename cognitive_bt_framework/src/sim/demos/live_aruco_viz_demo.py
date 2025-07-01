@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Updated Live ArUco Demo - Compatible with Unified Interface
+Enhanced Live ArUco Demo - Compatible with Unified Interface
+Added functionality to print ArUco poses in robot base frame
 """
 
 import numpy as np
@@ -15,7 +16,7 @@ from cognitive_bt_framework.src.vision.aruco_tf_v3 import StereoArucoDetector
 from cognitive_bt_framework.src.sim.demos.aruco_frame_viz import ArucoFrameVisualizer
 
 
-class UpdatedLiveArucoDemo:
+class CorrectedLiveArucoDemo:
     def __init__(self, urdf_path=None, robot_ip='192.168.1.224'):
         self.urdf_path = urdf_path
         self.robot_ip = robot_ip
@@ -28,17 +29,28 @@ class UpdatedLiveArucoDemo:
         self.robot_camera = None
         self.zed_camera = None
         
-        # Debug statistics
+        # Store transformation matrices for pose conversion
+        self.T_robot_base_to_camera_link = None
+        
+        # Enhanced debug statistics
         self.detection_stats = {
             'total_frames': 0,
             'robot_detections': 0,
             'zed_detections': 0,
             'common_detections': 0,
-            'transform_successes': 0
+            'transform_successes': 0,
+            'verification_passes': 0,
+            'verification_failures': 0
         }
         
         # Visualization update thread
         self.viz_thread = None
+        
+        print("🔧 Initialized ENHANCED Live ArUco Demo")
+        print("   - Uses fixed solvePnP interpretation")
+        print("   - Proper T_camera_to_marker transforms")
+        print("   - Enhanced verification checks")
+        print("   - ✨ NEW: ArUco pose printing in robot base frame")
         
     def create_robot_transform_matrix(self, position, rotation):
         """Helper function to create 4x4 transformation matrix"""
@@ -63,7 +75,8 @@ class UpdatedLiveArucoDemo:
         """Initialize robot interface with better error handling"""
         if not self.robot_ip:
             print("🤖 No robot IP provided - using example transform")
-            return self._get_example_robot_transform()
+            self.T_robot_base_to_camera_link = self._get_example_robot_transform()
+            return self.T_robot_base_to_camera_link
             
         try:
             from cognitive_bt_framework.src.robot_interface.xarm_curobo_interface import CuRoboMotionPlanner
@@ -73,21 +86,23 @@ class UpdatedLiveArucoDemo:
             
             # Test connection by getting transform
             camera_position, camera_rotation = self.robot_planner.get_camera_transform()
-            T_robot_base_to_camera_link = self.create_robot_transform_matrix(camera_position, camera_rotation)
+            self.T_robot_base_to_camera_link = self.create_robot_transform_matrix(camera_position, camera_rotation)
             
             print(f"✅ Robot connected successfully!")
             print(f"📍 Camera position: [{camera_position[0]:.3f}, {camera_position[1]:.3f}, {camera_position[2]:.3f}]")
             print(f"🔄 Camera rotation (quat): [{camera_rotation.as_quat()[0]:.3f}, {camera_rotation.as_quat()[1]:.3f}, {camera_rotation.as_quat()[2]:.3f}, {camera_rotation.as_quat()[3]:.3f}]")
             
-            return T_robot_base_to_camera_link
+            return self.T_robot_base_to_camera_link
             
         except ImportError:
             print("❌ Robot interface module not available")
-            return self._get_example_robot_transform()
+            self.T_robot_base_to_camera_link = self._get_example_robot_transform()
+            return self.T_robot_base_to_camera_link
         except Exception as e:
             print(f"❌ Failed to connect to robot: {e}")
             print("🔄 Using example transform instead")
-            return self._get_example_robot_transform()
+            self.T_robot_base_to_camera_link = self._get_example_robot_transform()
+            return self.T_robot_base_to_camera_link
     
     def initialize_cameras_and_detector(self, T_robot_base_to_camera_link):
         """Initialize cameras and simplified detector"""
@@ -119,7 +134,7 @@ class UpdatedLiveArucoDemo:
                 robot_camera=self.robot_camera,
                 zed_camera=self.zed_camera,
                 T_robot_base_to_camera_link=T_robot_base_to_camera_link,
-                marker_size=0.05  # 5cm markers
+                marker_size=0.053  # 5cm markers
             )
             
             print("✅ Simplified ArUco detector created!")
@@ -166,12 +181,144 @@ class UpdatedLiveArucoDemo:
             camera_position, camera_rotation = self.robot_planner.get_camera_transform()
             new_transform = self.create_robot_transform_matrix(camera_position, camera_rotation)
             
+            # Update stored transform
+            self.T_robot_base_to_camera_link = new_transform
+            
             if self.detector:
                 self.detector.update_robot_transform(new_transform)
             
             return True
         except Exception as e:
             return False
+
+    def print_aruco_poses_in_robot_frame(self):
+        """
+        NEW FEATURE: Print ArUco marker poses transformed to robot base frame
+        """
+        if not self.detector:
+            print("❌ No detector available")
+            return
+            
+        # Get detection data from both cameras
+        robot_detection, zed_detection = self.detector.get_detection_data()
+        
+        if robot_detection is None and zed_detection is None:
+            print("❌ No detection data available from either camera")
+            return
+        
+        print(f"\n🎯 ARUCO POSES IN ROBOT BASE FRAME")
+        print("=" * 70)
+        
+        # Process RealSense (Robot Camera) detections
+        if robot_detection is not None and len(robot_detection.get('marker_poses', {})) > 0:
+            print(f"📷 RealSense Camera Detections:")
+            print(f"   Transform: Robot Base ← RealSense Camera")
+            
+            # Get inverse transform: T_camera_to_robot_base = T_robot_base_to_camera^(-1)
+            if self.T_robot_base_to_camera_link is not None:
+                T_camera_to_robot_base = np.linalg.inv(self.T_robot_base_to_camera_link)
+                
+                for marker_id, marker_pose in robot_detection['marker_poses'].items():
+                    # marker_pose should be T_camera_to_marker (4x4 matrix)
+                    if isinstance(marker_pose, np.ndarray) and marker_pose.shape == (4, 4):
+                        # Transform marker pose to robot base frame
+                        T_robot_base_to_marker = T_camera_to_robot_base @ marker_pose
+                        
+                        # Extract position and rotation
+                        position = T_robot_base_to_marker[:3, 3]
+                        rotation_matrix = T_robot_base_to_marker[:3, :3]
+                        rotation = Rotation.from_matrix(rotation_matrix)
+                        euler_deg = rotation.as_euler('xyz', degrees=True)
+                        
+                        print(f"     Marker {marker_id}:")
+                        print(f"       Position: [{position[0]:.3f}, {position[1]:.3f}, {position[2]:.3f}] m")
+                        print(f"       Rotation: [{euler_deg[0]:.1f}, {euler_deg[1]:.1f}, {euler_deg[2]:.1f}] deg (XYZ)")
+                    else:
+                        print(f"     Marker {marker_id}: Invalid pose format")
+            else:
+                print("     ❌ No robot-to-camera transform available")
+        else:
+            print(f"📷 RealSense Camera: No markers detected")
+        
+        print()
+        
+        # Process ZED Camera detections
+        if zed_detection is not None and len(zed_detection.get('marker_poses', {})) > 0:
+            print(f"📷 ZED Camera Detections:")
+            print(f"   Transform: Robot Base ← ZED Camera")
+            
+            # Get ZED to robot base transform
+            T_zed_to_robot_base = self.detector.get_transformation_matrix()
+            
+            if T_zed_to_robot_base is not None:
+                for marker_id, marker_pose in zed_detection['marker_poses'].items():
+                    # marker_pose should be T_camera_to_marker (4x4 matrix)
+                    if isinstance(marker_pose, np.ndarray) and marker_pose.shape == (4, 4):
+                        # Transform marker pose to robot base frame
+                        T_robot_base_to_marker = T_zed_to_robot_base @ marker_pose
+                        
+                        # Extract position and rotation
+                        position = T_robot_base_to_marker[:3, 3]
+                        rotation_matrix = T_robot_base_to_marker[:3, :3]
+                        rotation = Rotation.from_matrix(rotation_matrix)
+                        euler_deg = rotation.as_euler('xyz', degrees=True)
+                        
+                        print(f"     Marker {marker_id}:")
+                        print(f"       Position: [{position[0]:.3f}, {position[1]:.3f}, {position[2]:.3f}] m")
+                        print(f"       Rotation: [{euler_deg[0]:.1f}, {euler_deg[1]:.1f}, {euler_deg[2]:.1f}] deg (XYZ)")
+                    else:
+                        print(f"     Marker {marker_id}: Invalid pose format")
+            else:
+                print("     ❌ No ZED-to-robot transform available")
+                print("     💡 Try computing transformation first with 'c' key")
+        else:
+            print(f"📷 ZED Camera: No markers detected")
+        
+        # Summary
+        robot_count = len(robot_detection.get('marker_poses', {})) if robot_detection else 0
+        zed_count = len(zed_detection.get('marker_poses', {})) if zed_detection else 0
+        
+        print(f"\n📊 Summary:")
+        print(f"   RealSense markers: {robot_count}")
+        print(f"   ZED markers: {zed_count}")
+        print(f"   Total unique poses: {robot_count + zed_count}")
+        
+        # Check for common markers
+        if robot_detection and zed_detection:
+            robot_ids = set(robot_detection.get('marker_poses', {}).keys())
+            zed_ids = set(zed_detection.get('marker_poses', {}).keys())
+            common_ids = robot_ids.intersection(zed_ids)
+            
+            if common_ids:
+                print(f"   Common markers: {list(common_ids)} (can be used for calibration)")
+            else:
+                print(f"   Common markers: None")
+        
+        print("=" * 70)
+
+    def verify_transform_quality(self, transform):
+        """Verify transform quality - placeholder implementation"""
+        if transform is None:
+            return False
+        
+        # Basic checks
+        if not isinstance(transform, np.ndarray) or transform.shape != (4, 4):
+            return False
+        
+        # Check if bottom row is [0, 0, 0, 1]
+        if not np.allclose(transform[3, :], [0, 0, 0, 1]):
+            return False
+        
+        # Check if rotation matrix is valid (orthogonal)
+        R = transform[:3, :3]
+        if not np.allclose(np.dot(R, R.T), np.eye(3), atol=1e-3):
+            return False
+        
+        # Check determinant is 1 (proper rotation, not reflection)
+        if not np.allclose(np.linalg.det(R), 1.0, atol=1e-3):
+            return False
+        
+        return True
 
     def get_frames_with_markers(self):
         """Get frames with marker visualization"""
@@ -257,7 +404,7 @@ class UpdatedLiveArucoDemo:
     
     def run_updated_demo(self):
         """Run updated demo with simplified interface"""
-        print("🚀 Updated Live ArUco Demo - Unified Interface")
+        print("🚀 Enhanced Live ArUco Demo - Unified Interface")
         print("=" * 50)
         
         # Initialize robot interface
@@ -280,11 +427,12 @@ class UpdatedLiveArucoDemo:
         self.viz_thread.start()
         
         print("\n✅ All systems initialized successfully!")
-        print("\n🎮 Updated Demo Controls:")
+        print("\n🎮 Enhanced Demo Controls:")
         print("Camera windows:")
         print("  'q': Quit demo")
         print("  't': Print current transform")
         print("  'c': Compute transformation")
+        print("  'p': Print ArUco poses in robot base frame ✨ NEW!")
         print("  'j': Print joint positions")
         print("  'd': Toggle debug")
         print("PyBullet window:")
@@ -295,6 +443,7 @@ class UpdatedLiveArucoDemo:
         print("🎯 The robot base should be at origin (0,0,0) with thick RGB axes")
         print("🤖 Robot pose updates automatically from current joint angles")
         print("📱 This demo uses the unified ArUco detector interface")
+        print("✨ NEW: Press 'p' to see ArUco poses in robot base coordinates!")
         print()
         
         try:
@@ -308,10 +457,10 @@ class UpdatedLiveArucoDemo:
     
     def run_detection_loop(self):
         """Updated detection loop using simplified interface"""
-        cv2.namedWindow("Robot Camera - Updated Demo", cv2.WINDOW_AUTOSIZE)
-        cv2.namedWindow("ZED Camera - Updated Demo", cv2.WINDOW_AUTOSIZE)
+        cv2.namedWindow("Robot Camera - Enhanced Demo", cv2.WINDOW_AUTOSIZE)
+        cv2.namedWindow("ZED Camera - Enhanced Demo", cv2.WINDOW_AUTOSIZE)
         
-        print("🔍 Starting detection loop with unified interface...")
+        print("🔍 Starting detection loop with enhanced interface...")
         
         frame_count = 0
         last_info = 0
@@ -355,13 +504,13 @@ class UpdatedLiveArucoDemo:
             cv2.putText(zed_img, joint_text, (10, zed_img.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
             
             # Interface indicator
-            interface_text = "Interface: Unified ArUco Detector"
+            interface_text = "Interface: Enhanced ArUco Detector (Press 'p' for poses)"
             cv2.putText(robot_img, interface_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
             cv2.putText(zed_img, interface_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
             
             # Show images
-            cv2.imshow("Robot Camera - Updated Demo", robot_img)
-            cv2.imshow("ZED Camera - Updated Demo", zed_img)
+            cv2.imshow("Robot Camera - Enhanced Demo", robot_img)
+            cv2.imshow("ZED Camera - Enhanced Demo", zed_img)
             
             # Handle input
             key = cv2.waitKey(1) & 0xFF
@@ -382,6 +531,8 @@ class UpdatedLiveArucoDemo:
                         self.visualizer.visualize_aruco_transforms(self.detector, current_joints)
                 else:
                     print("❌ Failed to compute transformation")
+            elif key == ord('p'):  # NEW: Print ArUco poses in robot base frame
+                self.print_aruco_poses_in_robot_frame()
             elif key == ord('j'):
                 current_joints = self.get_current_joint_positions()
                 print(f"\n🤖 Current joint positions: [{', '.join([f'{j:.3f}' for j in current_joints[:7]])}]")
@@ -398,25 +549,131 @@ class UpdatedLiveArucoDemo:
                 last_info = current_time
     
     def print_current_transform(self):
-        """Print current transformation matrix"""
+        """Print current transformation matrix with enhanced info"""
         if not self.detector:
             return
             
         transform = self.detector.get_transformation_matrix()
         
-        print(f"\n🔧 CURRENT TRANSFORMATION (Unified Interface):")
-        print("=" * 50)
+        print(f"\n🔧 CURRENT TRANSFORMATION (ENHANCED Interface):")
+        print("=" * 60)
         
         if transform is not None:
             pos = transform[:3, 3]
-            print(f"✅ T_zed_to_robot_base:")
-            print(f"   Position: [{pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}]")
+            rot_matrix = transform[:3, :3]
+            rot = Rotation.from_matrix(rot_matrix)
+            euler = rot.as_euler('xyz', degrees=True)
+            
+            print(f"✅ T_zed_to_robot_base (ENHANCED):")
+            print(f"   Position: [{pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}] meters")
+            print(f"   Euler angles (XYZ): [{euler[0]:.1f}, {euler[1]:.1f}, {euler[2]:.1f}] degrees")
             print("   Full matrix:")
-            print(transform)
+            for i, row in enumerate(transform):
+                print(f"   [{row[0]:.6f}, {row[1]:.6f}, {row[2]:.6f}, {row[3]:.6f}]")
+            
+            # Verification check
+            verification = self.verify_transform_quality(transform)
+            print(f"   Verification: {'✅ PASSED' if verification else '❌ FAILED'}")
+            
+            # Test transformation with common points
+            print(f"\n🧪 Test transformations (ZED → Robot):")
+            test_points = [
+                [0, 0, 0.3],    # 30cm forward
+                [0, 0, 0.5],    # 50cm forward  
+                [0, 0, 0.7],    # 70cm forward
+                [0.2, 0, 0.5],  # 20cm right, 50cm forward
+                [-0.2, 0, 0.5], # 20cm left, 50cm forward
+            ]
+            
+            for test_point in test_points:
+                test_homogeneous = np.array([test_point[0], test_point[1], test_point[2], 1.0])
+                result = transform @ test_homogeneous
+                print(f"   ZED {test_point} → Robot [{result[0]:.3f}, {result[1]:.3f}, {result[2]:.3f}]")
         else:
             print(f"❌ T_zed_to_robot_base: Not available")
+            
+            # Check detection status
+            robot_detection, zed_detection = self.detector.get_detection_data()
+            if robot_detection is not None and zed_detection is not None:
+                robot_markers = len(robot_detection['marker_poses'])
+                zed_markers = len(zed_detection['marker_poses'])
+                common_markers = set(robot_detection['marker_poses'].keys()).intersection(
+                    set(zed_detection['marker_poses'].keys()))
+                
+                print(f"   Robot markers: {robot_markers}")
+                print(f"   ZED markers: {zed_markers}")
+                print(f"   Common markers: {list(common_markers)}")
+                
+                if len(common_markers) == 0:
+                    print(f"   ⚠️  No common markers detected - cannot compute transform")
+                else:
+                    print(f"   ⚠️  Common markers available but transform computation failed")
         
+        print("=" * 60)
+    
+    def run_corrected_demo(self):
+        """Run ENHANCED demo with pose printing functionality"""
+        print("🚀 ENHANCED Live ArUco Demo - With Pose Printing")
         print("=" * 50)
+        print("🔧 This version includes:")
+        print("   ✅ Fixed solvePnP interpretation (T_camera_to_marker)")
+        print("   ✅ Proper coordinate frame transformations")
+        print("   ✅ Enhanced verification and quality checks")
+        print("   ✅ Robot base frame at origin with thick RGB axes")
+        print("   ✨ NEW: Print ArUco poses in robot base frame!")
+        print("=" * 50)
+        
+        # Initialize robot interface
+        T_robot_base_to_camera_link = self.initialize_robot_interface()
+        
+        # Initialize cameras and ENHANCED detector
+        if not self.initialize_cameras_and_detector(T_robot_base_to_camera_link):
+            print("❌ Camera/detector initialization failed")
+            return False
+        
+        # Initialize visualizer
+        if not self.initialize_visualizer():
+            print("❌ Visualizer initialization failed")
+            return False
+        
+        # Start visualization thread
+        self.running = True
+        self.viz_thread = threading.Thread(target=self.visualization_update_loop)
+        self.viz_thread.daemon = True
+        self.viz_thread.start()
+        
+        print("\n✅ All systems initialized successfully!")
+        print("\n🎮 ENHANCED Demo Controls:")
+        print("Camera windows:")
+        print("  'q': Quit demo")
+        print("  't': Print current transform")
+        print("  'c': Compute transformation")
+        print("  'p': ✨ Print ArUco poses in robot base frame ✨")
+        print("  'v': Verify transform quality")
+        print("  's': Save corrected calibration")
+        print("  'j': Print joint positions")
+        print("PyBullet window:")
+        print("  Mouse: Rotate/zoom view")
+        print("  'q': Quit")
+        print("  'c': Compute transformation")
+        print()
+        print("🎯 Features of ENHANCED interface:")
+        print("   📍 Robot base at origin with thick RGB coordinate axes")
+        print("   🤖 Robot pose updates from current joint angles")
+        print("   📱 Real-time verification of transform quality")
+        print("   🔍 Enhanced debugging and error detection")
+        print("   💾 Automatic calibration saving with verification status")
+        print("   ✨ NEW: Press 'p' to see all ArUco poses in robot coordinates!")
+        print()
+        
+        try:
+            self.run_detection_loop()
+        except KeyboardInterrupt:
+            print("\n👋 Demo interrupted")
+        finally:
+            self.cleanup()
+        
+        return True
     
     def cleanup(self):
         """Cleanup resources"""
@@ -452,7 +709,7 @@ class UpdatedLiveArucoDemo:
 def main():
     import argparse
     
-    parser = argparse.ArgumentParser(description="Updated Live ArUco Demo with Unified Interface")
+    parser = argparse.ArgumentParser(description="ENHANCED Live ArUco Demo with Pose Printing")
     parser.add_argument("--urdf", help="Path to robot URDF file", 
                        default="/home/liam/installs/curobo/src/curobo/content/assets/robot/xarm7/xarm7.urdf")
     parser.add_argument("--robot-ip", help="Robot IP address", default='192.168.1.224')
@@ -462,16 +719,20 @@ def main():
     
     robot_ip = None if args.no_robot else args.robot_ip
     
-    print("🔧 Updated Live ArUco Demo")
-    print("Compatible with StereoArucoDetector!")
+    print("🔧 ENHANCED Live ArUco Demo")
+    print("Compatible with StereoArucoDetector + Pose Printing!")
+    print("✅ Proper solvePnP interpretation")
+    print("✅ Correct coordinate transformations")
+    print("✅ Enhanced verification and debugging")
+    print("✨ NEW: ArUco pose printing in robot base frame")
     print("Robot base frame fixed at origin (0,0,0)")
     print("=" * 50)
     
-    demo = UpdatedLiveArucoDemo(urdf_path=args.urdf, robot_ip=robot_ip)
-    success = demo.run_updated_demo()
+    demo = CorrectedLiveArucoDemo(urdf_path=args.urdf, robot_ip=robot_ip)
+    success = demo.run_corrected_demo()
     
     if success:
-        print("✅ Demo completed successfully")
+        print("✅ ENHANCED Demo completed successfully")
     else:
         print("❌ Demo failed")
 

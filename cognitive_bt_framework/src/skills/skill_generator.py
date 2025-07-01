@@ -215,6 +215,201 @@ class SkillGenerator:
         
         return tuple(normal)
 
+
+     # Helper function to find optimal label position avoiding overlaps
+    def find_optimal_label_position(self, px, py, alpha_id, all_points, placed_labels, img_width, img_height):
+        """
+        Find the best position for a label that doesn't overlap with points or other labels.
+        Improved version with better overlap avoidance and more positioning options.
+        """
+        
+        # Get label dimensions
+        label_bg_size = cv2.getTextSize(alpha_id, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]  # Slightly smaller font
+        label_width, label_height = label_bg_size[0] + 6, label_bg_size[1] + 6  # More padding
+        
+        # Define more candidate positions in concentric circles around the point
+        base_distance = 25  # Base distance from point
+        distances = [base_distance, base_distance * 1.5, base_distance * 2, base_distance * 2.5]  # Multiple radii
+        
+        candidate_positions = []
+        
+        # For each distance, try 8 directions
+        for distance in distances:
+            angles = [0, 45, 90, 135, 180, 225, 270, 315]  # 8 directions in degrees
+            for angle in angles:
+                rad = np.radians(angle)
+                offset_x = int(distance * np.cos(rad))
+                offset_y = int(distance * np.sin(rad))
+                
+                label_x = px + offset_x
+                label_y = py + offset_y
+                
+                candidate_positions.append((offset_x, offset_y, label_x, label_y, distance, angle))
+        
+        best_position = None
+        best_score = -1
+        
+        for offset_x, offset_y, label_x, label_y, distance, angle in candidate_positions:
+            # Check if label is within image bounds with margin
+            margin = 10
+            if (label_x < margin or label_y < margin or 
+                label_x + label_width > img_width - margin or 
+                label_y + label_height > img_height - margin):
+                continue
+            
+            # Check distance from all points (including current one)
+            min_point_distance = float('inf')
+            for other_px, other_py in all_points:
+                # Calculate distance from label corners to point to ensure no overlap with point markers
+                label_corners = [
+                    (label_x, label_y),
+                    (label_x + label_width, label_y),
+                    (label_x, label_y + label_height),
+                    (label_x + label_width, label_y + label_height)
+                ]
+                
+                corner_distances = [
+                    np.sqrt((corner_x - other_px)**2 + (corner_y - other_py)**2)
+                    for corner_x, corner_y in label_corners
+                ]
+                min_corner_distance = min(corner_distances)
+                min_point_distance = min(min_point_distance, min_corner_distance)
+            
+            # Check overlap with all placed labels
+            has_overlap = False
+            min_label_distance = float('inf')
+            
+            for placed_x, placed_y, placed_w, placed_h in placed_labels:
+                # Check for rectangle overlap with extra buffer
+                buffer = 5  # Minimum space between labels
+                if not (label_x + label_width + buffer < placed_x or 
+                    placed_x + placed_w + buffer < label_x or
+                    label_y + label_height + buffer < placed_y or 
+                    placed_y + placed_h + buffer < label_y):
+                    has_overlap = True
+                    break
+                else:
+                    # Calculate minimum distance between label centers
+                    label_center_x = label_x + label_width // 2
+                    label_center_y = label_y + label_height // 2
+                    placed_center_x = placed_x + placed_w // 2
+                    placed_center_y = placed_y + placed_h // 2
+                    center_dist = np.sqrt((label_center_x - placed_center_x)**2 + 
+                                        (label_center_y - placed_center_y)**2)
+                    min_label_distance = min(min_label_distance, center_dist)
+            
+            # Score this position (higher is better)
+            if has_overlap:
+                continue  # Skip overlapping positions entirely
+            
+            if min_point_distance < 15:  # Too close to a point marker
+                score = -50 + min_point_distance
+            else:
+                # Good position, score based on multiple factors
+                distance_score = min_point_distance  # Prefer further from points
+                label_clearance_score = min_label_distance if min_label_distance != float('inf') else 100
+                
+                # Prefer certain directions (right and bottom-right are usually best)
+                direction_preference = 0
+                if 315 <= angle <= 45 or angle == 0:  # Right side
+                    direction_preference = 20
+                elif 45 < angle <= 135:  # Bottom side
+                    direction_preference = 15
+                elif 135 < angle <= 225:  # Left side  
+                    direction_preference = 5
+                else:  # Top side
+                    direction_preference = 10
+                
+                # Prefer closer distances if possible
+                distance_penalty = distance / 10
+                
+                score = distance_score + label_clearance_score + direction_preference - distance_penalty
+            
+            if score > best_score:
+                best_score = score
+                best_position = (label_x, label_y, offset_x, offset_y)
+        
+        # If no good position found, try a systematic grid search as fallback
+        if best_position is None:
+            best_position = self._grid_search_label_position(
+                px, py, label_width, label_height, placed_labels, img_width, img_height
+            )
+        
+        # Final fallback: place to the right with offset to minimize overlap
+        if best_position is None:
+            # Find a y-offset that minimizes overlap
+            best_y_offset = -10
+            min_overlap_count = float('inf')
+            
+            for y_offset in range(-50, 51, 10):
+                label_x = px + 30
+                label_y = py + y_offset
+                
+                if label_y < 0 or label_y + label_height > img_height:
+                    continue
+                    
+                overlap_count = 0
+                for placed_x, placed_y, placed_w, placed_h in placed_labels:
+                    if not (label_x + label_width < placed_x or 
+                        placed_x + placed_w < label_x or
+                        label_y + label_height < placed_y or 
+                        placed_y + placed_h < label_y):
+                        overlap_count += 1
+                
+                if overlap_count < min_overlap_count:
+                    min_overlap_count = overlap_count
+                    best_y_offset = y_offset
+            
+            best_position = (px + 30, py + best_y_offset, 30, best_y_offset)
+        
+        return best_position
+
+    def _grid_search_label_position(self, px, py, label_width, label_height, placed_labels, img_width, img_height):
+        """
+        Systematic grid search for label placement when other methods fail.
+        """
+        search_radius = 80
+        step_size = 10
+        
+        best_position = None
+        min_overlaps = float('inf')
+        
+        for dx in range(-search_radius, search_radius + 1, step_size):
+            for dy in range(-search_radius, search_radius + 1, step_size):
+                label_x = px + dx
+                label_y = py + dy
+                
+                # Check bounds
+                if (label_x < 0 or label_y < 0 or 
+                    label_x + label_width > img_width or 
+                    label_y + label_height > img_height):
+                    continue
+                
+                # Count overlaps
+                overlap_count = 0
+                for placed_x, placed_y, placed_w, placed_h in placed_labels:
+                    if not (label_x + label_width < placed_x or 
+                        placed_x + placed_w < label_x or
+                        label_y + label_height < placed_y or 
+                        placed_y + placed_h < label_y):
+                        overlap_count += 1
+                
+                # Prefer positions with fewer overlaps, and closer to original point
+                distance = np.sqrt(dx**2 + dy**2)
+                score = -overlap_count * 1000 - distance  # Heavily penalize overlaps
+                
+                if overlap_count < min_overlaps or (overlap_count == min_overlaps and distance < 50):
+                    min_overlaps = overlap_count
+                    best_position = (label_x, label_y, dx, dy)
+                    
+                    if overlap_count == 0:  # Found non-overlapping position
+                        break
+            
+            if min_overlaps == 0:  # Found non-overlapping position
+                break
+        
+        return best_position
+
     def _visualize_points_of_interest(
             self, 
             image: np.ndarray, 
@@ -239,6 +434,22 @@ class SkillGenerator:
             Tuple of (surface_img, points_img)
         """
         h, w = image.shape[:2]
+
+        # Define a consistent color palette for points (BGR format for OpenCV)
+        point_colors = [
+            (0, 0, 255),      # Red
+            (255, 0, 0),      # Blue  
+            (0, 255, 0),      # Green
+            (0, 255, 255),    # Yellow
+            (255, 0, 255),    # Magenta
+            (255, 255, 0),    # Cyan
+            (0, 128, 255),    # Orange
+            (128, 0, 128),    # Purple
+            (0, 128, 0),      # Dark Green
+            (128, 128, 0),    # Olive
+            (255, 128, 0),    # Light Blue
+            (0, 0, 128),      # Dark Red
+        ]
 
         # Ensure mask has same dimensions as visualization image
         if obj_info.mask is not None and obj_info.mask.shape[:2] != (h, w):
@@ -315,11 +526,11 @@ class SkillGenerator:
                         (centroid_x, centroid_y),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.5,
-                        (0, 0, 0),  # White text
+                        (0, 0, 0),  # Black outline
                         4
                     )
                     
-                    # # Add surface ID at centroid
+                    # Add surface ID at centroid
                     cv2.putText(
                         surface_img,
                         alpha_id,
@@ -329,7 +540,6 @@ class SkillGenerator:
                         (255, 255, 255),  # White text
                         2
                     )
-                    
                     
             # Add surface overlay with transparency
             surface_img = cv2.addWeighted(surface_img, 1.0, surface_overlay, 0.3, 0)
@@ -370,77 +580,108 @@ class SkillGenerator:
         
         # Create the second image: Points of interest
         points_img = image.copy()
-        
-        
-        # Draw points of interest if provided
+
         if points is not None and len(points) > 0:
-            # If 'pixel_coords' is in points, use that
+            # Collect all point coordinates for overlap checking
+            all_point_coords = []
+            placed_labels = []  # Track placed label positions
+            
+            # Sort points by some criteria to prioritize important ones
+            # This helps ensure important points get good label positions first
             if 'pixel_coords' in points and points['pixel_coords']:
                 pixel_coords = points['pixel_coords']
                 scores = points.get('scores', [1.0] * len(pixel_coords))
                 ids = points.get('ids', [f"p{i}" for i in range(len(pixel_coords))])
                 
-                # Calculate score range for coloring
-                min_score = min(scores) if scores else 0
-                max_score = max(scores) if scores else 1
-                score_range = max_score - min_score if max_score > min_score else 1
+                # Sort by score (highest first) to prioritize better detection results
+                sorted_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
                 
-                # Draw each point
-                for i, ((px, py), score, point_id) in enumerate(zip(pixel_coords, scores, ids)):
-                    # Normalize score to [0, 1]
-                    norm_score = (score - min_score) / score_range if score_range > 0 else 0.5
+                # Collect all point coordinates
+                all_point_coords = [(pixel_coords[i][0], pixel_coords[i][1]) for i in sorted_indices]
+                
+                # Draw each point with improved positioning
+                for idx, i in enumerate(sorted_indices):
+                    px, py = pixel_coords[i]
+                    score = scores[i]
+                    point_id = ids[i]
                     
-                    # Map to color (blue to red based on score)
-                    color = (
-                        int(255 * (1 - norm_score)),  # B
-                        0,                           # G
-                        int(255 * norm_score)         # R
-                    )
+                    # Get color for this point (cycle through available colors)
+                    color = point_colors[idx % len(point_colors)]
                     
-                    # Draw circle for point
-                    cv2.circle(
-                        points_img, 
-                        (px, py), 
-                        radius=5, 
-                        color=color, 
-                        thickness=2
-                    )
-                    
-                    # Draw label (use alphabetical ID)
+                    # Generate alphabetical ID if not already alphabetical
                     if not point_id.isalpha():
-                        # If ID is not already alphabetical, generate one
-                        point_id = get_alpha_id(i + 1)
+                        alpha_id = get_alpha_id(idx + 1)
+                    else:
+                        alpha_id = point_id
                     
-                    cv2.putText(
-                        points_img,
-                        alpha_id,
-                        (px, py ),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (0, 0, 0),
-                        4,
-                        cv2.LINE_AA
+                    # Draw circle for point with colored outline (slightly larger for better visibility)
+                    cv2.circle(points_img, (px, py), radius=10, color=color, thickness=3)
+                    # Draw white center for better visibility
+                    cv2.circle(points_img, (px, py), radius=6, color=(255, 255, 255), thickness=-1)
+                    # Add a small colored center dot
+                    cv2.circle(points_img, (px, py), radius=3, color=color, thickness=-1)
+                    
+                    # Find optimal label position using improved algorithm
+                    label_x, label_y, offset_x, offset_y = self.find_optimal_label_position(
+                        px, py, alpha_id, all_point_coords, placed_labels, w, h
                     )
                     
-                    # Draw label
-                    cv2.putText(
-                        points_img,
-                        alpha_id,
-                        (px, py ),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (255, 255, 255),
-                        2,
-                        cv2.LINE_AA
-                    )
+                    # Get label dimensions for tracking
+                    label_bg_size = cv2.getTextSize(alpha_id, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+                    label_width, label_height = label_bg_size[0] + 6, label_bg_size[1] + 6
                     
+                    # Draw connecting line if label is far from point
+                    if abs(offset_x) > 20 or abs(offset_y) > 20:
+                        # Draw a thin line from point edge to label
+                        line_start_x = px + (8 if offset_x > 0 else -8)
+                        line_start_y = py + (8 if offset_y > 0 else -8)
+                        line_end_x = label_x + label_width // 2
+                        line_end_y = label_y + label_height // 2
+                        
+                        cv2.line(points_img, (line_start_x, line_start_y), 
+                                (line_end_x, line_end_y), color, 2)
+                    
+                    # Draw label background rectangle with matching color and slight transparency effect
+                    label_rect = (label_x - 3, label_y - label_bg_size[1] - 3,
+                                label_x + label_bg_size[0] + 3, label_y + 3)
+                    
+                    # Create a small overlay for transparency effect
+                    overlay = points_img.copy()
+                    cv2.rectangle(overlay, (label_rect[0], label_rect[1]), 
+                                (label_rect[2], label_rect[3]), color, -1)
+                    cv2.addWeighted(overlay, 0.8, points_img, 0.2, 0, points_img)
+                    
+                    # Draw label border
+                    cv2.rectangle(points_img, (label_rect[0], label_rect[1]), 
+                                (label_rect[2], label_rect[3]), (0, 0, 0), 2)
+                    
+                    # Draw label text in white for contrast
+                    cv2.putText(points_img, alpha_id, (label_x, label_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+                    
+                    # Track this label's position for future overlap checking
+                    placed_labels.append((label_rect[0], label_rect[1], 
+                                        label_width + 6, label_height + 6))
                     
             else:
                 # Handle dictionary of named points (original format)
-                for i, (label, point) in enumerate(points.items()):
+                point_items = list(points.items())
+                
+                # Collect all point coordinates
+                for label, point in point_items:
+                    if hasattr(point, 'position'):
+                        if max(point.position) <= 1.0:
+                            px, py = int(point.position[0] * w), int(point.position[1] * h)
+                        else:
+                            px, py = int(point.position[0]), int(point.position[1])
+                    else:
+                        px, py = int(point[0]), int(point[1])
+                    all_point_coords.append((px, py))
+                
+                # Draw each point with improved positioning  
+                for i, (label, point) in enumerate(point_items):
                     if hasattr(point, 'position'):
                         # Handle PointOfInterest objects
-                        # Convert normalized coordinates to pixel coordinates if needed
                         if max(point.position) <= 1.0:
                             px, py = int(point.position[0] * w), int(point.position[1] * h)
                         else:
@@ -449,131 +690,137 @@ class SkillGenerator:
                         # Handle direct (x,y) tuples
                         px, py = int(point[0]), int(point[1])
                     
+                    # Get color for this point (cycle through available colors)
+                    color = point_colors[i % len(point_colors)]
+                    
                     # Generate alphabetical ID if the label is not already alphabetical
                     if not label.isalpha():
                         alpha_id = get_alpha_id(i + 1)
                     else:
                         alpha_id = label
                     
-                    # Draw circle for point
-                    cv2.circle(points_img, (px, py), 5, (0, 0, 255), 2)
-                    cv2.putText(
-                        points_img,
-                        alpha_id,
-                        (px, py ),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (0, 0, 0),
-                        4,
-                        cv2.LINE_AA
+                    # Draw circle for point with colored outline (slightly larger for better visibility)
+                    cv2.circle(points_img, (px, py), radius=10, color=color, thickness=3)
+                    # Draw white center for better visibility
+                    cv2.circle(points_img, (px, py), radius=6, color=(255, 255, 255), thickness=-1)
+                    # Add a small colored center dot
+                    cv2.circle(points_img, (px, py), radius=3, color=color, thickness=-1)
+                    
+                    # Find optimal label position using improved algorithm
+                    label_x, label_y, offset_x, offset_y = self.find_optimal_label_position(
+                        px, py, alpha_id, all_point_coords, placed_labels, w, h
                     )
                     
-                    # Draw label
-                    cv2.putText(
-                        points_img,
-                        alpha_id,
-                        (px, py ),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (255, 255, 255),
-                        1,
-                        cv2.LINE_AA
-                    )
-        
+                    # Get label dimensions for tracking
+                    label_bg_size = cv2.getTextSize(alpha_id, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+                    label_width, label_height = label_bg_size[0] + 6, label_bg_size[1] + 6
+                    
+                    # Draw connecting line if label is far from point
+                    if abs(offset_x) > 20 or abs(offset_y) > 20:
+                        # Draw a thin line from point edge to label
+                        line_start_x = px + (8 if offset_x > 0 else -8)
+                        line_start_y = py + (8 if offset_y > 0 else -8)
+                        line_end_x = label_x + label_width // 2
+                        line_end_y = label_y + label_height // 2
+                        
+                        cv2.line(points_img, (line_start_x, line_start_y), 
+                                (line_end_x, line_end_y), color, 2)
+                    
+                    # Draw label background rectangle with matching color and slight transparency effect
+                    label_rect = (label_x - 3, label_y - label_bg_size[1] - 3,
+                                label_x + label_bg_size[0] + 3, label_y + 3)
+                    
+                    # Create a small overlay for transparency effect
+                    overlay = points_img.copy()
+                    cv2.rectangle(overlay, (label_rect[0], label_rect[1]), 
+                                (label_rect[2], label_rect[3]), color, -1)
+                    cv2.addWeighted(overlay, 0.8, points_img, 0.2, 0, points_img)
+                    
+                    # Draw label border
+                    cv2.rectangle(points_img, (label_rect[0], label_rect[1]), 
+                                (label_rect[2], label_rect[3]), (0, 0, 0), 2)
+                    
+                    # Draw label text in white for contrast
+                    cv2.putText(points_img, alpha_id, (label_x, label_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+                    
+                    # Track this label's position for future overlap checking
+                    placed_labels.append((label_rect[0], label_rect[1], 
+                                        label_width + 6, label_height + 6))
+
         # Add title to the points image
-        cv2.putText(
-            points_img,
-            "Points of Interest",
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (255, 255, 255),
-            2
-        )
+        cv2.putText(points_img, "Points of Interest", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
-        # Create the third image: Depth visualization with points
+        # Create the third image: Depth visualization with RealSense-quality processing
         depth_img = None
         if hasattr(obj_info, 'depth_image') and obj_info.depth_image is not None:
-            # Normalize depth for visualization
+            # Get the processed depth image
             depth = obj_info.depth_image.copy()
             
             # Handle potential NaN or inf values
             depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
             
-            # Normalize to 0-1 range for valid depth values
+            # Apply the same visualization approach as RealSense viewer
             valid_mask = depth > 0
             if np.any(valid_mask):
-                min_val = np.min(depth[valid_mask])
-                max_val = np.max(depth[valid_mask])
+                # Get depth statistics for proper normalization
+                valid_depths = depth[valid_mask]
+                min_val = np.min(valid_depths)
+                max_val = np.max(valid_depths)
                 
-                # Avoid division by zero
+                print(f"Depth range: {min_val:.3f} to {max_val:.3f} meters")
+                print(f"Valid pixels: {np.sum(valid_mask)}/{depth.size} ({100*np.sum(valid_mask)/depth.size:.1f}%)")
+                
                 if max_val > min_val:
-                    # Apply contrast enhancement with histogram equalization
-                    # Convert to 8-bit for histogram equalization
-                    depth_8bit = np.zeros_like(depth, dtype=np.uint8)
-                    depth_8bit[valid_mask] = (255 * (depth[valid_mask] - min_val) / (max_val - min_val)).astype(np.uint8)
+                    # Method 1: Direct normalization (like RealSense viewer)
+                    # This creates a clean, consistent depth visualization
+                    depth_normalized = np.zeros_like(depth, dtype=np.float32)
+                    depth_normalized[valid_mask] = (valid_depths - min_val) / (max_val - min_val)
                     
-                    # Apply histogram equalization to enhance contrast
-                    depth_eq = cv2.equalizeHist(depth_8bit)
+                    # Convert to 8-bit for colormap
+                    depth_8bit = (depth_normalized * 255).astype(np.uint8)
                     
-                    # Use PLASMA or VIRIDIS colormap for better depth perception
-                    colorized_depth = cv2.applyColorMap(depth_eq, cv2.COLORMAP_PLASMA)
+                    # Apply colormap (use JET to match RealSense default, or PLASMA for better perception)
+                    colorized_depth = cv2.applyColorMap(depth_8bit, cv2.COLORMAP_JET)
                     
-                    # Create base visualization
+                    # Alternative: Use the same colorization as RealSense visualization
+                    # depth_vis = np.clip(depth.astype(np.float32) * 50, 0, 255).astype(np.uint8)
+                    # colorized_depth = cv2.applyColorMap(depth_vis, cv2.COLORMAP_JET)
+                    
                     depth_img = colorized_depth.copy()
                     
-                    # Add contour lines for better depth boundaries
-                    # Calculate normalized depth for contour generation
-                    normalized_depth = np.zeros_like(depth)
-                    normalized_depth[valid_mask] = (depth[valid_mask] - min_val) / (max_val - min_val)
-                    
-                    # Generate contours at regular intervals
-                    contour_levels = 10  # Number of contour levels
-                    for i in range(1, contour_levels):
-                        level = i / contour_levels
-                        contour_mask = np.logical_and(
-                            normalized_depth >= (level - 0.01), 
-                            normalized_depth <= (level + 0.01)
-                        )
-                        depth_img[contour_mask] = (255, 255, 255)  # White contour lines
-                    
-                    # Add colorbar on the right side
-                    colorbar_width = 30
-                    colorbar = np.zeros((h, colorbar_width, 3), dtype=np.uint8)
-                    for i in range(h):
-                        # Map position to color
-                        norm_pos = 1.0 - (i / h)
-                        colorbar[i, :, :] = cv2.applyColorMap(
-                            np.array([[int(norm_pos * 255)]], dtype=np.uint8), 
-                            cv2.COLORMAP_PLASMA
-                        )[0, 0, :]
-                    
-                    # Add depth values to the colorbar
-                    for i in range(0, 6):
-                        y_pos = int(h * (5-i) / 5)
-                        depth_val = min_val + (i / 5) * (max_val - min_val)
+                    # Add depth scale information
+                    if hasattr(obj_info, 'depth_scale') and obj_info.depth_scale:
+                        # Convert to same units as RealSense (usually millimeters for display)
+                        depth_mm = depth * 1000  # Convert meters to mm
+                        min_mm = min_val * 1000
+                        max_mm = max_val * 1000
+                        
                         cv2.putText(
-                            colorbar,
-                            f"{depth_val:.0f}",
-                            (2, y_pos), 
+                            depth_img,
+                            f"Depth: {min_mm:.0f}-{max_mm:.0f}mm",
+                            (10, 60),
                             cv2.FONT_HERSHEY_SIMPLEX,
-                            0.4,
+                            0.5,
+                            (255, 255, 255),
+                            1
+                        )
+                    else:
+                        cv2.putText(
+                            depth_img,
+                            f"Depth: {min_val:.3f}-{max_val:.3f}m",
+                            (10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5,
                             (255, 255, 255),
                             1
                         )
                     
-                    # Combine image and colorbar
-                    combined_width = w + colorbar_width
-                    depth_with_colorbar = np.zeros((h, combined_width, 3), dtype=np.uint8)
-                    depth_with_colorbar[:, :w, :] = depth_img
-                    depth_with_colorbar[:, w:, :] = colorbar
-                    
-                    depth_img = depth_with_colorbar
-                    
-                    # Add title and depth range information
+                    # Add title
                     cv2.putText(
                         depth_img,
-                        "Depth Visualization",
+                        "Processed Depth Visualization",
                         (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.7,
@@ -581,59 +828,34 @@ class SkillGenerator:
                         2
                     )
                     
-                    cv2.putText(
-                        depth_img,
-                        f"Depth range: {min_val:.2f} to {max_val:.2f}",
-                        (10, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (255, 255, 255),
-                        1
-                    )
-                    
-                    # Draw points of interest if provided (with smaller markers and no labels)
+                    # Draw points of interest with same color coding as points image
                     if points is not None and len(points) > 0:
-                        # If 'pixel_coords' is in points, use that
+                        point_colors = [
+                            (0, 0, 255), (255, 0, 0), (0, 255, 0), (0, 255, 255),
+                            (255, 0, 255), (255, 255, 0), (0, 128, 255), (128, 0, 128)
+                        ]
+                        
                         if 'pixel_coords' in points and points['pixel_coords']:
                             pixel_coords = points['pixel_coords']
-                            
-                            # Draw each point with a small white circle with black outline for visibility
-                            for px, py in pixel_coords:
-                                # Black outline
-                                cv2.circle(
-                                    depth_img, 
-                                    (px, py), 
-                                    radius=4,  
-                                    color=(0, 0, 0),  # Black
-                                    thickness=2  
-                                )
-                                # White center
-                                cv2.circle(
-                                    depth_img, 
-                                    (px, py), 
-                                    radius=3,  
-                                    color=(255, 255, 255),  # White
-                                    thickness=1  
-                                )
+                            for i, (px, py) in enumerate(pixel_coords):
+                                color = point_colors[i % len(point_colors)]
+                                cv2.circle(depth_img, (px, py), 5, color, 2)
+                                cv2.circle(depth_img, (px, py), 3, (255, 255, 255), -1)
                         else:
-                            # Handle dictionary of named points (original format)
-                            for label, point in points.items():
+                            for i, (label, point) in enumerate(points.items()):
                                 if hasattr(point, 'position'):
-                                    # Handle PointOfInterest objects
-                                    # Convert normalized coordinates to pixel coordinates if needed
                                     if max(point.position) <= 1.0:
                                         px, py = int(point.position[0] * w), int(point.position[1] * h)
                                     else:
                                         px, py = int(point.position[0]), int(point.position[1])
                                 else:
-                                    # Handle direct (x,y) tuples
                                     px, py = int(point[0]), int(point[1])
                                 
-                                # Draw small circle with black outline for visibility
-                                cv2.circle(depth_img, (px, py), 4, (0, 0, 0), 2)  # Black outline
-                                cv2.circle(depth_img, (px, py), 3, (255, 255, 255), 1)  # White center
+                                color = point_colors[i % len(point_colors)]
+                                cv2.circle(depth_img, (px, py), 5, color, 2)
+                                cv2.circle(depth_img, (px, py), 3, (255, 255, 255), -1)
 
-        # If depth image is not available, create a placeholder with a message
+        # If depth image is not available, create a placeholder
         if depth_img is None:
             depth_img = np.zeros_like(image)
             cv2.putText(
@@ -646,6 +868,7 @@ class SkillGenerator:
                 2
             )
         
+        # Save the depth image
         self._save_image(depth_img, f"depth_image_{image_id}")
         
         return surface_img, points_img
@@ -893,8 +1116,8 @@ class SkillGenerator:
 
                 --- VISUAL INPUT FORMAT ---
                 You are provided with two images:
-                1. **FIRST IMAGE** – Surface segments (labeled a, b, c...) with **normal vectors** shown as arrows.
-                2. **SECOND IMAGE** – Points of interest (labeled a, b, c...) indicated with colored circles.
+                1. **FIRST IMAGE** – Surface segments (labeled aaa, aab, aac...) with **normal vectors** shown as arrows.
+                2. **SECOND IMAGE** – Points of interest (labeled aaa, aab, aac...) indicated with colored circles.
 
                 SURFACE LABELS → FIRST IMAGE ONLY  
                 POINT LABELS → SECOND IMAGE ONLY  
@@ -975,7 +1198,11 @@ class SkillGenerator:
                     - For HORIZONTAL movements (drawers, pushing/pulling along surfaces, sliding): USE SIDE GRASP
                     - For VERTICAL movements (lifting, pressing down): USE TOP-DOWN GRASP
                     - Always orient the gripper's z-axis to maximize force transmission in the intended direction
-                
+                - ensure your explainations cover all parameter and action selections in detail verify your understanding of parameters before selection
+                - when opening an object ensure its lid/ cover is completely removed from the top for example a bottle cap should be removed using "pull"
+                - POINTS ARE COLOR CODED PAY ATTENTION TO WHERE THE POINT ACTUALLY IS
+                    in your explaination include why you selected a particular point and how you determined the associated label
+                    
                 When in doubt, choose the best grounded option based on visible contact affordances and robot camera constraints (e.g., collision with the wrist camera).
 
                 Carefully verify label references and syntax. Output must be complete and syntactically valid.

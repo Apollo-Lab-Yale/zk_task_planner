@@ -237,7 +237,7 @@ class PerceptionSystem:
                     alpha_id=alpha_id,
                     camera_intrinsics=self.camera_intrinsics
                 )
-                obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=10, min_distance=50)
+                obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=5, min_distance=50)
                 # Initialize surface_masks
                 obj_info.surface_masks = {}
 
@@ -366,365 +366,328 @@ class PerceptionSystem:
         image: np.ndarray,
         obj_info: ObjectInfo,
         method: str = 'robust',  # Default is still 'robust'
-        max_points: int = 20,
-        quality_level: float = 0.01,
-        min_distance: int = 50,
-        visualize: bool = False,
-        orb_params: Dict[str, Any] = None  # New parameter for ORB configuration
-    ) -> Dict[str, Any]:
-        """
-        Detect points of interest within a specific object mask.
-        
-        Args:
-            image: RGB input image
-            obj_info: ObjectInfo containing the object mask
-            method: Feature detection method ('robust', 'orb', 'contour', 'legacy')
-            max_points: Maximum number of points to detect
-            quality_level: Quality level parameter (not used for robust method)
-            min_distance: Minimum distance between detected points
-            visualize: Whether to generate visualization
-            orb_params: Optional dictionary of ORB parameters:
-                - nfeatures: Max features to retain (default: max_points)
-                - scaleFactor: Pyramid decimation ratio (default: 1.2)
-                - nlevels: Number of pyramid levels (default: 8)
-                - edgeThreshold: Size of border where features not detected (default: 31)
-                - firstLevel: Level of pyramid to put source image (default: 0)
-                - WTA_K: Number of points used to produce oriented BRIEF (default: 2)
-                - scoreType: Type of score for ordering features (default: cv2.ORB_HARRIS_SCORE)
-                - patchSize: Size of patch used for descriptor (default: 31)
-                - fastThreshold: Fast detector threshold (default: 20)
+            max_points: int = 5,
+            quality_level: float = 0.01,
+            min_distance: int = 50,
+            visualize: bool = False,
+            orb_params: Dict[str, Any] = None  # Now used for contour parameters
+        ) -> Dict[str, Any]:
+            """
+            Detect points of interest within a specific object mask.
             
-        Returns:
-            Dictionary containing:
-                - 'keypoints': List of cv2.KeyPoint objects
-                - 'descriptors': Descriptors if available (None for contour method)
-                - 'pixel_coords': List of (x,y) pixel coordinates
-                - 'scores': Confidence scores for each point
-                - 'interaction_points': List of InteractionPoint objects (if robust method)
-                - 'visualization': Visualization image (if visualize=True)
-        """
-        if self.debug:
-            self.profiler.start_iteration()
-            self.profiler.start("detect_regions_of_interest")
-        
-        try:
-            # Check if the object has a mask
-            if obj_info.mask is None:
-                if self.debug:
-                    print(f"No mask available for object '{obj_info.name}', generating one...")
+            Args:
+                image: RGB input image
+                obj_info: ObjectInfo containing the object mask
+                method: Feature detection method ('robust', 'contour', 'legacy')
+                max_points: Maximum number of points to detect
+                quality_level: Quality level parameter (not used for robust method)
+                min_distance: Minimum distance between detected points
+                visualize: Whether to generate visualization
+                orb_params: Optional dictionary of contour parameters:
+                    - min_contour_area: Minimum area for a contour to be considered (default: 50)
+                    - perimeter_threshold: Area threshold for adding perimeter points (default: 500)
+                    - perimeter_points_ratio: Ratio of perimeter to determine number of points (default: 100)
+                    - max_perimeter_points: Maximum perimeter points per contour (default: 8)
+                    - contour_approximation: Epsilon factor for contour approximation (default: 0.02)
                 
-                # Generate a mask if not available
-                mask = self._generate_segmentation(image, obj_info)
-                if mask is None:
-                    # Fallback to bounding box mask
+            Returns:
+                Dictionary containing:
+                    - 'keypoints': List of cv2.KeyPoint objects
+                    - 'descriptors': Descriptors if available (None for contour method)
+                    - 'pixel_coords': List of (x,y) pixel coordinates
+                    - 'scores': Confidence scores for each point
+                    - 'interaction_points': List of InteractionPoint objects (if robust method)
+                    - 'visualization': Visualization image (if visualize=True)
+            """
+            if self.debug:
+                self.profiler.start_iteration()
+                self.profiler.start("detect_regions_of_interest")
+            
+            try:
+                # Check if the object has a mask
+                if obj_info.mask is None:
                     if self.debug:
-                        print("Using bounding box as fallback mask")
-                    x, y, w, h = obj_info.bbox
-                    mask = np.zeros(image.shape[:2], dtype=bool)
-                    mask[y:y+h, x:x+w] = True
-            else:
-                mask = obj_info.mask
-            
-            # Convert boolean mask to uint8 for OpenCV operations
-            mask_uint8 = mask.astype(np.uint8) * 255
-            
-            # Use the new robust detection method
-            if method == 'robust':
-                if self.debug:
-                    self.profiler.start("robust_detection")
-                
-                # Get depth data if available
-                depth_data = obj_info.depth_image if hasattr(obj_info, 'depth_image') else None
-                
-                # Detect interaction points using the robust method
-                interaction_points = self.interaction_detector.detect_interaction_points(
-                    image=image,
-                    mask=mask,
-                    min_distance=min_distance,
-                    obj_info=obj_info,
-                    max_points=max_points,
-                    depth_data=obj_info.depth_image if hasattr(obj_info, 'depth_image') else None,
-                    apply_center_shift=True,     # Enable center shifting
-                    edge_threshold=15.0,         # Points within 15px of edge get shifted  
-                    shift_factor=0.4 
-                )
-                
-                if self.debug:
-                    self.profiler.stop("robust_detection")
-                    print(f"Detected {len(interaction_points)} interaction points using robust method")
-                
-                # Convert InteractionPoint objects to cv2.KeyPoint format for backward compatibility
-                final_keypoints = []
-                pixel_coords = []
-                scores = []
-                point_types = []
-                
-                for point in interaction_points:
-                    # Create cv2.KeyPoint object
-                    kp = cv2.KeyPoint(
-                        float(point.x), float(point.y), 
-                        size=5.0, 
-                        response=point.score
-                    )
-                    final_keypoints.append(kp)
-                    pixel_coords.append((point.x, point.y))
-                    scores.append(point.score)
-                    point_types.append(point.interaction_type.value)
-                
-                # Create results dictionary
-                results = {
-                    'keypoints': final_keypoints,
-                    'descriptors': None,  # No descriptors for robust method
-                    'pixel_coords': pixel_coords,
-                    'scores': scores,
-                    'object_name': obj_info.name,
-                    'method': "robust",
-                    'mask_area': np.sum(mask),
-                    'ids': [get_alpha_id(i) for i in range(len(final_keypoints))],
-                    'point_types': point_types,
-                    'interaction_points': interaction_points  # Rich interaction data
-                }
-            
-            # New ORB-based method
-            elif method == 'orb':
-                if self.debug:
-                    self.profiler.start("orb_detection")
-                
-                # Set default ORB parameters if none provided
-                if orb_params is None:
-                    orb_params = {}
-                
-                # Configure ORB detector
-                nfeatures = orb_params.get('nfeatures', max_points)
-                scaleFactor = orb_params.get('scaleFactor', 1.2)
-                nlevels = orb_params.get('nlevels', 8)
-                edgeThreshold = orb_params.get('edgeThreshold', 31)
-                firstLevel = orb_params.get('firstLevel', 0)
-                WTA_K = orb_params.get('WTA_K', 2)
-                scoreType = orb_params.get('scoreType', cv2.ORB_HARRIS_SCORE)
-                patchSize = orb_params.get('patchSize', 31)
-                fastThreshold = orb_params.get('fastThreshold', 20)
-                
-                # Create ORB detector
-                orb = cv2.ORB_create(
-                    nfeatures=nfeatures,
-                    scaleFactor=scaleFactor,
-                    nlevels=nlevels,
-                    edgeThreshold=edgeThreshold,
-                    firstLevel=firstLevel,
-                    WTA_K=WTA_K,
-                    scoreType=scoreType,
-                    patchSize=patchSize,
-                    fastThreshold=fastThreshold
-                )
-                
-                # Apply mask to the image
-                masked_image = cv2.bitwise_and(image, image, mask=mask_uint8)
-                
-                # Convert to grayscale for ORB (which requires grayscale input)
-                gray = cv2.cvtColor(masked_image, cv2.COLOR_BGR2GRAY)
-                
-                # Detect keypoints and compute descriptors
-                keypoints, descriptors = orb.detectAndCompute(gray, mask=mask_uint8)
-                
-                # Limit the number of keypoints based on their response (strongest first)
-                keypoints = sorted(keypoints, key=lambda x: x.response, reverse=True)[:max_points]
-                
-                # If descriptors were computed, filter them to match the keypoints
-                if descriptors is not None and len(keypoints) < len(descriptors):
-                    descriptors = descriptors[:len(keypoints)]
-                
-                # Apply min_distance filtering
-                if min_distance > 0 and len(keypoints) > 1:
-                    filtered_keypoints = [keypoints[0]]  # Start with the strongest keypoint
-                    for kp in keypoints[1:]:
-                        # Check distance to all already filtered keypoints
-                        too_close = False
-                        for existing_kp in filtered_keypoints:
-                            dist = np.sqrt((kp.pt[0] - existing_kp.pt[0])**2 + 
-                                          (kp.pt[1] - existing_kp.pt[1])**2)
-                            if dist < min_distance:
-                                too_close = True
-                                break
-                        if not too_close:
-                            filtered_keypoints.append(kp)
-                            if len(filtered_keypoints) >= max_points:
-                                break
+                        print(f"No mask available for object '{obj_info.name}', generating one...")
                     
-                    # Update keypoints and descriptors
-                    if descriptors is not None:
-                        # Create a mapping of original indices to filtered indices
-                        indices = [keypoints.index(kp) for kp in filtered_keypoints]
-                        descriptors = descriptors[indices]
-                    
-                    keypoints = filtered_keypoints
-                
-                # Extract pixel coordinates and scores
-                pixel_coords = [(int(kp.pt[0]), int(kp.pt[1])) for kp in keypoints]
-                scores = [kp.response for kp in keypoints]
-                
-                if self.debug:
-                    self.profiler.stop("orb_detection")
-                    print(f"Detected {len(keypoints)} ORB keypoints")
-                
-                # Create results dictionary
-                results = {
-                    'keypoints': keypoints,
-                    'descriptors': descriptors,
-                    'pixel_coords': pixel_coords,
-                    'scores': scores,
-                    'object_name': obj_info.name,
-                    'method': "orb",
-                    'mask_area': np.sum(mask),
-                    'ids': [get_alpha_id(i) for i in range(len(keypoints))],
-                    'point_types': ['ORB'] * len(keypoints)
-                }
-                
-                # Create InteractionPoint objects for compatibility with robust method
-                interaction_points = []
-                for i, (kp, score) in enumerate(zip(keypoints, scores)):
-                    # Default to GENERIC type for ORB points
-                    from enum import Enum
-                    # Assuming InteractionPointType is an Enum defined elsewhere
-                    # If not available, this would need to be adjusted
-                    try:
-                        interaction_type = InteractionPointType.GENERIC
-                    except:
-                        # Fallback if enum not defined
-                        class DummyEnum(Enum):
-                            GENERIC = "generic"
-                        interaction_type = DummyEnum.GENERIC
-                    
-                    # Create an InteractionPoint-like object with required attributes
-                    interaction_point = type('InteractionPoint', (), {
-                        'x': int(kp.pt[0]),
-                        'y': int(kp.pt[1]),
-                        'score': score,
-                        'interaction_type': interaction_type,
-                        'size': kp.size,
-                        'angle': kp.angle,
-                        'id': get_alpha_id(i)
-                    })
-                    
-                    interaction_points.append(interaction_point)
-                
-                results['interaction_points'] = interaction_points
-                
-            elif method == 'contour' or method == 'legacy':
-                # Fall back to the original contour-based method
-                results = self._detect_regions_legacy(
-                    image, obj_info, mask, max_points, min_distance
-                )
-                
-            else:
-                raise ValueError(f"Unknown detection method: {method}")
-            
-            # Create visualization if requested
-            if visualize:
-                if self.debug:
-                    self.profiler.start("roi_visualization")
-                
-                visualization = self.visualize_interest_points(
-                    image=image,
-                    obj_info=obj_info,
-                    keypoints=results['keypoints'],
-                    scores=results['scores'],
-                    method=method,
-                    max_points=max_points,
-                    descriptors=results.get('descriptors')  # Pass descriptors for ORB visualization
-                )
-                
-                results['visualization'] = visualization
-                
-                if self.debug:
-                    self.profiler.stop("roi_visualization")
-            
-            # For the orb method, combine with robust method if needed
-            if method == 'orb' and orb_params and orb_params.get('combine_with_robust', False):
-                if self.debug:
-                    self.profiler.start("combined_detection")
-                
-                # Call the robust method with reduced max_points
-                robust_max_points = max(1, max_points // 2)
-                robust_results = self.detect_regions_of_interest(
-                    image=image,
-                    obj_info=obj_info,
-                    method='robust',
-                    max_points=robust_max_points,
-                    min_distance=min_distance,
-                    visualize=False
-                )
-                
-                # Merge the results
-                combined_keypoints = results['keypoints'] + robust_results['keypoints']
-                combined_pixel_coords = results['pixel_coords'] + robust_results['pixel_coords']
-                combined_scores = results['scores'] + robust_results['scores']
-                combined_types = results['point_types'] + robust_results['point_types']
-                combined_ids = [get_alpha_id(i) for i in range(len(combined_keypoints))]
-                
-                # ORB has descriptors, robust doesn't, so we pad with zeros for robust points
-                if results['descriptors'] is not None and len(results['descriptors']) > 0:
-                    descriptor_size = results['descriptors'].shape[1]
-                    padded_descriptors = np.zeros((len(robust_results['keypoints']), descriptor_size), 
-                                                 dtype=results['descriptors'].dtype)
-                    combined_descriptors = np.vstack([results['descriptors'], padded_descriptors])
+                    # Generate a mask if not available
+                    mask = self._generate_segmentation(image, obj_info)
+                    if mask is None:
+                        # Fallback to bounding box mask
+                        if self.debug:
+                            print("Using bounding box as fallback mask")
+                        x, y, w, h = obj_info.bbox
+                        mask = np.zeros(image.shape[:2], dtype=bool)
+                        mask[y:y+h, x:x+w] = True
                 else:
-                    combined_descriptors = None
+                    mask = obj_info.mask
                 
-                # Combine interaction points
-                combined_interaction_points = results['interaction_points'] + robust_results['interaction_points']
+                # Convert boolean mask to uint8 for OpenCV operations
+                mask_uint8 = mask.astype(np.uint8) * 255
                 
-                # Update results
-                results = {
-                    'keypoints': combined_keypoints,
-                    'descriptors': combined_descriptors,
-                    'pixel_coords': combined_pixel_coords,
-                    'scores': combined_scores,
-                    'object_name': obj_info.name,
-                    'method': "orb+robust",
-                    'mask_area': np.sum(mask),
-                    'ids': combined_ids,
-                    'point_types': combined_types,
-                    'interaction_points': combined_interaction_points
-                }
+                # Use the new robust detection method
+                if method == 'robust':
+                    if self.debug:
+                        self.profiler.start("robust_detection")
+                    
+                    # Get depth data if available
+                    depth_data = obj_info.depth_image if hasattr(obj_info, 'depth_image') else None
+                    
+                    # Detect interaction points using the robust method
+                    interaction_points = self.interaction_detector.detect_interaction_points(
+                        image=image,
+                        mask=mask,
+                        min_distance=min_distance,
+                        obj_info=obj_info,
+                        max_points=max_points,
+                        depth_data=obj_info.depth_image if hasattr(obj_info, 'depth_image') else None,
+                        apply_center_shift=True,     # Enable center shifting
+                        edge_threshold=15.0,         # Points within 15px of edge get shifted  
+                        shift_factor=0.4 
+                    )
+                    
+                    if self.debug:
+                        self.profiler.stop("robust_detection")
+                        print(f"Detected {len(interaction_points)} interaction points using robust method")
+                    
+                    # Convert InteractionPoint objects to cv2.KeyPoint format for backward compatibility
+                    final_keypoints = []
+                    pixel_coords = []
+                    scores = []
+                    point_types = []
+                    
+                    for point in interaction_points:
+                        # Create cv2.KeyPoint object
+                        kp = cv2.KeyPoint(
+                            float(point.x), float(point.y), 
+                            size=5.0, 
+                            response=point.score
+                        )
+                        final_keypoints.append(kp)
+                        pixel_coords.append((point.x, point.y))
+                        scores.append(point.score)
+                        point_types.append(point.interaction_type.value)
+                    
+                    # Create results dictionary
+                    results = {
+                        'keypoints': final_keypoints,
+                        'descriptors': None,  # No descriptors for robust method
+                        'pixel_coords': pixel_coords,
+                        'scores': scores,
+                        'object_name': obj_info.name,
+                        'method': "robust",
+                        'mask_area': np.sum(mask),
+                        'ids': [get_alpha_id(i) for i in range(len(final_keypoints))],
+                        'point_types': point_types,
+                        'interaction_points': interaction_points  # Rich interaction data
+                    }
                 
-                # Create new visualization if requested
+                # New contour-based method (replaces ORB)
+                elif method == 'contour':
+                    if self.debug:
+                        self.profiler.start("contour_detection")
+                    
+                    # Set default contour parameters if none provided
+                    if orb_params is None:
+                        orb_params = {}
+                    
+                    # Configure contour detection parameters
+                    min_contour_area = orb_params.get('min_contour_area', 50)
+                    perimeter_threshold = orb_params.get('perimeter_threshold', 500)
+                    perimeter_points_ratio = orb_params.get('perimeter_points_ratio', 100)
+                    max_perimeter_points = orb_params.get('max_perimeter_points', 8)
+                    contour_approximation = orb_params.get('contour_approximation', 0.02)
+                    
+                    # Find contours in the mask
+                    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    
+                    all_points = []
+                    all_scores = []
+                    point_types = []
+                    
+                    # Process each contour
+                    for contour in contours:
+                        area = cv2.contourArea(contour)
+                        
+                        # Skip very small contours
+                        if area < min_contour_area:
+                            continue
+                            
+                        # Calculate center point using moments
+                        M = cv2.moments(contour)
+                        if M["m00"] != 0:
+                            cx = int(M["m10"] / M["m00"])
+                            cy = int(M["m01"] / M["m00"])
+                            
+                            # Ensure center point is within image bounds
+                            if 0 <= cx < image.shape[1] and 0 <= cy < image.shape[0]:
+                                # Add center point
+                                all_points.append((cx, cy))
+                                all_scores.append(area)  # Use area as score
+                                point_types.append('CONTOUR_CENTER')
+                                
+                                # For large contours, add perimeter points
+                                if area > perimeter_threshold:
+                                    # Calculate number of perimeter points based on contour size
+                                    perimeter = cv2.arcLength(contour, True)
+                                    num_perimeter_points = min(max_perimeter_points, 
+                                                            max(3, int(perimeter / perimeter_points_ratio)))
+                                    
+                                    # Approximate contour to get key points
+                                    epsilon = contour_approximation * perimeter
+                                    approx = cv2.approxPolyDP(contour, epsilon, True)
+                                    
+                                    # Add points from the approximated contour
+                                    for point in approx[:num_perimeter_points]:
+                                        px, py = point[0]
+                                        # Ensure point is within image bounds
+                                        if 0 <= px < image.shape[1] and 0 <= py < image.shape[0]:
+                                            all_points.append((px, py))
+                                            all_scores.append(area * 0.7)  # Slightly lower score for perimeter points
+                                            point_types.append('CONTOUR_PERIMETER')
+                    
+                    # Apply distance filtering and limit to max_points
+                    if min_distance > 0 and len(all_points) > 1:
+                        # Sort by score (highest first)
+                        scored_data = list(zip(all_points, all_scores, point_types))
+                        scored_data.sort(key=lambda x: x[1], reverse=True)
+                        
+                        filtered_points = []
+                        filtered_scores = []
+                        filtered_types = []
+                        
+                        for (px, py), score, ptype in scored_data:
+                            # Check distance to already filtered points
+                            too_close = False
+                            for existing_x, existing_y in filtered_points:
+                                dist = np.sqrt((px - existing_x)**2 + (py - existing_y)**2)
+                                if dist < min_distance:
+                                    too_close = True
+                                    break
+                            
+                            if not too_close:
+                                filtered_points.append((px, py))
+                                filtered_scores.append(score)
+                                filtered_types.append(ptype)
+                                
+                                if len(filtered_points) >= max_points:
+                                    break
+                        
+                        all_points = filtered_points
+                        all_scores = filtered_scores
+                        point_types = filtered_types
+                    else:
+                        # Just limit by max_points if no distance filtering
+                        if len(all_points) > max_points:
+                            scored_data = list(zip(all_points, all_scores, point_types))
+                            scored_data.sort(key=lambda x: x[1], reverse=True)
+                            all_points = [p for p, s, t in scored_data[:max_points]]
+                            all_scores = [s for p, s, t in scored_data[:max_points]]
+                            point_types = [t for p, s, t in scored_data[:max_points]]
+                    
+                    # Convert to cv2.KeyPoint objects
+                    keypoints = []
+                    for (x, y), score in zip(all_points, all_scores):
+                        kp = cv2.KeyPoint(
+                            float(x), float(y),
+                            size=5.0,
+                            response=float(score)
+                        )
+                        keypoints.append(kp)
+                    
+                    pixel_coords = all_points
+                    scores = all_scores
+                    
+                    if self.debug:
+                        self.profiler.stop("contour_detection")
+                        print(f"Detected {len(keypoints)} contour-based keypoints")
+                    
+                    # Create results dictionary
+                    results = {
+                        'keypoints': keypoints,
+                        'descriptors': None,  # No descriptors for contour method
+                        'pixel_coords': pixel_coords,
+                        'scores': scores,
+                        'object_name': obj_info.name,
+                        'method': "contour",
+                        'mask_area': np.sum(mask),
+                        'ids': [get_alpha_id(i) for i in range(len(keypoints))],
+                        'point_types': point_types
+                    }
+                    
+                    # Create InteractionPoint objects for compatibility
+                    interaction_points = []
+                    for i, ((x, y), score, ptype) in enumerate(zip(all_points, all_scores, point_types)):
+                        try:
+                            interaction_type = InteractionPointType.GENERIC
+                        except:
+                            # Fallback if enum not defined
+                            class DummyEnum(Enum):
+                                GENERIC = "generic"
+                            interaction_type = DummyEnum.GENERIC
+                        
+                        # Create an InteractionPoint-like object with required attributes
+                        interaction_point = type('InteractionPoint', (), {
+                            'x': int(x),
+                            'y': int(y),
+                            'score': score,
+                            'interaction_type': interaction_type,
+                            'size': 5.0,
+                            'angle': 0.0,
+                            'id': get_alpha_id(i),
+                            'point_subtype': ptype
+                        })
+                        
+                        interaction_points.append(interaction_point)
+                    
+                    results['interaction_points'] = interaction_points
+                    
+                elif method == 'legacy':
+                    # Fall back to the original legacy method
+                    results = self._detect_regions_legacy(
+                        image, obj_info, mask, max_points, min_distance
+                    )
+                    
+                else:
+                    raise ValueError(f"Unknown detection method: {method}. Available methods: 'robust', 'contour', 'legacy'")
+                
+                # Create visualization if requested
                 if visualize:
+                    if self.debug:
+                        self.profiler.start("roi_visualization")
+                    
                     visualization = self.visualize_interest_points(
                         image=image,
                         obj_info=obj_info,
                         keypoints=results['keypoints'],
                         scores=results['scores'],
-                        method="orb+robust",
+                        method=method,
                         max_points=max_points,
                         descriptors=results.get('descriptors')
                     )
                     
                     results['visualization'] = visualization
+                    
+                    if self.debug:
+                        self.profiler.stop("roi_visualization")
                 
+                return results
+                
+            except Exception as e:
                 if self.debug:
-                    self.profiler.stop("combined_detection")
-                    print(f"Combined detection resulted in {len(combined_keypoints)} points")
-            
-            return results
-            
-        except Exception as e:
-            if self.debug:
-                print(f"Error in detect_regions_of_interest: {str(e)}")
-                traceback.print_exc()
-            return {
-                'keypoints': [],
-                'descriptors': None,
-                'pixel_coords': [],
-                'scores': [],
-                'error': str(e)
-            }
-            
-        finally:
-            if self.debug:
-                self.profiler.stop("detect_regions_of_interest")
-                self.profiler.end_iteration(preserve_current=True)
-
+                    print(f"Error in detect_regions_of_interest: {str(e)}")
+                    traceback.print_exc()
+                return {
+                    'keypoints': [],
+                    'descriptors': None,
+                    'pixel_coords': [],
+                    'scores': [],
+                    'error': str(e)
+                }
+                
+            finally:
+                if self.debug:
+                    self.profiler.stop("detect_regions_of_interest")
+                    self.profiler.end_iteration(preserve_current=True)
             
     def _generate_segmentation(
         self,
@@ -1132,7 +1095,7 @@ class PerceptionSystem:
             
             # Extract depth values in the region
             region_depths = depth_image[y_min:y_max+1, x_min:x_max+1] * self.depth_scale
-            print(f"converting point to 3d {label}")
+            print(f"converting point to 3d {label}, ({pixel_x}, {pixel_y})")
             # Filter valid depth values (non-zero and within reasonable range)
             MAX_DEPTH = 2.0  # Maximum reasonable depth in meters
             MIN_DEPTH = 0.05  # Minimum reasonable depth in meters

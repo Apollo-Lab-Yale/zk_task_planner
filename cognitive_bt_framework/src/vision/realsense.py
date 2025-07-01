@@ -12,15 +12,41 @@ from typing import Optional, Tuple, Deque
 
 class Camera:
     def __init__(self, width: int = 640, height: int = 480, fps: int = 30, 
-                 depth_averaging_frames: int = 1, debug=True):
+                 depth_averaging_frames: int = 5, debug=True, config_file: str = None,
+                 exposure: int = None, gain: int = None, laser_power: int = None, 
+                 auto_exposure: bool = None, use_viewer_defaults: bool = True):
         """
-        Simple camera that just works - no complex filtering that causes artifacts
+        Simple camera that just works - now with RealSense Viewer quality defaults
+        
+        Args:
+            width: Camera width resolution
+            height: Camera height resolution  
+            fps: Frames per second
+            depth_averaging_frames: Number of frames to average for depth
+            debug: Enable debug output
+            config_file: Path to config file to load/save parameters
+            exposure: Initial exposure time in microseconds (None = auto)
+            gain: Initial gain value (None = auto)
+            laser_power: Initial laser power (None = auto/default)
+            auto_exposure: Enable/disable auto exposure (None = use viewer default)
+            use_viewer_defaults: Use RealSense Viewer quality settings
         """
         self.width = width
         self.height = height
         self.fps = fps
         self.debug = debug
         self.depth_averaging_frames = depth_averaging_frames
+        self.use_viewer_defaults = use_viewer_defaults
+        
+        # Configuration file management
+        self.config_file = config_file or "realsense_config.json"
+        self.loaded_config = None
+        
+        # Initial parameter settings - None means use defaults
+        self.initial_exposure = exposure
+        self.initial_gain = gain
+        self.initial_laser_power = laser_power
+        self.initial_auto_exposure = auto_exposure
         
         # Core RealSense components
         self.pipeline = rs.pipeline()
@@ -28,7 +54,7 @@ class Camera:
         self.align = rs.align(rs.stream.color)
         self.point_cloud = rs.pointcloud()
         
-        # Configure streams - use native 640x480 (no decimation!)
+        # Configure streams - use native 640x480
         self.config.enable_stream(rs.stream.depth, width, height, rs.format.z16, fps)
         self.config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
 
@@ -44,17 +70,27 @@ class Camera:
         # Camera parameters
         self.depth_scale = None
         self.intrinsics = None
+        self.depth_sensor = None
         
-        # MINIMAL post-processing - only what's essential
-        self.hole_filling_filter = None
+        # Parameter tuning variables
+        self.current_exposure = None
+        self.current_gain = None
+        self.current_laser_power = None
+        self.auto_exposure_enabled = True
+        
+        # Post-processing filters - full pipeline for viewer-quality output
+        self.decimation_filter = None
+        self.temporal_filter = None
         self.spatial_filter = None
+        self.hole_filling_filter = None
+        self.threshold_filter = None
         
         # Visualization settings
         self.display_mode = 0  # 0: background removal, 1: normalized depth, 2: raw depth
         self.colormap = cv2.COLORMAP_JET
         self.colormaps = [cv2.COLORMAP_JET, cv2.COLORMAP_TURBO, cv2.COLORMAP_VIRIDIS, cv2.COLORMAP_PLASMA]
         self.colormap_index = 0
-        self.clipping_distance_m = 1.0
+        self.clipping_distance_m = 3.0
         
         # Mouse callback variables
         self.mouse_x = 0
@@ -62,27 +98,263 @@ class Camera:
         self.current_color_image = None
         self.current_depth_image = None
 
+    def _init_viewer_quality_filters(self):
+        """Initialize full post-processing pipeline matching RealSense Viewer quality"""
+        try:
+            if self.debug:
+                print("Initializing RealSense Viewer quality post-processing pipeline...")
+            
+            # Decimation filter (optional - reduces resolution but improves performance)
+            # Comment out if you want to keep full resolution
+            # self.decimation_filter = rs.decimation_filter()
+            # self.decimation_filter.set_option(rs.option.filter_magnitude, 2)  # 2x decimation
+            
+            # Threshold filter - removes values too close or too far
+            self.threshold_filter = rs.threshold_filter()
+            self.threshold_filter.set_option(rs.option.min_distance, 0.1)  # 10cm minimum
+            self.threshold_filter.set_option(rs.option.max_distance, 4.0)   # 4m maximum
+            
+            # Temporal filter - reduces noise over time
+            self.temporal_filter = rs.temporal_filter()
+            self.temporal_filter.set_option(rs.option.filter_smooth_alpha, 0.4)
+            self.temporal_filter.set_option(rs.option.filter_smooth_delta, 20)
+            self.temporal_filter.set_option(rs.option.holes_fill, 3)  # Fill temporal holes
+            
+            # Spatial filter - reduces noise within frame
+            self.spatial_filter = rs.spatial_filter()
+            self.spatial_filter.set_option(rs.option.filter_magnitude, 2)      # Moderate filtering
+            self.spatial_filter.set_option(rs.option.filter_smooth_alpha, 0.5) # Balance between smoothing and details
+            self.spatial_filter.set_option(rs.option.filter_smooth_delta, 20)  # Edge-preserving
+            self.spatial_filter.set_option(rs.option.holes_fill, 0)           # Don't fill holes aggressively here
+            
+            # Hole filling filter - fills remaining holes
+            self.hole_filling_filter = rs.hole_filling_filter()
+            # Mode 1 = fill from left, Mode 2 = farthest from around
+            self.hole_filling_filter.set_option(rs.option.holes_fill, 1)
+            
+            if self.debug:
+                print("Full post-processing pipeline initialized:")
+                print("  - Threshold filter: 0.1m - 4.0m")
+                print("  - Temporal filter: alpha=0.4, delta=20")
+                print("  - Spatial filter: magnitude=2, alpha=0.5, delta=20")
+                print("  - Hole filling: mode=1 (fill from left)")
+                
+        except Exception as e:
+            if self.debug:
+                print(f"Failed to initialize filters: {e}")
+            # Fallback to minimal filters
+            self._init_minimal_filters()
+
     def _init_minimal_filters(self):
-        """Initialize only essential filters with conservative settings"""
+        """Initialize only essential filters with conservative settings (original behavior)"""
         try:
             # Only hole filling - very conservative
             self.hole_filling_filter = rs.hole_filling_filter()
             
             # Very light spatial filter - minimal settings
             self.spatial_filter = rs.spatial_filter()
-            self.spatial_filter.set_option(rs.option.filter_magnitude, 1)  # Minimal
-            self.spatial_filter.set_option(rs.option.filter_smooth_alpha, 0.25)  # Very light
-            self.spatial_filter.set_option(rs.option.filter_smooth_delta, 10)   # Conservative
-            self.spatial_filter.set_option(rs.option.holes_fill, 0)  # Don't fill holes aggressively
+            self.spatial_filter.set_option(rs.option.filter_magnitude, 1)
+            self.spatial_filter.set_option(rs.option.filter_smooth_alpha, 0.25)
+            self.spatial_filter.set_option(rs.option.filter_smooth_delta, 10)
+            self.spatial_filter.set_option(rs.option.holes_fill, 0)
             
             if self.debug:
-                print("Minimal filters initialized (very conservative settings)")
+                print("Minimal filters initialized (conservative settings)")
                 
         except Exception as e:
             if self.debug:
                 print(f"Failed to initialize filters: {e}")
             self.hole_filling_filter = None
             self.spatial_filter = None
+
+    def apply_viewer_defaults(self):
+        """Apply RealSense Viewer default settings for best quality"""
+        if not self.depth_sensor:
+            if self.debug:
+                print("No depth sensor available for setting defaults")
+            return False
+        
+        try:
+            if self.debug:
+                print("Applying RealSense Viewer default settings...")
+            
+            # Set visual preset to "Default" (which is what viewer uses)
+            if self.depth_sensor.supports(rs.option.visual_preset):
+                self.depth_sensor.set_option(rs.option.visual_preset, 0)  # Default preset
+                if self.debug:
+                    print("  - Visual preset: Default")
+            
+            # Enable auto exposure (viewer default)
+            if self.depth_sensor.supports(rs.option.enable_auto_exposure):
+                if self.initial_auto_exposure is None:  # Only if not explicitly set
+                    self.depth_sensor.set_option(rs.option.enable_auto_exposure, 1)
+                    self.auto_exposure_enabled = True
+                    if self.debug:
+                        print("  - Auto exposure: Enabled")
+            
+            # Only set manual values if explicitly provided
+            if self.initial_exposure is not None:
+                if self.depth_sensor.supports(rs.option.enable_auto_exposure):
+                    self.depth_sensor.set_option(rs.option.enable_auto_exposure, 0)
+                    self.auto_exposure_enabled = False
+                if self.depth_sensor.supports(rs.option.exposure):
+                    self.depth_sensor.set_option(rs.option.exposure, self.initial_exposure)
+                    if self.debug:
+                        print(f"  - Manual exposure: {self.initial_exposure}μs")
+            
+            if self.initial_gain is not None:
+                if self.depth_sensor.supports(rs.option.gain):
+                    self.depth_sensor.set_option(rs.option.gain, self.initial_gain)
+                    if self.debug:
+                        print(f"  - Manual gain: {self.initial_gain}")
+            
+            if self.initial_laser_power is not None:
+                if self.depth_sensor.supports(rs.option.laser_power):
+                    self.depth_sensor.set_option(rs.option.laser_power, self.initial_laser_power)
+                    if self.debug:
+                        print(f"  - Manual laser power: {self.initial_laser_power}")
+            
+            # Additional viewer-like settings
+            if self.depth_sensor.supports(rs.option.confidence_threshold):
+                self.depth_sensor.set_option(rs.option.confidence_threshold, 3)  # Default confidence
+                if self.debug:
+                    print("  - Confidence threshold: 3")
+            
+            # Print final applied settings
+            final_params = self.get_current_parameters()
+            if self.debug:
+                print("Applied settings:")
+                for param, value in final_params.items():
+                    print(f"    {param}: {value}")
+            
+            return True
+            
+        except Exception as e:
+            if self.debug:
+                print(f"Failed to apply viewer defaults: {e}")
+            return False
+
+    def get_parameter_ranges(self):
+        """Get the valid ranges for tunable parameters"""
+        if not self.depth_sensor:
+            return None
+        
+        ranges = {}
+        try:
+            if self.depth_sensor.supports(rs.option.exposure):
+                exp_range = self.depth_sensor.get_option_range(rs.option.exposure)
+                ranges['exposure'] = (int(exp_range.min), int(exp_range.max), int(exp_range.step))
+                
+            if self.depth_sensor.supports(rs.option.gain):
+                gain_range = self.depth_sensor.get_option_range(rs.option.gain)
+                ranges['gain'] = (int(gain_range.min), int(gain_range.max), int(gain_range.step))
+                
+            if self.depth_sensor.supports(rs.option.laser_power):
+                laser_range = self.depth_sensor.get_option_range(rs.option.laser_power)
+                ranges['laser_power'] = (int(laser_range.min), int(laser_range.max), int(laser_range.step))
+                
+        except Exception as e:
+            if self.debug:
+                print(f"Error getting parameter ranges: {e}")
+        
+        return ranges
+
+    def set_exposure(self, exposure_us):
+        """Set exposure time in microseconds"""
+        if not self.depth_sensor or not self.depth_sensor.supports(rs.option.exposure):
+            return False
+        
+        try:
+            # Disable auto exposure first
+            if self.depth_sensor.supports(rs.option.enable_auto_exposure):
+                self.depth_sensor.set_option(rs.option.enable_auto_exposure, 0)
+                self.auto_exposure_enabled = False
+            
+            self.depth_sensor.set_option(rs.option.exposure, exposure_us)
+            self.current_exposure = exposure_us
+            if self.debug:
+                print(f"Exposure set to {exposure_us} μs")
+            return True
+        except Exception as e:
+            if self.debug:
+                print(f"Failed to set exposure: {e}")
+            return False
+
+    def set_gain(self, gain):
+        """Set gain value"""
+        if not self.depth_sensor or not self.depth_sensor.supports(rs.option.gain):
+            return False
+        
+        try:
+            self.depth_sensor.set_option(rs.option.gain, gain)
+            self.current_gain = gain
+            if self.debug:
+                print(f"Gain set to {gain}")
+            return True
+        except Exception as e:
+            if self.debug:
+                print(f"Failed to set gain: {e}")
+            return False
+
+    def set_laser_power(self, power):
+        """Set laser power (0-360)"""
+        if not self.depth_sensor or not self.depth_sensor.supports(rs.option.laser_power):
+            return False
+        
+        try:
+            self.depth_sensor.set_option(rs.option.laser_power, power)
+            self.current_laser_power = power
+            if self.debug:
+                print(f"Laser power set to {power}")
+            return True
+        except Exception as e:
+            if self.debug:
+                print(f"Failed to set laser power: {e}")
+            return False
+
+    def toggle_auto_exposure(self):
+        """Toggle auto exposure on/off"""
+        if not self.depth_sensor or not self.depth_sensor.supports(rs.option.enable_auto_exposure):
+            return False
+        
+        try:
+            current_state = self.depth_sensor.get_option(rs.option.enable_auto_exposure)
+            new_state = 1 - current_state
+            self.depth_sensor.set_option(rs.option.enable_auto_exposure, new_state)
+            self.auto_exposure_enabled = bool(new_state)
+            
+            if self.debug:
+                print(f"Auto exposure {'enabled' if self.auto_exposure_enabled else 'disabled'}")
+            return True
+        except Exception as e:
+            if self.debug:
+                print(f"Failed to toggle auto exposure: {e}")
+            return False
+
+    def get_current_parameters(self):
+        """Get current parameter values"""
+        if not self.depth_sensor:
+            return {}
+        
+        params = {}
+        try:
+            if self.depth_sensor.supports(rs.option.exposure):
+                params['exposure'] = int(self.depth_sensor.get_option(rs.option.exposure))
+            if self.depth_sensor.supports(rs.option.gain):
+                params['gain'] = int(self.depth_sensor.get_option(rs.option.gain))
+            if self.depth_sensor.supports(rs.option.laser_power):
+                params['laser_power'] = int(self.depth_sensor.get_option(rs.option.laser_power))
+            if self.depth_sensor.supports(rs.option.enable_auto_exposure):
+                params['auto_exposure'] = bool(self.depth_sensor.get_option(rs.option.enable_auto_exposure))
+            if self.depth_sensor.supports(rs.option.visual_preset):
+                params['visual_preset'] = int(self.depth_sensor.get_option(rs.option.visual_preset))
+            if self.depth_sensor.supports(rs.option.confidence_threshold):
+                params['confidence_threshold'] = int(self.depth_sensor.get_option(rs.option.confidence_threshold))
+        except Exception as e:
+            if self.debug:
+                print(f"Error getting current parameters: {e}")
+        
+        return params
 
     def start(self) -> bool:
         """Start camera with verified resolution"""
@@ -97,8 +369,19 @@ class Camera:
             color_profile = profile.get_stream(rs.stream.color).as_video_stream_profile()
             
             self.intrinsics = depth_profile.get_intrinsics()
-            depth_sensor = profile.get_device().first_depth_sensor()
-            self.depth_scale = depth_sensor.get_depth_scale()
+            self.depth_sensor = profile.get_device().first_depth_sensor()
+            self.depth_scale = self.depth_sensor.get_depth_scale()
+            
+            # Apply defaults first if requested
+            if self.use_viewer_defaults:
+                self.apply_viewer_defaults()
+            
+            # Get current parameter values after defaults applied
+            current_params = self.get_current_parameters()
+            self.current_exposure = current_params.get('exposure')
+            self.current_gain = current_params.get('gain')
+            self.current_laser_power = current_params.get('laser_power')
+            self.auto_exposure_enabled = current_params.get('auto_exposure', True)
             
             # Verify resolutions match expectations
             actual_depth_res = (depth_profile.width(), depth_profile.height())
@@ -110,6 +393,19 @@ class Camera:
                 print(f"  Color resolution: {actual_color_res}")
                 print(f"  Expected: ({self.width}, {self.height})")
                 print(f"  Depth scale: {self.depth_scale}")
+                print(f"  Using viewer defaults: {self.use_viewer_defaults}")
+                
+                # Print parameter ranges
+                ranges = self.get_parameter_ranges()
+                if ranges:
+                    print(f"  Parameter ranges:")
+                    for param, (min_val, max_val, step) in ranges.items():
+                        print(f"    {param}: {min_val}-{max_val} (step: {step})")
+                
+                # Print current parameters
+                print(f"  Current parameters:")
+                for param, value in current_params.items():
+                    print(f"    {param}: {value}")
             
             # Verify we got what we asked for
             if actual_depth_res != (self.width, self.height):
@@ -117,16 +413,11 @@ class Camera:
             if actual_color_res != (self.width, self.height):
                 print(f"WARNING: Got color {actual_color_res}, expected ({self.width}, {self.height})")
             
-            # Configure depth sensor for better quality (but don't go crazy)
-            try:
-                if depth_sensor.supports(rs.option.visual_preset):
-                    depth_sensor.set_option(rs.option.visual_preset, 3)  # High accuracy
-            except Exception as e:
-                if self.debug:
-                    print(f"Warning: Could not set visual preset: {e}")
-            
-            # Initialize minimal filters
-            self._init_minimal_filters()
+            # Initialize post-processing filters
+            if self.use_viewer_defaults:
+                self._init_viewer_quality_filters()
+            else:
+                self._init_minimal_filters()
             
             # Start processing thread
             self._running = True
@@ -139,48 +430,67 @@ class Camera:
             print(f"Failed to start camera: {e}")
             return False
 
-    def _apply_minimal_processing(self, depth_frame):
-        """Apply only essential processing - no decimation, minimal filtering"""
+    def _apply_post_processing(self, depth_frame):
+        """Apply post-processing pipeline to depth frame"""
         if depth_frame is None:
             return None
             
         try:
             processed_frame = depth_frame
             
-            # Apply only light spatial filtering (optional)
-            if self.spatial_filter:
-                processed_frame = self.spatial_filter.process(processed_frame)
-            
-            # Apply hole filling only if really needed
-            if self.hole_filling_filter:
-                processed_frame = self.hole_filling_filter.process(processed_frame)
+            if self.use_viewer_defaults:
+                # Full RealSense Viewer quality pipeline
+                
+                # Apply decimation if enabled (reduces resolution but improves performance)
+                if self.decimation_filter:
+                    processed_frame = self.decimation_filter.process(processed_frame)
+                
+                # Apply threshold filter (remove too close/far values)
+                if self.threshold_filter:
+                    processed_frame = self.threshold_filter.process(processed_frame)
+                
+                # Apply temporal filter (reduces noise over time)
+                if self.temporal_filter:
+                    processed_frame = self.temporal_filter.process(processed_frame)
+                
+                # Apply spatial filter (reduces noise within frame)
+                if self.spatial_filter:
+                    processed_frame = self.spatial_filter.process(processed_frame)
+                
+                # Apply hole filling filter (fills remaining holes)
+                if self.hole_filling_filter:
+                    processed_frame = self.hole_filling_filter.process(processed_frame)
+                    
+            else:
+                # Minimal processing (original behavior)
+                if self.spatial_filter:
+                    processed_frame = self.spatial_filter.process(processed_frame)
+                
+                if self.hole_filling_filter:
+                    processed_frame = self.hole_filling_filter.process(processed_frame)
             
             return processed_frame
             
         except Exception as e:
             if self.debug:
-                print(f"Error in minimal processing: {e}")
+                print(f"Error in post-processing: {e}")
             return depth_frame  # Return original on error
 
     def _process_frames(self):
-        """Simple frame processing without aggressive filtering"""
+        """Frame processing with full post-processing pipeline"""
         while self._running:
             try:
                 frames = self.pipeline.wait_for_frames(timeout_ms=1000)
                 aligned_frames = self.align.process(frames)
                 
-                # Get depth frame with minimal processing
+                # Get depth frame with post-processing
                 depth_frame = aligned_frames.get_depth_frame()
                 if depth_frame:
-                    # Apply minimal processing
-                    processed_frame = self._apply_minimal_processing(depth_frame)
+                    # Apply full post-processing pipeline
+                    processed_frame = self._apply_post_processing(depth_frame)
                     
                     # Convert to numpy
                     depth_image = np.asanyarray(processed_frame.get_data())
-                    
-                    # Verify shape every 100 frames
-                    if self.debug and hasattr(self, 'frame_count') and self.frame_count % 100 == 0:
-                        print(f"Depth frame shape: {depth_image.shape} (expected: ({self.height}, {self.width}))")
                     
                     # Add to buffer
                     with self._buffer_lock:
@@ -204,7 +514,7 @@ class Camera:
                     print(f"Frame acquisition error: {e}")
                 time.sleep(0.1)
 
-    def get_frames(self, use_averaging=True):
+    def get_frames(self, use_averaging=False):
         """Get frames with guaranteed correct resolution"""
         try:
             aligned_frames = self._frame_queue.get(timeout=1.0)
@@ -220,162 +530,24 @@ class Camera:
                 if depth_image is None:
                     depth_frame = aligned_frames.get_depth_frame()
                     if depth_frame:
-                        processed_frame = self._apply_minimal_processing(depth_frame)
+                        processed_frame = self._apply_post_processing(depth_frame)
                         depth_image = np.asanyarray(processed_frame.get_data())
                     else:
                         return None
             else:
                 depth_frame = aligned_frames.get_depth_frame()
                 if depth_frame:
-                    processed_frame = self._apply_minimal_processing(depth_frame)
+                    processed_frame = self._apply_post_processing(depth_frame)
                     depth_image = np.asanyarray(processed_frame.get_data())
                 else:
                     return None
-
-            # Final shape verification
-            if color_image.shape[:2] != (self.height, self.width):
-                if self.debug:
-                    print(f"Unexpected color shape: {color_image.shape}")
-            
-            if depth_image.shape != (self.height, self.width):
-                if self.debug:
-                    print(f"Unexpected depth shape: {depth_image.shape}")
 
             return color_image, depth_image
 
         except queue.Empty:
             return None, None
 
-    def _get_averaged_depth(self):
-        """Simple depth averaging without artifacts"""
-        with self._buffer_lock:
-            if not self._depth_buffer:
-                return None
-                
-            # Simple median-based averaging to avoid artifacts
-            stacked_depths = np.stack(list(self._depth_buffer), axis=0)
-            
-            # Use median instead of mean to avoid noise amplification
-            result_depth = np.median(stacked_depths, axis=0)
-            
-            return result_depth.astype(self._depth_buffer[0].dtype)
-
-    def mouse_callback(self, event, x, y, flags, param):
-        """Mouse callback to get depth values at clicked positions."""
-        if event == cv2.EVENT_LBUTTONDOWN:
-            self.mouse_x, self.mouse_y = x, y
-            
-            # Adjust coordinates if this is the right side of a side-by-side display
-            actual_x = x
-            if x > self.width:  # Clicked on right side (depth image)
-                actual_x = x - self.width
-            
-            if (self.current_depth_image is not None and 
-                0 <= actual_x < self.width and 0 <= y < self.height):
-                
-                depth_value_raw = self.current_depth_image[y, actual_x]
-                if depth_value_raw > 0 and self.depth_scale:
-                    depth_value_m = depth_value_raw * self.depth_scale
-                    print(f"Depth at ({actual_x}, {y}): {depth_value_raw} units ({depth_value_m*1000:.1f} mm, {depth_value_m:.3f} m)")
-                else:
-                    print(f"No valid depth data at ({actual_x}, {y})")
-
-    def create_depth_colormap(self, depth_image):
-        """Create a colorized version of the depth image."""
-        # Convert to proper format for OpenCV colormap
-        if len(depth_image.shape) == 3:
-            depth_gray = cv2.cvtColor(depth_image, cv2.COLOR_RGB2GRAY)
-        else:
-            depth_gray = depth_image
-        
-        # Ensure we have the right data type
-        if depth_gray.dtype != np.uint8:
-            # Normalize to 0-255 range and convert to uint8
-            depth_normalized = cv2.normalize(depth_gray.astype(np.float32), None, 0, 255, cv2.NORM_MINMAX)
-            depth_uint8 = depth_normalized.astype(np.uint8)
-        else:
-            depth_uint8 = depth_gray
-        
-        # Apply colormap
-        depth_colored = cv2.applyColorMap(depth_uint8, self.colormap)
-        return depth_colored
-
-    def save_data(self):
-        """Save current depth map and RGB image."""
-        if self.current_color_image is None or self.current_depth_image is None:
-            print("No current frames to save")
-            return
-            
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # Create output directory if it doesn't exist
-        output_dir = "realsense_captures"
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Save RGB image (convert BGR to RGB for proper saving)
-        rgb_filename = f"{output_dir}/rgb_{timestamp}.png"
-        rgb_image = cv2.cvtColor(self.current_color_image, cv2.COLOR_BGR2RGB)
-        cv2.imwrite(rgb_filename, cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR))
-        
-        # Save raw depth data as numpy array
-        depth_raw_filename = f"{output_dir}/depth_raw_{timestamp}.npy"
-        np.save(depth_raw_filename, self.current_depth_image)
-        
-        # Save colorized depth image (ensure consistent RGB format)
-        depth_colored = self.create_depth_colormap(self.current_depth_image)
-        # Convert depth colormap to RGB format for consistency with ZED
-        depth_colored_rgb = cv2.cvtColor(depth_colored, cv2.COLOR_BGR2RGB)
-        depth_colored_filename = f"{output_dir}/depth_colored_{timestamp}.png"
-        cv2.imwrite(depth_colored_filename, cv2.cvtColor(depth_colored_rgb, cv2.COLOR_RGB2BGR))
-        
-        # Save depth in millimeters as 16-bit PNG
-        if self.depth_scale:
-            depth_mm = (self.current_depth_image * self.depth_scale * 1000).astype(np.uint16)
-            depth_mm_filename = f"{output_dir}/depth_mm_{timestamp}.png"
-            cv2.imwrite(depth_mm_filename, depth_mm)
-        
-        print(f"Data saved to {output_dir}/ with timestamp {timestamp}")
-        print(f"  RGB image saved in proper color order (matching ZED format)")
-
-    def display_info_overlay(self, image):
-        """Add information overlay to the image."""
-        height, width = image.shape[:2]
-        
-        # Create info text
-        colormap_names = {
-            cv2.COLORMAP_JET: "JET",
-            cv2.COLORMAP_TURBO: "TURBO", 
-            cv2.COLORMAP_VIRIDIS: "VIRIDIS",
-            cv2.COLORMAP_PLASMA: "PLASMA"
-        }
-        colormap_name = colormap_names.get(self.colormap, "UNKNOWN")
-        
-        mode_names = ["BG Removal", "Normalized", "Raw Depth"]
-        mode_name = mode_names[self.display_mode] if self.display_mode < len(mode_names) else "Unknown"
-        
-        info_text = [
-            f"RealSense: {self.width}x{self.height} @ {self.fps}fps",
-            f"Mode: {mode_name}",
-            f"Colormap: {colormap_name}",
-            f"Clip: {self.clipping_distance_m:.1f}m",
-            f"Mouse: ({self.mouse_x}, {self.mouse_y})",
-            f"Frame: {getattr(self, 'frame_count', 0)}",
-            "Controls: q=quit, s=save, d=mode, c=colormap, +/-=clip"
-        ]
-        
-        # Add text overlay with background for better readability
-        for i, text in enumerate(info_text):
-            y_pos = 30 + i * 25
-            # Add background rectangle
-            text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-            cv2.rectangle(image, (5, y_pos - 20), (15 + text_size[0], y_pos + 5), (0, 0, 0), -1)
-            # Add text
-            cv2.putText(image, text, (10, y_pos), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        
-        return image
-
-    def visualize(self, use_averaging=True):
+    def visualize(self, use_averaging=False):
         """Advanced visualization with multiple modes and interactive features"""
         frames = self.get_frames(use_averaging=use_averaging)
         if not frames or not self.depth_scale:
@@ -450,16 +622,63 @@ class Camera:
             combined_bgr = cv2.cvtColor(combined, cv2.COLOR_RGB2BGR)
             
             # Display the image
-            cv2.imshow('RealSense Advanced Visualization', combined_bgr)
+            cv2.imshow('RealSense Parameter Tuning', combined_bgr)
             
         except Exception as e:
             if self.debug:
                 print(f"Visualization error: {e}")
             # Fallback to simple display
             simple_combined = np.hstack([color_image, cv2.cvtColor(depth_image, cv2.COLOR_GRAY2BGR)])
-            cv2.imshow('RealSense Advanced Visualization', simple_combined)
+            cv2.imshow('RealSense Parameter Tuning', simple_combined)
 
-    def run_advanced_visualization(self, use_averaging=True):
+    def save_data(self):
+        """Save current depth map and RGB image."""
+        if self.current_color_image is None or self.current_depth_image is None:
+            print("No current frames to save")
+            return
+            
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Create output directory if it doesn't exist
+        output_dir = "realsense_captures"
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Save RGB image (convert BGR to RGB for proper saving)
+        rgb_filename = f"{output_dir}/rgb_{timestamp}.png"
+        rgb_image = cv2.cvtColor(self.current_color_image, cv2.COLOR_BGR2RGB)
+        cv2.imwrite(rgb_filename, cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR))
+        
+        # Save raw depth data as numpy array
+        depth_raw_filename = f"{output_dir}/depth_raw_{timestamp}.npy"
+        np.save(depth_raw_filename, self.current_depth_image)
+        
+        # Save colorized depth image (ensure consistent RGB format)
+        depth_colored = self.create_depth_colormap(self.current_depth_image)
+        # Convert depth colormap to RGB format for consistency with ZED
+        depth_colored_rgb = cv2.cvtColor(depth_colored, cv2.COLOR_BGR2RGB)
+        depth_colored_filename = f"{output_dir}/depth_colored_{timestamp}.png"
+        cv2.imwrite(depth_colored_filename, cv2.cvtColor(depth_colored_rgb, cv2.COLOR_RGB2BGR))
+        
+        # Save depth in millimeters as 16-bit PNG
+        if self.depth_scale:
+            depth_mm = (self.current_depth_image * self.depth_scale * 1000).astype(np.uint16)
+            depth_mm_filename = f"{output_dir}/depth_mm_{timestamp}.png"
+            cv2.imwrite(depth_mm_filename, depth_mm)
+        
+        # Save current parameters
+        params = self.get_current_parameters()
+        params_filename = f"{output_dir}/params_{timestamp}.txt"
+        with open(params_filename, 'w') as f:
+            f.write(f"Timestamp: {timestamp}\n")
+            f.write(f"Camera settings:\n")
+            for param, value in params.items():
+                f.write(f"  {param}: {value}\n")
+        
+        print(f"Data saved to {output_dir}/ with timestamp {timestamp}")
+        print(f"  RGB image saved in proper color order (matching ZED format)")
+        print(f"  Camera parameters saved to {params_filename}")
+
+    def run_advanced_visualization(self, use_averaging=False):
         """Run interactive visualization with keyboard controls"""
         if not self._running:
             print("Camera not started!")
@@ -511,7 +730,7 @@ class Camera:
             cv2.destroyAllWindows()
             print("Advanced visualization stopped")
 
-    def get_closest_blob(self, use_averaging=True):
+    def get_closest_blob(self, use_averaging=False):
         """Simple closest blob detection"""
         frames = self.get_frames(use_averaging=use_averaging)
         if frames is None or self.depth_scale is None:
@@ -535,7 +754,7 @@ class Camera:
 
         return min_depth, min_coords[::-1]  # Return as (x, y)
 
-    def get_point_cloud(self, use_averaging=True, manual_calculation=False):
+    def get_point_cloud(self, use_averaging=False, manual_calculation=False):
         """
         Get point cloud from depth data
         
@@ -557,7 +776,7 @@ class Camera:
                 print(f"Error getting point cloud: {e}")
             return np.array([])
 
-    def _get_point_cloud_realsense(self, use_averaging=True):
+    def _get_point_cloud_realsense(self, use_averaging=False):
         """Get point cloud using RealSense built-in calculation"""
         try:
             aligned_frames = self._frame_queue.get(timeout=1.0)
@@ -569,10 +788,10 @@ class Camera:
             # If using averaging, we need to create a synthetic frame
             # For simplicity with RealSense point cloud, use the current frame
             if use_averaging:
-                # Apply minimal processing to current frame
-                processed_frame = self._apply_minimal_processing(depth_frame)
+                # Apply post-processing to current frame
+                processed_frame = self._apply_post_processing(depth_frame)
             else:
-                processed_frame = self._apply_minimal_processing(depth_frame)
+                processed_frame = self._apply_post_processing(depth_frame)
             
             # Calculate point cloud using RealSense
             points = self.point_cloud.calculate(processed_frame)
@@ -589,7 +808,7 @@ class Camera:
                 print(f"RealSense point cloud failed: {e}, falling back to manual calculation")
             return self._get_point_cloud_manual(use_averaging)
 
-    def _get_point_cloud_manual(self, use_averaging=True):
+    def _get_point_cloud_manual(self, use_averaging=False):
         """Manually calculate point cloud using camera intrinsics and depth data"""
         try:
             frames = self.get_frames(use_averaging=use_averaging)
@@ -631,7 +850,7 @@ class Camera:
                 print(f"Manual point cloud calculation failed: {e}")
             return np.array([])
 
-    def get_point_cloud_with_colors(self, use_averaging=True):
+    def get_point_cloud_with_colors(self, use_averaging=False):
         """
         Get point cloud with corresponding RGB colors
         
@@ -799,6 +1018,257 @@ class Camera:
                 print(f"Failed to save PLY file: {e}")
             return False
 
+    def _get_averaged_depth(self):
+        """Simple depth averaging without artifacts"""
+        with self._buffer_lock:
+            if not self._depth_buffer:
+                return None
+                
+            # Simple median-based averaging to avoid artifacts
+            stacked_depths = np.stack(list(self._depth_buffer), axis=0)
+            
+            # Use median instead of mean to avoid noise amplification
+            result_depth = np.median(stacked_depths, axis=0)
+            
+            return result_depth.astype(self._depth_buffer[0].dtype)
+
+    def mouse_callback(self, event, x, y, flags, param):
+        """Mouse callback to get depth values at clicked positions."""
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self.mouse_x, self.mouse_y = x, y
+            
+            # Adjust coordinates if this is the right side of a side-by-side display
+            actual_x = x
+            if x > self.width:  # Clicked on right side (depth image)
+                actual_x = x - self.width
+            
+            if (self.current_depth_image is not None and 
+                0 <= actual_x < self.width and 0 <= y < self.height):
+                
+                depth_value_raw = self.current_depth_image[y, actual_x]
+                if depth_value_raw > 0 and self.depth_scale:
+                    depth_value_m = depth_value_raw * self.depth_scale
+                    print(f"Depth at ({actual_x}, {y}): {depth_value_raw} units ({depth_value_m*1000:.1f} mm, {depth_value_m:.3f} m)")
+                else:
+                    print(f"No valid depth data at ({actual_x}, {y})")
+
+    def create_depth_colormap(self, depth_image):
+        """Create a colorized version of the depth image."""
+        # Convert to proper format for OpenCV colormap
+        if len(depth_image.shape) == 3:
+            depth_gray = cv2.cvtColor(depth_image, cv2.COLOR_RGB2GRAY)
+        else:
+            depth_gray = depth_image
+        
+        # Ensure we have the right data type
+        if depth_gray.dtype != np.uint8:
+            # Normalize to 0-255 range and convert to uint8
+            depth_normalized = cv2.normalize(depth_gray.astype(np.float32), None, 0, 255, cv2.NORM_MINMAX)
+            depth_uint8 = depth_normalized.astype(np.uint8)
+        else:
+            depth_uint8 = depth_gray
+        
+        # Apply colormap
+        depth_colored = cv2.applyColorMap(depth_uint8, self.colormap)
+        return depth_colored
+
+    def display_info_overlay(self, image):
+        """Add information overlay to the image."""
+        height, width = image.shape[:2]
+        
+        # Create info text
+        colormap_names = {
+            cv2.COLORMAP_JET: "JET",
+            cv2.COLORMAP_TURBO: "TURBO", 
+            cv2.COLORMAP_VIRIDIS: "VIRIDIS",
+            cv2.COLORMAP_PLASMA: "PLASMA"
+        }
+        colormap_name = colormap_names.get(self.colormap, "UNKNOWN")
+        
+        mode_names = ["BG Removal", "Normalized", "Raw Depth"]
+        mode_name = mode_names[self.display_mode] if self.display_mode < len(mode_names) else "Unknown"
+        
+        # Get current parameters
+        current_params = self.get_current_parameters()
+        
+        processing_mode = "Viewer Quality" if self.use_viewer_defaults else "Minimal"
+        
+        info_text = [
+            f"RealSense: {self.width}x{self.height} @ {self.fps}fps",
+            f"Processing: {processing_mode}",
+            f"Mode: {mode_name}",
+            f"Colormap: {colormap_name}",
+            f"Clip: {self.clipping_distance_m:.1f}m",
+            f"Mouse: ({self.mouse_x}, {self.mouse_y})",
+            f"Frame: {getattr(self, 'frame_count', 0)}",
+            "",  # Separator
+            "Camera Parameters:",
+            f"Exposure: {current_params.get('exposure', 'N/A')} μs",
+            f"Gain: {current_params.get('gain', 'N/A')}",
+            f"Laser Power: {current_params.get('laser_power', 'N/A')}",
+            f"Auto Exposure: {current_params.get('auto_exposure', 'N/A')}",
+            f"Visual Preset: {current_params.get('visual_preset', 'N/A')}",
+            "",  # Separator
+            "Controls:",
+            "q=quit, s=save, d=mode, c=colormap, +/-=clip",
+            "e/r=exposure ±1000μs, g/t=gain ±16",
+            "l/y=laser ±30, a=auto exposure toggle",
+            "v=toggle processing mode"
+        ]
+        
+        # Add text overlay with background for better readability
+        for i, text in enumerate(info_text):
+            if text == "":  # Skip empty lines but maintain spacing
+                continue
+            y_pos = 30 + i * 22
+            # Add background rectangle
+            text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)[0]
+            cv2.rectangle(image, (5, y_pos - 16), (15 + text_size[0], y_pos + 4), (0, 0, 0), -1)
+            # Add text
+            cv2.putText(image, text, (10, y_pos), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
+        
+        return image
+
+    def toggle_processing_mode(self):
+        """Toggle between viewer quality and minimal processing"""
+        self.use_viewer_defaults = not self.use_viewer_defaults
+        
+        if self.use_viewer_defaults:
+            self._init_viewer_quality_filters()
+            self.apply_viewer_defaults()
+            if self.debug:
+                print("Switched to Viewer Quality processing")
+        else:
+            self._init_minimal_filters()
+            if self.debug:
+                print("Switched to Minimal processing")
+
+    def handle_parameter_adjustment(self, key):
+        """Handle keyboard input for parameter adjustment"""
+        current_params = self.get_current_parameters()
+        ranges = self.get_parameter_ranges()
+        
+        # Processing mode toggle
+        if key == ord('v'):  # Toggle processing mode
+            self.toggle_processing_mode()
+        
+        # Exposure controls: e/r (decrease/increase)
+        elif key == ord('e'):  # Decrease exposure
+            if 'exposure' in current_params and ranges and 'exposure' in ranges:
+                new_exposure = max(ranges['exposure'][0], current_params['exposure'] - 1000)
+                self.set_exposure(new_exposure)
+        elif key == ord('r'):  # Increase exposure  
+            if 'exposure' in current_params and ranges and 'exposure' in ranges:
+                new_exposure = min(ranges['exposure'][1], current_params['exposure'] + 1000)
+                self.set_exposure(new_exposure)
+        
+        # Gain controls: g/t (decrease/increase)
+        elif key == ord('g'):  # Decrease gain
+            if 'gain' in current_params and ranges and 'gain' in ranges:
+                new_gain = max(ranges['gain'][0], current_params['gain'] - 16)
+                self.set_gain(new_gain)
+        elif key == ord('t'):  # Increase gain
+            if 'gain' in current_params and ranges and 'gain' in ranges:
+                new_gain = min(ranges['gain'][1], current_params['gain'] + 16)
+                self.set_gain(new_gain)
+        
+        # Laser power controls: l/y (decrease/increase)
+        elif key == ord('l'):  # Decrease laser power
+            if 'laser_power' in current_params and ranges and 'laser_power' in ranges:
+                new_laser = max(ranges['laser_power'][0], current_params['laser_power'] - 30)
+                self.set_laser_power(new_laser)
+        elif key == ord('y'):  # Increase laser power
+            if 'laser_power' in current_params and ranges and 'laser_power' in ranges:
+                new_laser = min(ranges['laser_power'][1], current_params['laser_power'] + 30)
+                self.set_laser_power(new_laser)
+        
+        # Auto exposure toggle
+        elif key == ord('a'):  # Toggle auto exposure
+            self.toggle_auto_exposure()
+
+    # ... [rest of the methods remain the same - visualize, run_parameter_tuning, etc.]
+
+    def run_parameter_tuning(self, use_averaging=False):
+        """Run interactive parameter tuning mode"""
+        if not self._running:
+            print("Camera not started!")
+            return
+        
+        print("\nStarting parameter tuning mode...")
+        print("Controls:")
+        print("  'q' or ESC: Quit")
+        print("  's': Save current data and parameters")
+        print("  'd': Toggle display mode (BG removal -> Normalized -> Raw)")
+        print("  'c': Cycle through colormaps")
+        print("  '+'/'-': Adjust clipping distance")
+        print("  'e'/'r': Decrease/Increase exposure by 1000μs")
+        print("  'g'/'t': Decrease/Increase gain by 16")
+        print("  'l'/'y': Decrease/Increase laser power by 30")
+        print("  'a': Toggle auto exposure")
+        print("  'v': Toggle processing mode (Viewer Quality <-> Minimal)")
+        print("  Click on image: Print depth value")
+        print()
+        
+        # Print initial parameter values and ranges
+        current_params = self.get_current_parameters()
+        ranges = self.get_parameter_ranges()
+        
+        print("Current parameters:")
+        for param, value in current_params.items():
+            print(f"  {param}: {value}")
+        
+        if ranges:
+            print("\nValid ranges:")
+            for param, (min_val, max_val, step) in ranges.items():
+                print(f"  {param}: {min_val}-{max_val} (step: {step})")
+        print()
+        
+        processing_mode = "Viewer Quality" if self.use_viewer_defaults else "Minimal"
+        print(f"Current processing mode: {processing_mode}")
+        print()
+        
+        # Set up OpenCV window
+        cv2.namedWindow("RealSense Parameter Tuning", cv2.WINDOW_AUTOSIZE)
+        cv2.setMouseCallback("RealSense Parameter Tuning", self.mouse_callback)
+        
+        try:
+            while True:
+                self.visualize(use_averaging=use_averaging)
+                
+                # Handle keyboard input
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q') or key == 27:  # 'q' or ESC
+                    break
+                elif key == ord('s'):
+                    self.save_data()
+                elif key == ord('d'):
+                    self.display_mode = (self.display_mode + 1) % 3
+                    mode_names = ["background removal", "normalized depth", "raw depth"]
+                    print(f"Switched to {mode_names[self.display_mode]} mode")
+                elif key == ord('c'):
+                    self.colormap_index = (self.colormap_index + 1) % len(self.colormaps)
+                    self.colormap = self.colormaps[self.colormap_index]
+                    colormap_names = ["JET", "TURBO", "VIRIDIS", "PLASMA"]
+                    print(f"Switched to {colormap_names[self.colormap_index]} colormap")
+                elif key == ord('+') or key == ord('='):
+                    self.clipping_distance_m = min(5.0, self.clipping_distance_m + 0.1)
+                    print(f"Clipping distance: {self.clipping_distance_m:.1f}m")
+                elif key == ord('-'):
+                    self.clipping_distance_m = max(0.1, self.clipping_distance_m - 0.1)
+                    print(f"Clipping distance: {self.clipping_distance_m:.1f}m")
+                else:
+                    # Handle parameter adjustments
+                    self.handle_parameter_adjustment(key)
+                    
+        except KeyboardInterrupt:
+            print("\nInterrupted by user")
+        finally:
+            cv2.destroyAllWindows()
+            print("Parameter tuning stopped")
+
+    # ... [include all other methods like visualize, save_data, point cloud methods, etc.]
+
     def stop(self):
         """Stop camera"""
         self._running = False
@@ -808,104 +1278,113 @@ class Camera:
         cv2.destroyAllWindows()
         
         if self.debug:
-            print("Simple camera stopped")
+            print("Camera stopped")
 
 
-# Ultra-simple fallback if even the above doesn't work
-class UltraSimpleCamera:
-    def __init__(self, width=640, height=480, fps=30, debug=True):
-        self.width = width
-        self.height = height
-        self.fps = fps
-        self.debug = debug
-        
-        self.pipeline = rs.pipeline()
-        self.config = rs.config()
-        self.align = rs.align(rs.stream.color)
-        
-        # Bare minimum configuration
-        self.config.enable_stream(rs.stream.depth, width, height, rs.format.z16, fps)
-        self.config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
-        
-        self.depth_scale = None
-        self._running = False
-
-    def start(self):
-        try:
-            profile = self.pipeline.start(self.config)
-            depth_sensor = profile.get_device().first_depth_sensor()
-            self.depth_scale = depth_sensor.get_depth_scale()
-            self._running = True
-            
-            if self.debug:
-                print(f"Ultra-simple camera started: {self.width}x{self.height}")
-            return True
-        except Exception as e:
-            print(f"Failed to start ultra-simple camera: {e}")
-            return False
-
-    def get_frames(self):
-        if not self._running:
-            return None
-        
-        try:
-            frames = self.pipeline.wait_for_frames(timeout_ms=1000)
-            aligned_frames = self.align.process(frames)
-            
-            color_frame = aligned_frames.get_color_frame()
-            depth_frame = aligned_frames.get_depth_frame()
-            
-            if not color_frame or not depth_frame:
-                return None
-                
-            color_image = np.asanyarray(color_frame.get_data())
-            depth_image = np.asanyarray(depth_frame.get_data())
-            
-            return color_image, depth_image
-            
-        except Exception as e:
-            if self.debug:
-                print(f"Frame error: {e}")
-            return None
-
-    def stop(self):
-        self._running = False
-        self.pipeline.stop()
-
-
-# Test both cameras
-if __name__ == "__main__":
-    print("Testing advanced RealSense camera visualization...")
+def test_viewer_quality():
+    """Test function with RealSense Viewer quality defaults"""
+    print("=" * 60)
+    print("RealSense Viewer Quality Test")
+    print("=" * 60)
+    print()
     
-    # Try the advanced camera
+    # Create camera with viewer defaults enabled (using actual viewer resolution)
     camera = Camera(
-        width=640, 
+        width=848,  # RealSense Viewer default resolution
         height=480, 
         fps=30, 
         depth_averaging_frames=3,
-        debug=True
+        debug=True,
+        use_viewer_defaults=True  # This is the key setting!
     )
     
-    if camera.start():
-        print("Camera started! Testing advanced visualization...")
+    if not camera.start():
+        print("Failed to start camera!")
+        return
+    
+    print("\nCamera started with RealSense Viewer quality settings!")
+    print("Resolution: 848x480 (matching RealSense Viewer)")
+    
+    # Wait for camera to stabilize
+    print("Stabilizing camera...")
+    time.sleep(3)  # Give auto-exposure time to adjust
+    
+    # Test a few frames
+    print("\nTesting frame acquisition...")
+    for i in range(3):
+        frames = camera.get_frames()
+        if frames:
+            color, depth = frames
+            print(f"Frame {i}: Color {color.shape}, Depth {depth.shape}")
+            valid_pixels = np.sum(depth > 0)
+            total_pixels = depth.size
+            print(f"  Valid depth pixels: {valid_pixels}/{total_pixels} ({100*valid_pixels/total_pixels:.1f}%)")
+        time.sleep(0.5)
+    
+    print("\n" + "=" * 60)
+    print("VIEWER QUALITY VISUALIZATION")
+    print("=" * 60)
+    print()
+    print("You should now see much better depth quality!")
+    print("Controls:")
+    print("  'v': Toggle between Viewer Quality and Minimal processing")
+    print("  's': Save current data")
+    print("  'q': Quit")
+    print()
+    
+    try:
+        camera.run_parameter_tuning(use_averaging=False)
         
-        # Test a few frames first
-        for i in range(3):
-            frames = camera.get_frames()
-            if frames:
-                color, depth = frames
-                print(f"Frame {i}: Color {color.shape}, Depth {depth.shape}")
-                valid_pixels = np.sum(depth > 0)
-                total_pixels = depth.size
-                print(f"  Valid depth pixels: {valid_pixels}/{total_pixels} ({100*valid_pixels/total_pixels:.1f}%)")
-            time.sleep(0.1)
-        
-        print("\nRunning advanced interactive visualization...")
-        print("Use mouse to click for depth values, keyboard for controls!")
-        
-        # Run the advanced visualization
-        camera.run_advanced_visualization(use_averaging=True)
-        
+    except KeyboardInterrupt:
+        print("\nInterrupted by user")
+    finally:
         camera.stop()
+        print("\nViewer quality test completed")
+
+
+def test_both_modes():
+    """Test function comparing minimal vs viewer quality"""
+    print("=" * 60)
+    print("RealSense Processing Mode Comparison")
+    print("=" * 60)
+    print()
+    
+    # Start with minimal processing (using viewer resolution)
+    camera = Camera(
+        width=848,  # RealSense Viewer default resolution
+        height=480, 
+        fps=30, 
+        debug=True,
+        use_viewer_defaults=True  # Start with minimal
+    )
+    
+    if not camera.start():
+        print("Failed to start camera!")
+        return
+    
+    print("\nCamera started in MINIMAL processing mode")
+    print("Resolution: 848x480 (matching RealSense Viewer)")
+    print("Press 'v' to toggle to Viewer Quality mode and see the difference!")
+    print()
+    
+    try:
+        camera.run_parameter_tuning(use_averaging=True)
+        
+    except KeyboardInterrupt:
+        print("\nInterrupted by user")
+    finally:
+        camera.stop()
+        print("\nComparison test completed")
+
+
+if __name__ == "__main__":
+    print("Choose test mode:")
+    print("1. Viewer Quality (recommended)")
+    print("2. Comparison Mode (toggle between minimal and viewer quality)")
+    
+    choice = input("Enter choice (1 or 2): ").strip()
+    
+    if choice == "2":
+        test_both_modes()
     else:
-        print("Failed to start camera")
+        test_viewer_quality()

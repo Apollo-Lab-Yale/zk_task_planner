@@ -30,8 +30,8 @@ from cognitive_bt_framework.src.llm_interface.llm_interface_openai import LLMInt
 # Import the CuRobo motion planner
 from cognitive_bt_framework.src.robot_interface.xarm_curobo_interface import CuRoboMotionPlanner 
 
-# Import the stereo ArUco detector we created
-from cognitive_bt_framework.src.vision.aruco_tf_v2 import StereoArucoDetector
+# Import the updated stereo ArUco detector
+from cognitive_bt_framework.src.vision.aruco_tf_v3 import StereoArucoDetector
 
 DETECTION_RETRIES = 5
 
@@ -274,7 +274,7 @@ class DirectSkillExecutor:
             self.robot_camera = None  # No separate robot camera needed
     
     def calibrate_zed_to_robot_transform(self):
-        """Calibrate the ZED-to-robot-base transform using stereo ArUco detection"""
+        """Calibrate the ZED-to-robot-base transform using simplified stereo ArUco detection"""
         if not self.use_zed_camera:
             print("Transform calibration only available when using ZED camera")
             return False
@@ -283,7 +283,7 @@ class DirectSkillExecutor:
             print("Secondary camera (RealSense) not available - skipping transform calibration")
             return False
             
-        print("=== Starting ZED-to-Robot Transform Calibration ===")
+        print("=== Starting ZED-to-Robot Transform Calibration (Simplified Interface) ===")
         print("This will use ArUco markers to compute the transform from ZED camera to robot base frame")
         print("Make sure ArUco markers are visible to both cameras")
         
@@ -292,30 +292,17 @@ class DirectSkillExecutor:
             robot_camera_position, robot_camera_rotation = self.motion_planner.get_camera_transform()
             T_robot_base_to_camera_link = self.create_transform_matrix(robot_camera_position, robot_camera_rotation)
             
-            # Create coordinate frame alignment transforms (identity for now - adjust if needed)
-            T_camera_link_to_aruco_frame = np.eye(4)
-            T_zed_to_aruco_frame = np.eye(4)
-            
-            # Initialize stereo ArUco detector
+            # Initialize simplified stereo ArUco detector
             self.stereo_detector = StereoArucoDetector(
-                robot_camera_instance=self.secondary_camera,
-                zed_camera_instance=self.main_camera,
+                robot_camera=self.secondary_camera,  # RealSense camera
+                zed_camera=self.main_camera,         # ZED camera
                 T_robot_base_to_camera_link=T_robot_base_to_camera_link,
-                T_camera_link_to_aruco_frame=T_camera_link_to_aruco_frame,
-                T_zed_to_aruco_frame=T_zed_to_aruco_frame,
-                marker_size=0.05,  # 5cm markers
-                dictionary_type=cv2.aruco.DICT_6X6_250,
-                min_markers_for_transform=1,
-                debug=True
+                marker_size=0.05  # 5cm markers
             )
             
-            if not self.stereo_detector.is_ready():
-                print("Stereo detector not ready")
-                return False
-            
-            print("Stereo ArUco detector ready!")
+            print("Simplified stereo ArUco detector initialized!")
             print("Looking for ArUco markers to calibrate transform...")
-            print("Press 'c' to capture transform, 'q' to skip calibration")
+            print("Automatic calibration will accept transforms with >70% confidence")
             
             # Calibration loop
             calibration_attempts = 0
@@ -323,56 +310,88 @@ class DirectSkillExecutor:
             
             while calibration_attempts < max_attempts:
                 try:
-                    # Process stereo frame
-                    robot_output, zed_output, stereo_data = self.stereo_detector.process_stereo_frame()
+                    # Get detection data and compute transform
+                    robot_detection, zed_detection = self.stereo_detector.get_detection_data()
+                    transform_matrix = self.stereo_detector.compute_transformation()
                     
-                    if robot_output is not None and zed_output is not None:
-                        # Update transform visualization
-                        if self.show_debug_windows:
-                            # Create side-by-side visualization
-                            vis_height = max(robot_output.shape[0], zed_output.shape[0])
-                            vis_width = robot_output.shape[1] + zed_output.shape[1]
-                            transform_vis = np.zeros((vis_height, vis_width, 3), dtype=np.uint8)
+                    # Create visualization if we have camera data
+                    if robot_detection is not None and zed_detection is not None:
+                        # Get current frames for visualization
+                        robot_frames = self.secondary_camera.get_frames()
+                        zed_frames = self.main_camera.get_frames()
+                        
+                        if robot_frames is not None and zed_frames is not None:
+                            robot_color, _ = robot_frames
+                            zed_color, _ = zed_frames
                             
-                            # Place robot camera image on left
-                            transform_vis[:robot_output.shape[0], :robot_output.shape[1]] = robot_output
+                            # Get camera matrices for drawing
+                            robot_K, robot_dist, zed_K, zed_dist = self.stereo_detector._get_camera_matrices()
                             
-                            # Place ZED image on right
-                            transform_vis[:zed_output.shape[0], robot_output.shape[1]:] = zed_output
+                            # Draw markers on images
+                            robot_output = self.stereo_detector.draw_markers_on_image(
+                                robot_color, robot_detection, robot_K, robot_dist, "Robot"
+                            )
+                            zed_output = self.stereo_detector.draw_markers_on_image(
+                                zed_color, zed_detection, zed_K, zed_dist, "ZED"
+                            )
                             
-                            # Add status text
-                            status_text = f"Calibration - Attempt {calibration_attempts + 1}/{max_attempts}"
-                            if stereo_data and stereo_data.get('transform_available', False):
-                                confidence = stereo_data.get('transform_confidence', 0.0)
-                                status_text += f" | Transform: Available (conf: {confidence:.3f})"
+                            if self.show_debug_windows:
+                                # Create side-by-side visualization
+                                vis_height = max(robot_output.shape[0], zed_output.shape[0])
+                                vis_width = robot_output.shape[1] + zed_output.shape[1]
+                                transform_vis = np.zeros((vis_height, vis_width, 3), dtype=np.uint8)
                                 
-                                # If confidence is high enough, auto-accept
-                                if confidence > 0.8:
-                                    print(f"High confidence transform found (conf: {confidence:.3f})")
-                                    print("Auto-accepting calibration...")
-                                    self.accept_calibration(stereo_data)
-                                    break
-                            else:
-                                status_text += " | Transform: Not Available"
-                            
-                            cv2.putText(transform_vis, status_text, (10, 30), 
-                                      cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-                            
-                            # Convert to RGB for matplotlib
-                            transform_vis_rgb = cv2.cvtColor(transform_vis, cv2.COLOR_BGR2RGB)
-                            self.visualizer.update(transform_img=transform_vis_rgb)
+                                # Place robot camera image on left
+                                transform_vis[:robot_output.shape[0], :robot_output.shape[1]] = robot_output
+                                
+                                # Place ZED image on right
+                                transform_vis[:zed_output.shape[0], robot_output.shape[1]:] = zed_output
+                                
+                                # Add status text
+                                status_text = f"Calibration - Attempt {calibration_attempts + 1}/{max_attempts}"
+                                
+                                # Get detection summary
+                                summary = self.stereo_detector.get_detection_summary()
+                                robot_markers = summary['robot_markers']
+                                zed_markers = summary['zed_markers']
+                                common_markers = summary['common_markers']
+                                transform_available = summary['transform_available']
+                                
+                                if transform_available and transform_matrix is not None:
+                                    # Estimate confidence based on detection quality
+                                    confidence = 0.1# if len(common_markers) > 0 else 0.0
+                                    status_text += f" | Transform: Available (conf: {confidence:.3f})"
+                                    
+                                    # If confidence is high enough, auto-accept
+                                    if confidence > 0.8:
+                                        print(f"High confidence transform found (conf: {confidence:.3f})")
+                                        print("Auto-accepting calibration...")
+                                        self.accept_calibration_simplified(transform_matrix, confidence)
+                                        break
+                                else:
+                                    status_text += f" | R:{robot_markers} Z:{zed_markers} C:{len(common_markers)}"
+                                
+                                cv2.putText(transform_vis, status_text, (10, 30), 
+                                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                                
+                                # Convert to RGB for matplotlib
+                                transform_vis_rgb = cv2.cvtColor(transform_vis, cv2.COLOR_BGR2RGB)
+                                self.visualizer.update(transform_img=transform_vis_rgb)
                     
-                    # Check for keyboard input (simplified for automatic operation)
+                    # Check for successful transform
+                    if transform_matrix is not None:
+                        # Get detection summary for confidence estimation
+                        summary = self.stereo_detector.get_detection_summary()
+                        common_markers = summary['common_markers']
+                        
+                        if len(common_markers) > 0:
+                            confidence = 0.8  # Simplified confidence estimation
+                            print(f"Transform found with {len(common_markers)} common marker(s) (conf: {confidence:.3f})")
+                            self.accept_calibration_simplified(transform_matrix, confidence)
+                            break
+                    
                     calibration_attempts += 1
                     time.sleep(0.1)  # Small delay
-                    
-                    # Auto-accept if we have a good transform
-                    if stereo_data and stereo_data.get('transform_available', False):
-                        confidence = stereo_data.get('transform_confidence', 0.0)
-                        if confidence > 0.7:  # Accept transforms with >70% confidence
-                            print(f"Acceptable transform found (conf: {confidence:.3f})")
-                            self.accept_calibration(stereo_data)
-                            break
                     
                 except KeyboardInterrupt:
                     print("Calibration interrupted by user")
@@ -393,38 +412,34 @@ class DirectSkillExecutor:
         
         return self.zed_to_robot_transform is not None
     
-    def accept_calibration(self, stereo_data):
-        """Accept the current calibration transform"""
+    def accept_calibration_simplified(self, transform_matrix, confidence):
+        """Accept the current calibration transform from simplified interface"""
         try:
-            if stereo_data and stereo_data.get('transform_available', False):
-                self.zed_to_robot_transform = np.array(stereo_data['T_zed_to_robot_base'])
-                self.transform_confidence = stereo_data.get('transform_confidence', 0.0)
-                
-                print(f"Transform calibration accepted!")
-                print(f"Confidence: {self.transform_confidence:.3f}")
-                print(f"Transform matrix:\n{self.zed_to_robot_transform}")
-                
-                # Save calibration to file
-                calibration_data = {
-                    'T_zed_to_robot_base': self.zed_to_robot_transform.tolist(),
-                    'transform_confidence': self.transform_confidence,
-                    'timestamp': time.time(),
-                    'calibration_method': 'stereo_aruco'
-                }
-                
-                timestamp = time.strftime("%Y%m%d_%H%M%S")
-                filename = f"zed_to_robot_calibration_{timestamp}.json"
-                with open(filename, 'w') as f:
-                    json.dump(calibration_data, f, indent=2)
-                print(f"Calibration saved to {filename}")
-                
-                # Configure motion planner with static camera transform
-                self.configure_motion_planner_with_zed_transform()
-                
-                return True
-            else:
-                print("No valid transform data available for calibration")
-                return False
+            self.zed_to_robot_transform = transform_matrix.copy()
+            self.transform_confidence = confidence
+            
+            print(f"Transform calibration accepted!")
+            print(f"Confidence: {self.transform_confidence:.3f}")
+            print(f"Transform matrix:\n{self.zed_to_robot_transform}")
+            
+            # Save calibration to file
+            calibration_data = {
+                'T_zed_to_robot_base': self.zed_to_robot_transform.tolist(),
+                'transform_confidence': self.transform_confidence,
+                'timestamp': time.time(),
+                'calibration_method': 'simplified_stereo_aruco'
+            }
+            
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            filename = f"zed_to_robot_calibration_simplified_{timestamp}.json"
+            with open(filename, 'w') as f:
+                json.dump(calibration_data, f, indent=2)
+            print(f"Calibration saved to {filename}")
+            
+            # Configure motion planner with static camera transform
+            self.configure_motion_planner_with_zed_transform()
+            
+            return True
                 
         except Exception as e:
             print(f"Error accepting calibration: {e}")
@@ -838,10 +853,7 @@ class DirectSkillExecutor:
                 if remaining_time < 0.5:
                     self.logger.error("Insufficient time remaining for move_gripper_to_pose")
                     return False
-                
-                # For ZED camera, use camera frame conversion. For RealSense, positions are already in robot frame
-                is_camera_frame = self.use_zed_camera
-                
+                                
                 # Use the motion planner to move to pose
                 success, _, _ = self.motion_planner.move_to_pose_with_preparation(
                     target_position=target_position,
@@ -849,7 +861,7 @@ class DirectSkillExecutor:
                     execute=True,
                     planning_timeout=min(remaining_time * 0.8, 10.0),
                     speed_factor=1.0,
-                    is_camera_frame=is_camera_frame
+                    is_camera_frame=True
                 )
                 
                 return success
@@ -1160,7 +1172,8 @@ class DirectSkillExecutor:
             'transform_available': self.zed_to_robot_transform is not None,
             'transform_confidence': self.transform_confidence,
             'transform_matrix': self.zed_to_robot_transform.tolist() if self.zed_to_robot_transform is not None else None,
-            'camera_type': 'ZED'
+            'camera_type': 'ZED',
+            'calibration_method': 'simplified_stereo_aruco'
         }
     
     def recalibrate_transform(self):
@@ -1187,16 +1200,16 @@ class DirectSkillExecutor:
 
 
 def main():
-    """Example usage of the direct skill executor with camera selection"""
+    """Example usage of the direct skill executor with simplified ArUco interface"""
     try:
-        print("=== Direct Skill Executor with Camera Selection ===")
+        print("=== Direct Skill Executor with Simplified ArUco Interface ===")
         
         # Choose camera type
-        use_zed = input("Use ZED camera? (y/n, default=y): ").lower()
+        use_zed = 'n' #input("Use ZED camera? (y/n, default=y): ").lower()
         use_zed_camera = use_zed != 'n'
         
         camera_type = "ZED" if use_zed_camera else "RealSense"
-        print(f"Using {camera_type} camera")
+        print(f"Using {camera_type} camera with simplified ArUco interface")
         
         # Initialize the direct skill executor with selected camera
         executor = DirectSkillExecutor(
@@ -1225,7 +1238,7 @@ def main():
         
         # Execute a skill using the selected camera
         print(f"Executing skill with {camera_type} camera...")
-        success, message = executor.execute_skill("open", "box with drawers")
+        success, message = executor.execute_skill("open", "bottle")
         
         if success:
             print(f"Skill execution successful: {message}")

@@ -19,9 +19,10 @@ class StereoArucoDetector:
                  robot_camera,
                  zed_camera,
                  T_robot_base_to_camera_link: np.ndarray,
-                 marker_size: float = 0.05,
+                 marker_size: float = 0.04,
                  T_camera_link_to_aruco_frame: Optional[np.ndarray] = None,
-                 T_zed_to_aruco_frame: Optional[np.ndarray] = None):
+                 T_zed_to_aruco_frame: Optional[np.ndarray] = None,
+                 debug: bool = False):
         """
         Initialize the stereo ArUco detector.
         
@@ -32,10 +33,12 @@ class StereoArucoDetector:
             marker_size: Physical size of ArUco marker in meters
             T_camera_link_to_aruco_frame: 4x4 transform from camera link to ArUco frame (default: identity)
             T_zed_to_aruco_frame: 4x4 transform from ZED to ArUco frame (default: identity)
+            debug: Enable debug printing of transformations
         """
         self.robot_camera = robot_camera
         self.zed_camera = zed_camera
         self.marker_size = marker_size
+        self.debug = debug
         
         # Core transforms
         self.T_robot_base_to_camera_link = T_robot_base_to_camera_link.copy()
@@ -48,6 +51,57 @@ class StereoArucoDetector:
         
         # Result
         self.T_zed_to_robot_base = None
+        
+        # Debug print initial transforms
+        if self.debug:
+            self._print_initial_transforms()
+        
+    def _print_initial_transforms(self):
+        """Print the initial transformation matrices with descriptions."""
+        print("\n" + "="*80)
+        print("INITIAL TRANSFORMATION MATRICES")
+        print("="*80)
+        
+        print("\n1. T_robot_base_to_camera_link:")
+        print("   Description: Transform from robot base frame to camera link frame")
+        print("   Source: Robot forward kinematics")
+        print("   Matrix:")
+        print(self.T_robot_base_to_camera_link)
+        
+        print("\n2. T_camera_link_to_aruco_frame:")
+        print("   Description: Transform from camera link frame to ArUco detection frame")
+        print("   Source: Camera calibration/mounting offset")
+        print("   Matrix:")
+        print(self.T_camera_link_to_aruco_frame)
+        
+        print("\n3. T_zed_to_aruco_frame:")
+        print("   Description: Transform from ZED camera frame to ArUco detection frame")
+        print("   Source: ZED camera calibration/coordinate frame correction")
+        print("   Matrix:")
+        print(self.T_zed_to_aruco_frame)
+        print("="*80)
+    
+    def _print_transform_debug(self, transform: np.ndarray, name: str, description: str):
+        """Print a transformation matrix with debug information."""
+        if not self.debug:
+            return
+            
+        translation = transform[:3, 3]
+        rotation_matrix = transform[:3, :3]
+        
+        # Convert rotation matrix to Euler angles for easier interpretation
+        try:
+            rotation = Rotation.from_matrix(rotation_matrix)
+            euler_deg = rotation.as_euler('xyz', degrees=True)
+        except:
+            euler_deg = [0, 0, 0]
+        
+        print(f"\n--- {name} ---")
+        print(f"Description: {description}")
+        print(f"Translation (x,y,z): [{translation[0]:.4f}, {translation[1]:.4f}, {translation[2]:.4f}]")
+        print(f"Rotation (roll,pitch,yaw deg): [{euler_deg[0]:.2f}, {euler_deg[1]:.2f}, {euler_deg[2]:.2f}]")
+        print(f"Full Matrix:")
+        print(transform)
         
     def _get_camera_matrices(self):
         """Get camera intrinsic matrices from both cameras."""
@@ -71,7 +125,7 @@ class StereoArucoDetector:
         
         return robot_K, robot_dist, zed_K, zed_dist
     
-    def _detect_markers(self, image: np.ndarray, camera_matrix: np.ndarray, dist_coeffs: np.ndarray) -> Dict:
+    def _detect_markers(self, image: np.ndarray, camera_matrix: np.ndarray, dist_coeffs: np.ndarray, camera_name: str = "") -> Dict:
         """Detect ArUco markers and estimate their poses."""
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = self.detector.detectMarkers(gray)
@@ -115,6 +169,14 @@ class StereoArucoDetector:
                     detection_data['marker_poses'][marker_id] = T_aruco_frame_to_aruco_marker
                     rvecs.append(rvec)
                     tvecs.append(tvec)
+                    
+                    # Debug print marker detection
+                    if self.debug and camera_name:
+                        self._print_transform_debug(
+                            T_aruco_frame_to_aruco_marker,
+                            f"T_aruco_frame_to_marker_{marker_id} ({camera_name})",
+                            f"Transform from {camera_name} ArUco frame to detected marker {marker_id}"
+                        )
                 else:
                     rvecs.append(np.zeros((3, 1)))
                     tvecs.append(np.zeros((3, 1)))
@@ -131,11 +193,18 @@ class StereoArucoDetector:
         Returns:
             4x4 transformation matrix from ZED to robot base, or None if failed
         """
+        if self.debug:
+            print("\n" + "="*80)
+            print("COMPUTING TRANSFORMATION CHAIN")
+            print("="*80)
+        
         # Get frames from both cameras
         robot_frames = self.robot_camera.get_frames()
         zed_frames = self.zed_camera.get_frames()
         
         if robot_frames is None or zed_frames is None:
+            if self.debug:
+                print("❌ Failed to get frames from cameras")
             return None
             
         robot_color, _ = robot_frames
@@ -145,23 +214,35 @@ class StereoArucoDetector:
         robot_K, robot_dist, zed_K, zed_dist = self._get_camera_matrices()
         
         # Detect markers in both cameras
-        robot_detection = self._detect_markers(robot_color, robot_K, robot_dist)
-        zed_detection = self._detect_markers(zed_color, zed_K, zed_dist)
+        robot_detection = self._detect_markers(robot_color, robot_K, robot_dist, "Robot")
+        zed_detection = self._detect_markers(zed_color, zed_K, zed_dist, "ZED")
         
         # Find common markers
         common_markers = set(robot_detection['marker_poses'].keys()).intersection(set(zed_detection['marker_poses'].keys()))
         
         if not common_markers:
+            if self.debug:
+                print("❌ No common markers detected between cameras")
+                print(f"Robot markers: {list(robot_detection['marker_poses'].keys())}")
+                print(f"ZED markers: {list(zed_detection['marker_poses'].keys())}")
             return None
             
         # Use first common marker for transformation
         marker_id = next(iter(common_markers))
+        
+        if self.debug:
+            print(f"\n✅ Using common marker ID: {marker_id}")
+            print(f"Total common markers: {len(common_markers)}")
         
         # Get T_aruco_frame^aruco_marker from both cameras
         T_aruco_frame_to_aruco_marker_robot = robot_detection['marker_poses'][marker_id]
         T_aruco_frame_to_aruco_marker_zed = zed_detection['marker_poses'][marker_id]
         
         # Apply mathematical chain
+        if self.debug:
+            print("\n" + "-"*60)
+            print("TRANSFORMATION CHAIN COMPUTATION")
+            print("-"*60)
         
         # Robot side: T_robot_base^aruco_marker = T_robot_base^camera_link * T_camera_link^aruco_frame * T_aruco_frame^aruco_marker
         T_robot_base_to_aruco_marker = (
@@ -170,22 +251,64 @@ class StereoArucoDetector:
             T_aruco_frame_to_aruco_marker_robot
         )
         
+        if self.debug:
+            self._print_transform_debug(
+                T_robot_base_to_aruco_marker,
+                f"T_robot_base_to_marker_{marker_id}",
+                f"Complete transform from robot base to marker {marker_id} (via robot camera)"
+            )
+        
         # ZED side: T_zed^aruco_marker = T_zed^aruco_frame * T_aruco_frame^aruco_marker
         T_zed_to_aruco_marker = (
             self.T_zed_to_aruco_frame @ 
             T_aruco_frame_to_aruco_marker_zed
         )
         
+        if self.debug:
+            self._print_transform_debug(
+                T_zed_to_aruco_marker,
+                f"T_zed_to_marker_{marker_id}",
+                f"Complete transform from ZED camera to marker {marker_id}"
+            )
+        
         # Final: T_zed^robot_base = T_zed^aruco_marker * (T_robot_base^aruco_marker)^(-1)
         try:
             T_aruco_marker_to_robot_base = np.linalg.inv(T_robot_base_to_aruco_marker)
+            
+            if self.debug:
+                self._print_transform_debug(
+                    T_aruco_marker_to_robot_base,
+                    f"T_marker_{marker_id}_to_robot_base",
+                    f"Inverse transform from marker {marker_id} to robot base"
+                )
+            
             T_zed_to_robot_base = T_zed_to_aruco_marker @ T_aruco_marker_to_robot_base
             
             # Store result
             self.T_zed_to_robot_base = T_zed_to_robot_base
+            
+            if self.debug:
+                print("\n" + "🎯"*20)
+                print("FINAL RESULT")
+                print("🎯"*20)
+                self._print_transform_debug(
+                    T_zed_to_robot_base,
+                    "T_zed_to_robot_base",
+                    "FINAL: Transform from ZED camera frame to robot base frame"
+                )
+                
+                # Additional interpretation
+                translation = T_zed_to_robot_base[:3, 3]
+                print(f"\n📍 PHYSICAL INTERPRETATION:")
+                print(f"   Robot base is located at: [{translation[0]:.3f}, {translation[1]:.3f}, {translation[2]:.3f}] relative to ZED")
+                print(f"   Distance to robot base: {np.linalg.norm(translation):.3f} meters")
+                print("="*80)
+            
             return T_zed_to_robot_base
             
         except np.linalg.LinAlgError:
+            if self.debug:
+                print("❌ Failed to invert transformation matrix - singular matrix")
             return None
     
     def get_detection_data(self) -> Tuple[Optional[Dict], Optional[Dict]]:
@@ -208,9 +331,12 @@ class StereoArucoDetector:
         # Get camera matrices
         robot_K, robot_dist, zed_K, zed_dist = self._get_camera_matrices()
         
-        # Detect markers in both cameras
+        # Detect markers in both cameras (without debug prints to avoid spam)
+        original_debug = self.debug
+        self.debug = False
         robot_detection = self._detect_markers(robot_color, robot_K, robot_dist)
         zed_detection = self._detect_markers(zed_color, zed_K, zed_dist)
+        self.debug = original_debug
         
         return robot_detection, zed_detection
     
@@ -236,6 +362,11 @@ class StereoArucoDetector:
         if camera_name:
             cv2.putText(output_image, f"{camera_name} Camera", (10, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        
+        # Add debug status
+        if self.debug:
+            cv2.putText(output_image, "DEBUG: ON", (10, 60), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         
         # Check if we have detections
         if (detection_data['ids'] is not None and 
@@ -295,6 +426,12 @@ class StereoArucoDetector:
         # Convert to homogeneous coordinates and transform
         point_homo = np.append(point_zed, 1.0)
         transformed = self.T_zed_to_robot_base @ point_homo
+        
+        if self.debug:
+            print(f"\n🔄 POINT TRANSFORMATION:")
+            print(f"   ZED frame: [{point_zed[0]:.4f}, {point_zed[1]:.4f}, {point_zed[2]:.4f}]")
+            print(f"   Robot frame: [{transformed[0]:.4f}, {transformed[1]:.4f}, {transformed[2]:.4f}]")
+        
         return transformed[:3]
     
     def get_detection_summary(self) -> Dict:
@@ -304,14 +441,19 @@ class StereoArucoDetector:
         Returns:
             Dictionary with detection statistics
         """
+        # Temporarily disable debug to avoid spam
+        original_debug = self.debug
+        self.debug = False
         robot_detection, zed_detection = self.get_detection_data()
+        self.debug = original_debug
         
         if robot_detection is None or zed_detection is None:
             return {
                 'robot_markers': 0,
                 'zed_markers': 0,
                 'common_markers': [],
-                'transform_available': False
+                'transform_available': False,
+                'debug_enabled': self.debug
             }
         
         common_markers = set(robot_detection['marker_poses'].keys()).intersection(set(zed_detection['marker_poses'].keys()))
@@ -320,7 +462,8 @@ class StereoArucoDetector:
             'robot_markers': len(robot_detection['marker_poses']),
             'zed_markers': len(zed_detection['marker_poses']),
             'common_markers': list(common_markers),
-            'transform_available': len(common_markers) > 0
+            'transform_available': len(common_markers) > 0,
+            'debug_enabled': self.debug
         }
     
     def get_transformation_matrix(self) -> Optional[np.ndarray]:
@@ -330,6 +473,25 @@ class StereoArucoDetector:
     def update_robot_transform(self, T_robot_base_to_camera_link: np.ndarray):
         """Update the robot base to camera link transform (e.g., from new robot pose)."""
         self.T_robot_base_to_camera_link = T_robot_base_to_camera_link.copy()
+        
+        if self.debug:
+            self._print_transform_debug(
+                self.T_robot_base_to_camera_link,
+                "T_robot_base_to_camera_link (UPDATED)",
+                "Updated transform from robot base to camera link (from forward kinematics)"
+            )
+    
+    def toggle_debug(self):
+        """Toggle debug mode on/off."""
+        self.debug = not self.debug
+        print(f"🐛 Debug mode: {'ENABLED' if self.debug else 'DISABLED'}")
+        
+        if self.debug:
+            print("Debug mode features:")
+            print("  ✓ Transformation matrix printing")
+            print("  ✓ Marker detection details")
+            print("  ✓ Mathematical chain breakdown")
+            print("  ✓ Physical interpretation")
     
     def run_calibration(self, num_samples: int = 10, display: bool = True) -> bool:
         """
@@ -343,6 +505,8 @@ class StereoArucoDetector:
             True if calibration successful, False otherwise
         """
         print(f"Starting calibration... Need {num_samples} successful detections")
+        if self.debug:
+            print("🐛 Debug mode is ENABLED - detailed transformation info will be printed")
         
         valid_transforms = []
         
@@ -357,7 +521,11 @@ class StereoArucoDetector:
                 
                 if transform is not None:
                     valid_transforms.append(transform)
-                    print(f"Valid detection {len(valid_transforms)}/{num_samples}")
+                    print(f"✅ Valid detection {len(valid_transforms)}/{num_samples}")
+                    if not self.debug:
+                        # Print basic info if debug is off
+                        translation = transform[:3, 3]
+                        print(f"   Translation: [{translation[0]:.3f}, {translation[1]:.3f}, {translation[2]:.3f}]")
                 
                 # Display if requested
                 if display:
@@ -370,8 +538,12 @@ class StereoArucoDetector:
                         
                         # Add status text
                         status = f"Detections: {len(valid_transforms)}/{num_samples}"
+                        debug_status = f"Debug: {'ON' if self.debug else 'OFF'}"
+                        
                         cv2.putText(robot_color, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                        cv2.putText(robot_color, debug_status, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
                         cv2.putText(zed_color, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                        cv2.putText(zed_color, debug_status, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
                         
                         cv2.imshow("Robot Camera", robot_color)
                         cv2.imshow("ZED Camera", zed_color)
@@ -379,6 +551,8 @@ class StereoArucoDetector:
                         key = cv2.waitKey(1) & 0xFF
                         if key == ord('q') or key == 27:  # ESC
                             break
+                        elif key == ord('d'):  # Toggle debug
+                            self.toggle_debug()
                 
         except KeyboardInterrupt:
             print("\nCalibration interrupted")
@@ -392,14 +566,20 @@ class StereoArucoDetector:
             avg_transform = np.mean(valid_transforms, axis=0)
             self.T_zed_to_robot_base = avg_transform
             
-            print(f"Calibration successful! Averaged {len(valid_transforms)} detections")
-            print("ZED to Robot Base transformation matrix:")
+            print(f"🎉 Calibration successful! Averaged {len(valid_transforms)} detections")
+            print("Final ZED to Robot Base transformation matrix:")
             print(self.T_zed_to_robot_base)
+            
+            if self.debug:
+                translation = self.T_zed_to_robot_base[:3, 3]
+                print(f"\n📍 FINAL CALIBRATION RESULT:")
+                print(f"   Robot base position relative to ZED: [{translation[0]:.3f}, {translation[1]:.3f}, {translation[2]:.3f}]")
+                print(f"   Distance: {np.linalg.norm(translation):.3f} meters")
+            
             return True
         else:
-            print(f"Calibration failed. Only got {len(valid_transforms)}/{num_samples} valid detections")
+            print(f"❌ Calibration failed. Only got {len(valid_transforms)}/{num_samples} valid detections")
             return False
-
 
     def run_live_detection(self, display: bool = True) -> None:
         """
@@ -416,12 +596,17 @@ class StereoArucoDetector:
             print("  'q' or ESC: Quit")
             print("  't': Print current transformation matrix")
             print("  'c': Compute and update transformation")
+            print("  'd': Toggle debug mode")
             print("  SPACE: Print detection status")
         
         try:
             while True:
-                # Get current transformation
+                # Get current transformation (with minimal debug output in live mode)
+                original_debug = self.debug
+                if display:
+                    self.debug = False  # Reduce spam in live mode
                 transform = self.compute_transformation()
+                self.debug = original_debug
                 
                 if display:
                     # Get and display frames
@@ -435,9 +620,12 @@ class StereoArucoDetector:
                         # Add status text
                         status = "Transform: VALID" if transform is not None else "Transform: INVALID"
                         color = (0, 255, 0) if transform is not None else (0, 0, 255)
+                        debug_status = f"Debug: {'ON' if self.debug else 'OFF'} (press 'd')"
                         
                         cv2.putText(robot_color, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                        cv2.putText(robot_color, debug_status, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
                         cv2.putText(zed_color, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                        cv2.putText(zed_color, debug_status, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
                         
                         cv2.imshow("Robot Camera", robot_color)
                         cv2.imshow("ZED Camera", zed_color)
@@ -445,23 +633,39 @@ class StereoArucoDetector:
                         key = cv2.waitKey(1) & 0xFF
                         if key == ord('q') or key == 27:  # ESC
                             break
+                        elif key == ord('d'):  # Toggle debug
+                            self.toggle_debug()
                         elif key == ord('t'):
                             if self.T_zed_to_robot_base is not None:
                                 print("\n=== ZED TO ROBOT BASE TRANSFORMATION ===")
                                 print(self.T_zed_to_robot_base)
+                                translation = self.T_zed_to_robot_base[:3, 3]
+                                print(f"Translation: [{translation[0]:.3f}, {translation[1]:.3f}, {translation[2]:.3f}]")
                                 print("=" * 45)
                             else:
                                 print("No transformation matrix available")
                         elif key == ord('c'):
+                            # Force debug output for this computation
+                            temp_debug = self.debug
+                            self.debug = True
+                            transform = self.compute_transformation()
+                            self.debug = temp_debug
+                            
                             if transform is not None:
-                                print("Transformation updated successfully")
+                                print("✅ Transformation updated successfully")
                             else:
-                                print("Failed to compute transformation")
+                                print("❌ Failed to compute transformation")
                         elif key == ord(' '):
-                            print(f"\nTransform available: {transform is not None}")
-                            if transform is not None:
-                                print("Current transformation matrix:")
-                                print(self.T_zed_to_robot_base)
+                            summary = self.get_detection_summary()
+                            print(f"\n🔍 DETECTION STATUS:")
+                            print(f"   Robot markers: {summary['robot_markers']}")
+                            print(f"   ZED markers: {summary['zed_markers']}")
+                            print(f"   Common markers: {summary['common_markers']}")
+                            print(f"   Transform available: {summary['transform_available']}")
+                            print(f"   Debug enabled: {summary['debug_enabled']}")
+                            if self.T_zed_to_robot_base is not None:
+                                translation = self.T_zed_to_robot_base[:3, 3]
+                                print(f"   Current transform: [{translation[0]:.3f}, {translation[1]:.3f}, {translation[2]:.3f}]")
                 else:
                     if transform is not None:
                         print("Transform computed successfully")
@@ -552,25 +756,35 @@ if __name__ == "__main__":
         # Wait for cameras to stabilize
         time.sleep(2)
         
-        # Create simplified stereo ArUco detector
+        # Ask user if they want debug mode enabled
+        debug_choice = input("\nEnable debug mode for detailed transformation printing? (y/n): ").lower().strip()
+        enable_debug = debug_choice in ['y', 'yes', '1', 'true']
+        
+        if enable_debug:
+            print("🐛 Debug mode ENABLED - detailed transformation info will be printed")
+        else:
+            print("Debug mode disabled - use 'd' key to toggle during operation")
+        
+        # Create simplified stereo ArUco detector with debug option
         detector = StereoArucoDetector(
             robot_camera=robot_camera,
             zed_camera=zed_camera,
             T_robot_base_to_camera_link=T_robot_base_to_camera_link,
-            marker_size=0.05  # 5cm markers
+            marker_size=0.05,  # 5cm markers
+            T_camera_link_to_aruco_frame=None,  # Keep robot camera as identity
+            debug=enable_debug  # Enable/disable debug printing
         )
         
-        print("Simplified ArUco detector created!")
-        print("\nSimplified Detection Controls:")
-        print("  Press 't' to see ZED to robot base transformation matrix")
-        print("  Press 'c' to compute/update transformation")
-        print("  Press 'u' to update robot transform from current robot pose")
+        print("Enhanced ArUco detector created with debug functionality!")
+        print("\nEnhanced Debug Controls:")
+        print("  Press 'd' during operation to toggle debug mode")
+        print("  Press 'c' to force debug output for one computation")
+        print("  Press 't' to see transformation matrix")
         print("  Press 'r' to run calibration mode")
-        print("  Press SPACE for status info")
+        print("  Press SPACE for detection status")
         print("  Press 'q' or ESC to quit")
         print()
         
-        # Define a function to update robot transform during runtime
         def update_robot_transform():
             """Update the robot transform from the current robot pose"""
             if robot_planner is not None:
@@ -592,11 +806,11 @@ if __name__ == "__main__":
             else:
                 print("Robot interface not available - cannot update transform")
         
-        # Enhanced detection loop
-        def run_enhanced_detection():
-            """Run detection loop with enhanced controls"""
-            cv2.namedWindow("Robot Camera - Simplified ArUco", cv2.WINDOW_AUTOSIZE)
-            cv2.namedWindow("ZED Camera - Simplified ArUco", cv2.WINDOW_AUTOSIZE)
+        # Enhanced detection loop with debug controls
+        def run_enhanced_debug_detection():
+            """Run detection loop with enhanced debug controls."""
+            cv2.namedWindow("Robot Camera - Debug Enhanced", cv2.WINDOW_AUTOSIZE)
+            cv2.namedWindow("ZED Camera - Debug Enhanced", cv2.WINDOW_AUTOSIZE)
             
             try:
                 while True:
@@ -619,8 +833,11 @@ if __name__ == "__main__":
                             robot_color = detector.draw_markers_on_image(robot_color, robot_detection, robot_K, robot_dist, "Robot")
                             zed_color = detector.draw_markers_on_image(zed_color, zed_detection, zed_K, zed_dist, "ZED")
                             
-                            # Try to compute transformation
+                            # Try to compute transformation (minimal output for live view)
+                            original_debug = detector.debug
+                            detector.debug = False
                             transform = detector.compute_transformation()
+                            detector.debug = original_debug
                     else:
                         # Get frames without marker visualization
                         robot_frames = robot_camera.get_frames()
@@ -636,76 +853,73 @@ if __name__ == "__main__":
                     # Add status display
                     status = "Transform: VALID" if transform is not None else "Transform: INVALID"
                     color = (0, 255, 0) if transform is not None else (0, 0, 255)
+                    debug_status = f"Debug: {'ON' if detector.debug else 'OFF'} (press 'd')"
                     
-                    robot_status = f"Robot Interface: {'Connected' if robot_planner is not None else 'Not Available'}"
+                    cv2.putText(robot_color, status, (10, robot_color.shape[0] - 110), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                    cv2.putText(robot_color, debug_status, (10, robot_color.shape[0] - 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                    cv2.putText(robot_color, "Enhanced Debug Mode", (10, robot_color.shape[0] - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+                    cv2.putText(robot_color, "Press 'c' for debug computation", (10, robot_color.shape[0] - 20), 
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
                     
-                    cv2.putText(robot_color, status, (10, robot_color.shape[0] - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-                    cv2.putText(robot_color, robot_status, (10, robot_color.shape[0] - 20), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
+                    cv2.putText(zed_color, status, (10, zed_color.shape[0] - 110), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                    cv2.putText(zed_color, debug_status, (10, zed_color.shape[0] - 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                    cv2.putText(zed_color, "Enhanced Debug Mode", (10, zed_color.shape[0] - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+                    cv2.putText(zed_color, "Press 'c' for debug computation", (10, zed_color.shape[0] - 20), 
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
                     
-                    cv2.putText(zed_color, status, (10, zed_color.shape[0] - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-                    cv2.putText(zed_color, robot_status, (10, zed_color.shape[0] - 20), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
-                    
-                    cv2.imshow("Robot Camera - Simplified ArUco", robot_color)
-                    cv2.imshow("ZED Camera - Simplified ArUco", zed_color)
+                    cv2.imshow("Robot Camera - Debug Enhanced", robot_color)
+                    cv2.imshow("ZED Camera - Debug Enhanced", zed_color)
                     
                     # Handle keyboard input
                     key = cv2.waitKey(1) & 0xFF
                     if key == ord('q') or key == 27:  # 'q' or ESC
                         break
+                    elif key == ord('d'):  # Toggle debug
+                        detector.toggle_debug()
                     elif key == ord('u'):  # Update robot transform
                         update_robot_transform()
                     elif key == ord('t'):
                         if detector.T_zed_to_robot_base is not None:
-                            print(f"\n=== ZED TO ROBOT BASE TRANSFORMATION MATRIX ===")
+                            print(f"\n=== ZED TO ROBOT BASE TRANSFORMATION MATRIX (DEBUG MODE: {'ON' if detector.debug else 'OFF'}) ===")
                             print("T_zed_to_robot_base:")
                             print(detector.T_zed_to_robot_base)
-                            print("=" * 55)
+                            translation = detector.T_zed_to_robot_base[:3, 3]
+                            print(f"Translation: [{translation[0]:.3f}, {translation[1]:.3f}, {translation[2]:.3f}]")
+                            print("=" * 75)
                         else:
                             print("No ZED to robot base transformation matrix available")
                     elif key == ord('c'):
+                        print("\n🔍 COMPUTING TRANSFORMATION WITH DEBUG OUTPUT...")
+                        # Force debug output for this computation
+                        temp_debug = detector.debug
+                        detector.debug = True
+                        transform = detector.compute_transformation()
+                        detector.debug = temp_debug
+                        
                         if transform is not None:
-                            print("Transformation computed and updated successfully")
-                            print("Current transform:")
-                            print(detector.T_zed_to_robot_base)
+                            print("✅ Transformation computed and updated successfully")
                         else:
-                            print("Failed to compute transformation - no common markers detected")
+                            print("❌ Failed to compute transformation - no common markers detected")
                     elif key == ord('r'):
-                        print("Starting calibration mode...")
+                        print("Starting enhanced calibration mode with debug controls...")
                         success = detector.run_calibration(num_samples=5, display=True)
                         if success:
-                            print("Calibration completed successfully!")
+                            print("🎉 Calibration completed successfully!")
                         else:
-                            print("Calibration failed!")
-                    elif key == ord('v'):
-                        test_marker_visualization()
-                    elif key == ord('s'):
-                        if detector.T_zed_to_robot_base is not None:
-                            timestamp = time.strftime("%Y%m%d_%H%M%S")
-                            filename = f"simplified_zed_to_robot_transform_{timestamp}.json"
-                            transform_data = {
-                                'timestamp': timestamp,
-                                'T_zed_to_robot_base': detector.T_zed_to_robot_base.tolist(),
-                                'T_robot_base_to_camera_link': detector.T_robot_base_to_camera_link.tolist()
-                            }
-                            with open(filename, 'w') as f:
-                                json.dump(transform_data, f, indent=2)
-                            print(f"Saved transformation to {filename}")
-                        else:
-                            print("No valid transformation to save")
+                            print("❌ Calibration failed!")
                     elif key == ord(' '):  # Space bar
                         summary = detector.get_detection_summary()
-                        print(f"\n=== DETECTION STATUS ===")
+                        print(f"\n=== ENHANCED DETECTION STATUS ===")
                         print(f"Robot markers: {summary['robot_markers']}")
                         print(f"ZED markers: {summary['zed_markers']}")
                         print(f"Common markers: {summary['common_markers']}")
                         print(f"Transform available: {summary['transform_available']}")
+                        print(f"Debug enabled: {summary['debug_enabled']}")
                         print(f"Robot interface: {'Connected' if robot_planner is not None else 'Not Available'}")
                         if detector.T_zed_to_robot_base is not None:
-                            print("Current transformation matrix:")
-                            print(detector.T_zed_to_robot_base)
-                        print("=" * 30)
+                            translation = detector.T_zed_to_robot_base[:3, 3]
+                            print(f"Current transformation: [{translation[0]:.3f}, {translation[1]:.3f}, {translation[2]:.3f}]")
+                        print("=" * 35)
                 
             except KeyboardInterrupt:
                 print("\nDetection loop interrupted")
@@ -714,8 +928,8 @@ if __name__ == "__main__":
                 cv2.destroyAllWindows()
         
         try:
-            # Run enhanced detection loop
-            run_enhanced_detection()
+            # Run enhanced detection loop with debug controls
+            run_enhanced_debug_detection()
         finally:
             # Clean up
             robot_camera.stop()

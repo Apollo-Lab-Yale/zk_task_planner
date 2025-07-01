@@ -15,7 +15,7 @@ from cognitive_bt_framework.utils import BOOL_PREDS, RELATIONAL_PREDS
 
 
 class LLMInterfaceOpenAI:
-    def __init__(self, model_name="gpt-4-turbo"):
+    def __init__(self, model_name="gpt-4o"):
         self.client = OpenAI(api_key=get_openai_key())
         self.async_client = AsyncOpenAI(api_key=get_openai_key())
         self.model_name = model_name
