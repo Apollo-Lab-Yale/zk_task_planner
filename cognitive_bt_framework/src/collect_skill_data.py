@@ -107,7 +107,7 @@ class DebugVisualizer:
 
 class DirectSkillExecutor:
     def __init__(self, robot_ip="192.168.1.224", camera_params=None, show_debug_windows=True, 
-                 calibrate_transform=True, use_zed_camera=True):
+                 calibrate_transform=True, use_zed_camera=True, fast_mode=False):
         """
         Initialize the direct skill executor with configurable camera selection
         
@@ -117,6 +117,7 @@ class DirectSkillExecutor:
             show_debug_windows: Whether to show debug visualization windows
             calibrate_transform: Whether to perform camera-to-robot transform calibration on startup
             use_zed_camera: If True, use ZED camera as primary. If False, use RealSense camera as primary
+            fast_mode: If True, skip extensive verification and use minimal debugging
         """
         self.use_zed_camera = use_zed_camera
         camera_type = "ZED" if use_zed_camera else "RealSense"
@@ -133,8 +134,9 @@ class DirectSkillExecutor:
         }
         
         # Set flags
-        self.show_debug_windows = show_debug_windows
-        self.calibrate_transform = calibrate_transform
+        self.show_debug_windows = show_debug_windows and not fast_mode  # Disable debug in fast mode
+        self.calibrate_transform = calibrate_transform and not fast_mode  # Skip calibration in fast mode
+        self.fast_mode = fast_mode
         self.action_timeout = 240
         
         # Transform calibration (only relevant when using ZED camera)
@@ -159,10 +161,14 @@ class DirectSkillExecutor:
         self.main_camera = None
         self.secondary_camera = None
         
-        # Initialize debug visualizer
+        # Initialize debug visualizer (optional for faster startup)
         if self.show_debug_windows:
-            self.visualizer = DebugVisualizer()
-            print("Debug visualizer initialized")
+            try:
+                self.visualizer = DebugVisualizer()
+                print("Debug visualizer initialized")
+            except Exception as e:
+                print(f"Warning: Debug visualizer failed to initialize: {e}")
+                self.show_debug_windows = False
         
         # Initialize CuRobo motion planner first (for robot camera access)
         print("Initializing CuRobo motion planner...")
@@ -174,18 +180,32 @@ class DirectSkillExecutor:
         static_transform = None
         # Perform transform calibration if requested (only for ZED camera)
         if self.calibrate_transform and self.use_zed_camera:
-            self.calibrate_zed_to_robot_transform()
-            static_transform = self.zed_to_robot_transform
+            # Try to load existing calibration first
+            if self.load_existing_calibration():
+                print("✅ Loaded existing calibration - skipping calibration")
+                static_transform = self.zed_to_robot_transform
+            else:
+                print("⚠️  No existing calibration found - performing new calibration")
+                self.calibrate_zed_to_robot_transform()
+                static_transform = self.zed_to_robot_transform
         elif not self.use_zed_camera:
             print("Using RealSense camera - transform calibration not needed (camera is robot-mounted)")
         # Initialize CuRobo motion planner first (for robot camera access)
+        
         print("Initializing CuRobo motion planner...")
-        self.motion_planner = CuRoboMotionPlanner(robot_ip=robot_ip, static_camera_tf=static_transform)
+        # self.motion_planner = CuRoboMotionPlanner(robot_ip=robot_ip, static_camera_tf=static_transform)
         print("CuRobo motion planner initialized")
         # Initialize perception system with selected camera
         self.initialize_perception_system()
         camera_type = "ZED" if self.use_zed_camera else "RealSense"
         print(f'Perception system initialized with {camera_type} camera')
+        
+        # Skip verification in fast mode
+        if not self.fast_mode:
+            if not self.verify_camera_setup():
+                raise RuntimeError("Camera setup verification failed")
+        else:
+            print("⚡ Fast mode: Skipping camera verification")
         
         print('Direct skill executor initialization completed')
         self.motion_planner.open_gripper()
@@ -207,6 +227,34 @@ class DirectSkillExecutor:
         # Add handler to logger
         if not self.logger.handlers:  # Avoid duplicate handlers
             self.logger.addHandler(console_handler)
+            
+    def verify_camera_setup(self):
+        """Quick camera setup verification"""
+        try:
+            print("=== Quick Camera Setup Check ===")
+            
+            # Test frame acquisition
+            color_image, depth_image = self.get_latest_images(timeout=2.0)
+            
+            if color_image is None or depth_image is None:
+                print("❌ Failed to get camera frames")
+                return False
+            
+            # Basic dimension check
+            expected_width = self.camera_params['width']
+            expected_height = self.camera_params['height']
+            
+            if (color_image.shape[1] != expected_width or 
+                color_image.shape[0] != expected_height):
+                print(f"❌ Color image resolution mismatch!")
+                return False
+            
+            print(f"✅ Camera setup verified - {expected_width}x{expected_height}")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Camera verification failed: {e}")
+            return False
     
     def setup_cameras(self):
         """Setup cameras based on the use_zed_camera flag"""
@@ -229,22 +277,26 @@ class DirectSkillExecutor:
             print("ZED camera started successfully")
             
             # Setup RealSense camera as secondary (for transform calibration)
-            print("Initializing RealSense camera (secondary for calibration)...")
-            self.secondary_camera = RealSenseCamera(
-                width=self.camera_params['width'],
-                height=self.camera_params['height'],
-                fps=self.camera_params['fps'],
-                depth_averaging_frames=3,
-                debug=False
-            )
-            
-            # Start the secondary camera
-            if not self.secondary_camera.start():
-                print("Warning: Failed to start secondary RealSense camera")
-                print("Transform calibration will not be available")
-                self.secondary_camera = None
+            if self.calibrate_transform and not self.fast_mode:
+                print("Initializing RealSense camera (secondary for calibration)...")
+                self.secondary_camera = RealSenseCamera(
+                    width=self.camera_params['width'],
+                    height=self.camera_params['height'],
+                    fps=self.camera_params['fps'],
+                    depth_averaging_frames=3,
+                    debug=False
+                )
+                
+                # Start the secondary camera
+                if not self.secondary_camera.start():
+                    print("Warning: Failed to start secondary RealSense camera")
+                    print("Transform calibration will not be available")
+                    self.secondary_camera = None
+                else:
+                    print("RealSense camera (secondary) started successfully")
             else:
-                print("RealSense camera (secondary) started successfully")
+                print("⚡ Fast mode: Skipping secondary camera setup")
+                self.secondary_camera = None
                 
         else:
             # Setup RealSense camera as main camera
@@ -304,9 +356,9 @@ class DirectSkillExecutor:
             print("Looking for ArUco markers to calibrate transform...")
             print("Automatic calibration will accept transforms with >70% confidence")
             
-            # Calibration loop
+            # Calibration loop (reduced attempts for faster startup)
             calibration_attempts = 0
-            max_attempts = 100  # Maximum attempts before giving up
+            max_attempts = 20  # Reduced from 100 for faster startup
             
             while calibration_attempts < max_attempts:
                 try:
@@ -522,23 +574,13 @@ class DirectSkillExecutor:
         """Initialize perception system with the selected camera matrix"""
         try:
             # Get camera matrix from the main camera
-            if hasattr(self.main_camera, 'intrinsics') and self.main_camera.intrinsics is not None:
-                camera_matrix = np.array([
-                    [self.main_camera.intrinsics.fx, 0, self.main_camera.intrinsics.ppx],
-                    [0, self.main_camera.intrinsics.fy, self.main_camera.intrinsics.ppy],
-                    [0, 0, 1]
-                ])
-                camera_type = "ZED" if self.use_zed_camera else "RealSense"
-                print(f"Using camera matrix from {camera_type} camera")
-            else:
-                # Fallback camera matrix
-                camera_matrix = np.array([
-                    [700, 0, self.camera_params['width']/2],
-                    [0, 700, self.camera_params['height']/2],
-                    [0, 0, 1]
-                ])
-                camera_type = "ZED" if self.use_zed_camera else "RealSense"
-                print(f"Using fallback camera matrix for {camera_type} camera")
+            camera_matrix = np.array([
+                [self.main_camera.intrinsics.fx, 0, self.main_camera.intrinsics.ppx],
+                [0, self.main_camera.intrinsics.fy, self.main_camera.intrinsics.ppy],
+                [0, 0, 1]
+            ])
+            camera_type = "ZED" if self.use_zed_camera else "RealSense"
+            print(f"Using camera matrix from {camera_type} camera")
             
             fs_config = FastSAMConfig(
                 max_image_size=max(self.camera_params['height'], self.camera_params['width']),
@@ -768,7 +810,8 @@ class DirectSkillExecutor:
                     self.logger.warning(f"Action timeout approaching: {elapsed:.2f}s elapsed, {remaining:.2f}s remaining")
                     return True
                 return False
-            
+            while self.motion_planner.arm.get_state() == 1:
+                time.sleep(0.5)
             # Handle gripper actions directly
             if action.action_type == 'close_gripper':
                 force = action.parameters.get('force', 10.0)
@@ -784,6 +827,8 @@ class DirectSkillExecutor:
                 
                 # Get current pose
                 pose = self.motion_planner.get_robot_tcp_pose()
+                success = self.motion_planner.retract_gripper()
+                return success
                 if pose is None:
                     self.logger.error("Could not get current TCP pose for retraction")
                     return False
@@ -807,7 +852,7 @@ class DirectSkillExecutor:
             elif action.action_type == 'twist':
                 direction = action.parameters.get('direction', 'clockwise')
                 angular_velocity = action.parameters.get('angular_velocity', 0.5)
-                rotation_angle = action.parameters.get('rotation_angle', np.pi/2)  # Default 90 degrees
+                rotation_angle = action.parameters.get('rotation_angle', 2 * np.pi)  # Default 90 degrees
                 
                 self.logger.info(f"Executing twist {direction} with angle {rotation_angle:.2f} rad")
                 
@@ -1216,7 +1261,8 @@ def main():
             robot_ip="192.168.1.224",  # Replace with your robot's IP
             show_debug_windows=True,
             calibrate_transform=use_zed_camera,  # Only calibrate for ZED camera
-            use_zed_camera=use_zed_camera
+            use_zed_camera=use_zed_camera,
+            fast_mode=True  # Enable fast mode for quicker startup
         )
         
         # Display camera info

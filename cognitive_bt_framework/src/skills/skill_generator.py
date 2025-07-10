@@ -257,23 +257,29 @@ class SkillGenerator:
                 label_y + label_height > img_height - margin):
                 continue
             
-            # Check distance from all points (including current one)
+            # Check distance from all points with improved overlap detection
             min_point_distance = float('inf')
+            point_overlap = False
+            
             for other_px, other_py in all_points:
-                # Calculate distance from label corners to point to ensure no overlap with point markers
-                label_corners = [
-                    (label_x, label_y),
-                    (label_x + label_width, label_y),
-                    (label_x, label_y + label_height),
-                    (label_x + label_width, label_y + label_height)
-                ]
+                # Calculate distance from label rectangle to point using proper rectangle-circle collision
+                # Find closest point on the rectangle to the circle center
+                closest_x = max(label_x, min(other_px, label_x + label_width))
+                closest_y = max(label_y, min(other_py, label_y + label_height))
                 
-                corner_distances = [
-                    np.sqrt((corner_x - other_px)**2 + (corner_y - other_py)**2)
-                    for corner_x, corner_y in label_corners
-                ]
-                min_corner_distance = min(corner_distances)
-                min_point_distance = min(min_point_distance, min_corner_distance)
+                # Distance from closest point on rectangle to circle center
+                distance_to_rect = np.sqrt((closest_x - other_px)**2 + (closest_y - other_py)**2)
+                min_point_distance = min(min_point_distance, distance_to_rect)
+                
+                # Check if rectangle overlaps with circle (point has radius 10, need clearance)
+                point_radius = 10
+                required_clearance = 20  # Additional clearance
+                if distance_to_rect < point_radius + required_clearance:
+                    point_overlap = True
+                    break
+            
+            if point_overlap:
+                continue
             
             # Check overlap with all placed labels
             has_overlap = False
@@ -302,28 +308,25 @@ class SkillGenerator:
             if has_overlap:
                 continue  # Skip overlapping positions entirely
             
-            if min_point_distance < 15:  # Too close to a point marker
-                score = -50 + min_point_distance
-            else:
-                # Good position, score based on multiple factors
-                distance_score = min_point_distance  # Prefer further from points
-                label_clearance_score = min_label_distance if min_label_distance != float('inf') else 100
-                
-                # Prefer certain directions (right and bottom-right are usually best)
-                direction_preference = 0
-                if 315 <= angle <= 45 or angle == 0:  # Right side
-                    direction_preference = 20
-                elif 45 < angle <= 135:  # Bottom side
-                    direction_preference = 15
-                elif 135 < angle <= 225:  # Left side  
-                    direction_preference = 5
-                else:  # Top side
-                    direction_preference = 10
-                
-                # Prefer closer distances if possible
-                distance_penalty = distance / 10
-                
-                score = distance_score + label_clearance_score + direction_preference - distance_penalty
+            # Good position, score based on multiple factors
+            distance_score = min_point_distance  # Prefer further from points
+            label_clearance_score = min_label_distance if min_label_distance != float('inf') else 100
+            
+            # Prefer certain directions (right and bottom-right are usually best)
+            direction_preference = 0
+            if 315 <= angle <= 45 or angle == 0:  # Right side
+                direction_preference = 20
+            elif 45 < angle <= 135:  # Bottom side
+                direction_preference = 15
+            elif 135 < angle <= 225:  # Left side  
+                direction_preference = 5
+            else:  # Top side
+                direction_preference = 10
+            
+            # Prefer closer distances if possible
+            distance_penalty = distance / 10
+            
+            score = distance_score + label_clearance_score + direction_preference - distance_penalty
             
             if score > best_score:
                 best_score = score
@@ -332,7 +335,7 @@ class SkillGenerator:
         # If no good position found, try a systematic grid search as fallback
         if best_position is None:
             best_position = self._grid_search_label_position(
-                px, py, label_width, label_height, placed_labels, img_width, img_height
+                px, py, label_width, label_height, placed_labels, img_width, img_height, all_points
             )
         
         # Final fallback: place to the right with offset to minimize overlap
@@ -346,6 +349,22 @@ class SkillGenerator:
                 label_y = py + y_offset
                 
                 if label_y < 0 or label_y + label_height > img_height:
+                    continue
+                
+                # Check for point overlaps first
+                point_overlap = False
+                for other_px, other_py in all_points:
+                    closest_x = max(label_x, min(other_px, label_x + label_width))
+                    closest_y = max(label_y, min(other_py, label_y + label_height))
+                    distance_to_rect = np.sqrt((closest_x - other_px)**2 + (closest_y - other_py)**2)
+                    
+                    point_radius = 10
+                    required_clearance = 20
+                    if distance_to_rect < point_radius + required_clearance:
+                        point_overlap = True
+                        break
+                
+                if point_overlap:
                     continue
                     
                 overlap_count = 0
@@ -364,7 +383,7 @@ class SkillGenerator:
         
         return best_position
 
-    def _grid_search_label_position(self, px, py, label_width, label_height, placed_labels, img_width, img_height):
+    def _grid_search_label_position(self, px, py, label_width, label_height, placed_labels, img_width, img_height, all_points=None):
         """
         Systematic grid search for label placement when other methods fail.
         """
@@ -385,7 +404,26 @@ class SkillGenerator:
                     label_y + label_height > img_height):
                     continue
                 
-                # Count overlaps
+                # Check for point overlaps first
+                point_overlap = False
+                if all_points:
+                    for other_px, other_py in all_points:
+                        # Calculate distance from label rectangle to point using proper rectangle-circle collision
+                        closest_x = max(label_x, min(other_px, label_x + label_width))
+                        closest_y = max(label_y, min(other_py, label_y + label_height))
+                        distance_to_rect = np.sqrt((closest_x - other_px)**2 + (closest_y - other_py)**2)
+                        
+                        # Check if rectangle overlaps with circle (point has radius 10, need clearance)
+                        point_radius = 10
+                        required_clearance = 20
+                        if distance_to_rect < point_radius + required_clearance:
+                            point_overlap = True
+                            break
+                
+                if point_overlap:
+                    continue
+                
+                # Count overlaps with placed labels
                 overlap_count = 0
                 for placed_x, placed_y, placed_w, placed_h in placed_labels:
                     if not (label_x + label_width < placed_x or 
@@ -434,7 +472,18 @@ class SkillGenerator:
             Tuple of (surface_img, points_img)
         """
         h, w = image.shape[:2]
-
+        # Debug: Check for dimension mismatches
+        print(f"Visualization image shape: {image.shape}")
+        if obj_info.mask is not None:
+            print(f"Object mask shape: {obj_info.mask.shape}")
+        if hasattr(obj_info, 'depth_image') and obj_info.depth_image is not None:
+            print(f"Depth image shape: {obj_info.depth_image.shape}")
+        if obj_info.camera_intrinsics:
+            print(f"Camera intrinsics: {obj_info.camera_intrinsics}")
+        
+        # Check if resizing is happening
+        if obj_info.mask is not None and obj_info.mask.shape[:2] != (h, w):
+            print(f"WARNING: Resizing mask from {obj_info.mask.shape[:2]} to {(h, w)}")
         # Define a consistent color palette for points (BGR format for OpenCV)
         point_colors = [
             (0, 0, 255),      # Red
@@ -655,7 +704,11 @@ class SkillGenerator:
                     cv2.rectangle(points_img, (label_rect[0], label_rect[1]), 
                                 (label_rect[2], label_rect[3]), (0, 0, 0), 2)
                     
-                    # Draw label text in white for contrast
+                    # Draw label text with black outline for better visibility
+                    # Black outline
+                    cv2.putText(points_img, alpha_id, (label_x, label_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4, cv2.LINE_AA)
+                    # White text
                     cv2.putText(points_img, alpha_id, (label_x, label_y),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
                     
@@ -740,7 +793,11 @@ class SkillGenerator:
                     cv2.rectangle(points_img, (label_rect[0], label_rect[1]), 
                                 (label_rect[2], label_rect[3]), (0, 0, 0), 2)
                     
-                    # Draw label text in white for contrast
+                    # Draw label text with black outline for better visibility
+                    # Black outline
+                    cv2.putText(points_img, alpha_id, (label_x, label_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4, cv2.LINE_AA)
+                    # White text
                     cv2.putText(points_img, alpha_id, (label_x, label_y),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
                     
@@ -1199,7 +1256,7 @@ class SkillGenerator:
                     - For VERTICAL movements (lifting, pressing down): USE TOP-DOWN GRASP
                     - Always orient the gripper's z-axis to maximize force transmission in the intended direction
                 - ensure your explainations cover all parameter and action selections in detail verify your understanding of parameters before selection
-                - when opening an object ensure its lid/ cover is completely removed from the top for example a bottle cap should be removed using "pull"
+                - when opening an object ensure its lid/ cover is completely removed from the top for example a bottle cap should be removed using "pull" or "retract_gripper"
                 - POINTS ARE COLOR CODED PAY ATTENTION TO WHERE THE POINT ACTUALLY IS
                     in your explaination include why you selected a particular point and how you determined the associated label
                     

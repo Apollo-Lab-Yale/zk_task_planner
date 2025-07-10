@@ -128,51 +128,110 @@ class PerceptionSystem:
                 traceback.print_exc()
             raise  # Re-raise the exception to not silence initialization errors
     
-    def detect_objects(
-        self,
-        image: np.ndarray,
-        classes: Optional[List[str]] = None,
-        conf: Optional[float] = 0.01,
-        segment: bool = True,
-        depth_image: Optional[np.ndarray] = None,
-    ) -> List[ObjectInfo]:
-        """
-        Detect objects in the scene using YOLO-World
+    def detect_objects(self, image: np.ndarray, classes: Optional[List[str]] = None,
+                    conf: Optional[float] = 0.01, segment: bool = True,
+                    depth_image: Optional[np.ndarray] = None) -> List[ObjectInfo]:
         
-        Args:
-            image: RGB image of the scene
-            classes: List of classes to detect (None = use default classes)
-            conf: Confidence threshold (None = use default)
-            segment: Whether to generate segmentation masks for detected objects
-            depth_image: Optional depth image aligned with RGB
-            
-        Returns:
-            List of ObjectInfo for detected objects
-        """
         if self.debug:
             self.profiler.start_iteration()
             self.profiler.start("detect_objects")
         
         try:
             import copy
-            # Use provided parameters or defaults
+            
+            # Store original image dimensions for coordinate transformation
+            original_height, original_width = image.shape[:2]
+            
+            # DEBUG: Verify camera intrinsics match image size
+            print(f"DEBUG - Camera setup verification:")
+            print(f"  Original image dimensions: {original_width}x{original_height}")
+            print(f"  Camera intrinsics:")
+            print(f"    fx: {self.fx:.2f}, fy: {self.fy:.2f}")
+            print(f"    cx: {self.cx:.2f}, cy: {self.cy:.2f}")
+            print(f"  Principal point relative to image center:")
+            print(f"    cx_offset: {self.cx - original_width/2:.2f}")
+            print(f"    cy_offset: {self.cy - original_height/2:.2f}")
+            
+            # TEMPORARY: Test corrected principal point
+            print(f"  Testing corrected principal point at image center:")
+            self.cx_corrected = original_width / 2.0   # True center X
+            self.cy_corrected = original_height / 2.0  # True center Y
+            print(f"    cx_corrected: {self.cx_corrected:.2f}")
+            print(f"    cy_corrected: {self.cy_corrected:.2f}")
+            
+            if self.debug:
+                print(f"Original image dimensions: {original_width}x{original_height}")
+            
+            # Set classes if provided
             if classes is not None:
                 self.detector.set_classes(classes, self.detector.get_text_pe(classes))
                 if self.debug:
                     print(f"Set detection classes: {classes}")
+            
             temp_img = copy.deepcopy(image)
             conf_threshold = conf if conf is not None else self.default_conf
             
-            # Run YOLO-World detection
+            # Run YOLO detection
             if self.debug:
                 self.profiler.start("yolo_detection")
-                print(f"Running YOLO-World detection with confidence threshold {conf_threshold}")
+                print(f"Running YOLO detection with confidence threshold {conf_threshold}")
             
             results = self.detector.predict(temp_img, verbose=False)
             
+            # DEBUG: Verify YOLO's actual input size
+            if len(results) > 0:
+                print(f"DEBUG - YOLO results shape info:")
+                print(f"  results[0].orig_shape: {getattr(results[0], 'orig_shape', 'Not available')}")
+                print(f"  results[0].shape: {getattr(results[0], 'shape', 'Not available')}")
+                if hasattr(results[0], 'imgs'):
+                    print(f"  results[0].imgs.shape: {results[0].imgs.shape}")
+                if hasattr(results[0], 'orig_img'):
+                    print(f"  results[0].orig_img.shape: {results[0].orig_img.shape}")
+                if hasattr(results[0], 'path'):
+                    print(f"  results[0].path: {results[0].path}")
+                # Check for other shape attributes
+                for attr in ['img_shape', 'input_shape', 'preprocess_shape']:
+                    if hasattr(results[0], attr):
+                        print(f"  results[0].{attr}: {getattr(results[0], attr)}")
+            
+            # Check what size YOLO actually used
+            yolo_input_size = None
+            if len(results) > 0 and hasattr(results[0], 'orig_shape'):
+                # YOLO sometimes stores the original shape
+                yolo_input_size = results[0].orig_shape
+            else:
+                # Estimate YOLO's input size (it will use square images)
+                max_dim = max(original_height, original_width)
+                yolo_input_size = max_dim
+                # Make it multiple of 32
+                yolo_input_size = int(np.ceil(yolo_input_size / 32) * 32)
+            
             if self.debug:
+                print(f"YOLO input size: {yolo_input_size}")
                 self.profiler.stop("yolo_detection")
-                print(f"YOLO-World returned {len(results[0])} detections")
+                print(f"YOLO returned {len(results[0])} detections")
+            
+            # Calculate coordinate transformation factors
+            if isinstance(yolo_input_size, (tuple, list)):
+                yolo_h, yolo_w = yolo_input_size[:2]
+            else:
+                yolo_h = yolo_w = yolo_input_size  # Square input
+            
+            scale_x = original_width / yolo_w
+            scale_y = original_height / yolo_h
+            
+            # DEBUG: Always show coordinate transformation info
+            print(f"DEBUG - Image shape assumptions:")
+            print(f"  Original camera image: {original_width}x{original_height}")
+            print(f"  YOLO estimated input: {yolo_w}x{yolo_h}")
+            print(f"  Max dimension: {max(original_height, original_width)}")
+            print(f"  Scale factors: x={scale_x:.6f}, y={scale_y:.6f}")
+            print(f"  Scale factor difference: x={abs(scale_x - 1.0):.6f}, y={abs(scale_y - 1.0):.6f}")
+            
+            if self.debug and (abs(scale_x - 1.0) > 0.01 or abs(scale_y - 1.0) > 0.01):
+                print(f"Coordinate transformation needed:")
+                print(f"  YOLO: {yolo_w}x{yolo_h} -> Camera: {original_width}x{original_height}")
+                print(f"  Scale factors: x={scale_x:.3f}, y={scale_y:.3f}")
             
             # Convert results to ObjectInfo objects
             object_infos = []
@@ -180,12 +239,46 @@ class PerceptionSystem:
             if self.debug:
                 self.profiler.start("process_detections")
             
-            # Process each detection
+            # Process each detection with coordinate transformation
             for i, detection in enumerate(results[0]):
-                # Extract bounding box in [x, y, w, h] format
+                # Extract bounding box and transform coordinates
                 xyxy = detection.boxes.xyxy.cpu().numpy()[0]
-                x1, y1, x2, y2 = map(int, xyxy)
-                bbox = [x1, y1, x2-x1, y2-y1]
+                x1_yolo, y1_yolo, x2_yolo, y2_yolo = xyxy
+                
+                # Transform to camera coordinates
+                x1 = int(x1_yolo * scale_x)
+                y1 = int(y1_yolo * scale_y)
+                x2 = int(x2_yolo * scale_x)
+                y2 = int(y2_yolo * scale_y)
+                
+                # Ensure coordinates are within image bounds
+                x1 = max(0, min(x1, original_width - 1))
+                y1 = max(0, min(y1, original_height - 1))
+                x2 = max(0, min(x2, original_width - 1))
+                y2 = max(0, min(y2, original_height - 1))
+                
+                bbox = [x1, y1, x2 - x1, y2 - y1]
+                
+                # DEBUG: Validate coordinate transformation
+                center_x_yolo = (x1_yolo + x2_yolo) / 2
+                center_y_yolo = (y1_yolo + y2_yolo) / 2
+                center_x_cam = (x1 + x2) / 2
+                center_y_cam = (y1 + y2) / 2
+                expected_x = center_x_yolo * scale_x
+                expected_y = center_y_yolo * scale_y
+                error_x = abs(center_x_cam - expected_x)
+                error_y = abs(center_y_cam - expected_y)
+                
+                print(f"DEBUG - Detection {i} coordinate validation:")
+                print(f"  YOLO bbox: [{x1_yolo:.1f},{y1_yolo:.1f},{x2_yolo:.1f},{y2_yolo:.1f}]")
+                print(f"  Camera bbox: {bbox}")
+                print(f"  YOLO center: ({center_x_yolo:.1f}, {center_y_yolo:.1f})")
+                print(f"  Camera center: ({center_x_cam:.1f}, {center_y_cam:.1f})")
+                print(f"  Expected center: ({expected_x:.1f}, {expected_y:.1f})")
+                print(f"  Transform error: X={error_x:.2f}px, Y={error_y:.2f}px")
+                
+                if self.debug:
+                    print(f"Detection {i}: YOLO [{x1_yolo:.1f},{y1_yolo:.1f},{x2_yolo:.1f},{y2_yolo:.1f}] -> Camera {bbox}")
                 
                 # Extract class and confidence
                 cls_id = int(detection.boxes.cls.cpu().numpy()[0])
@@ -195,53 +288,74 @@ class PerceptionSystem:
                 # Create alphabetical ID
                 alpha_id = get_alpha_id(self._next_mask_id)
                 self._next_mask_id += 1
-                mask_coords = detection.masks.xy[0]
-                bool_mask = np.zeros((image.shape[0], image.shape[1]), dtype=bool)
-                num_masks = len(detection.masks)
-    
-                # Process each mask and merge them
-                for i in range(num_masks):
-                    try:
-                        # Get mask coordinates for current mask
-                        mask_coords = detection.masks.xy[i]
-                        
-                         # Convert to numpy array of integers, make sure it's properly formatted
-                        points = np.array(mask_coords, dtype=np.int32)
-                        
-                        # Create a temporary mask to hold this contour
-                        temp_mask = np.zeros((image.shape[0], image.shape[1]), dtype=np.uint8)
-                        
-                        # Draw filled contour on the temporary mask
-                        cv2.fillPoly(temp_mask, [points], 1)
-                        
-                        # Convert to boolean and merge with main mask
-                        bool_mask = np.logical_or(bool_mask, temp_mask.astype(bool))
-                        
-                        if self.debug and i > 0:
-                            print(f"Merged mask {i+1}/{num_masks} for object {class_name}")
+                
+                # Process mask coordinates if available
+                bool_mask = np.zeros((original_height, original_width), dtype=bool)
+                
+                if detection.masks is not None:
+                    num_masks = len(detection.masks)
+                    
+                    for mask_idx in range(num_masks):
+                        try:
+                            # Get mask coordinates and transform them
+                            mask_coords = detection.masks.xy[mask_idx]
                             
-                    except Exception as e:
-                        if self.debug:
-                            print(f"Error processing mask {i}: {str(e)}")
+                            # Transform mask coordinates to camera space
+                            transformed_coords = []
+                            for coord in mask_coords:
+                                x_cam = int(coord[0] * scale_x)
+                                y_cam = int(coord[1] * scale_y)
+                                # Ensure coordinates are within bounds
+                                x_cam = max(0, min(x_cam, original_width - 1))
+                                y_cam = max(0, min(y_cam, original_height - 1))
+                                transformed_coords.append([x_cam, y_cam])
+                            
+                            # Convert to numpy array and create mask
+                            points = np.array(transformed_coords, dtype=np.int32)
+                            temp_mask = np.zeros((original_height, original_width), dtype=np.uint8)
+                            cv2.fillPoly(temp_mask, [points], 1)
+                            bool_mask = np.logical_or(bool_mask, temp_mask.astype(bool))
+                            
+                            if self.debug and mask_idx > 0:
+                                print(f"Merged mask {mask_idx+1}/{num_masks} for object {class_name}")
+                                
+                        except Exception as e:
+                            if self.debug:
+                                print(f"Error processing mask {mask_idx}: {str(e)}")
                             continue
-                # Set these pixels to True in the boolean mask
-                # Create ObjectInfo
+                
+                # Create ObjectInfo with transformed coordinates
                 obj_info = ObjectInfo(
                     id=i,
                     name=class_name,
-                    bbox=bbox,
-                    mask=bool_mask,
+                    bbox=bbox,  # Already transformed
+                    mask=bool_mask,  # Already transformed
                     confidence=confidence,
-                    image=image,
-                    depth_image=depth_image,
+                    image=image,  # Original camera image
+                    depth_image=depth_image,  # Original camera depth
                     alpha_id=alpha_id,
                     camera_intrinsics=self.camera_intrinsics
                 )
-                obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=5, min_distance=50)
-                # Initialize surface_masks
+                
+                # Continue with rest of processing...
+                obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=10, min_distance=50, apply_center_shift=True)
+                
+                # DEBUG: Validate points of interest coordinates
+                if obj_info.points and 'pixel_coords' in obj_info.points:
+                    print(f"DEBUG - Points of interest for detection {i} ({class_name}):")
+                    print(f"  Number of points: {len(obj_info.points['pixel_coords'])}")
+                    for j, (px, py) in enumerate(obj_info.points['pixel_coords']):
+                        print(f"  Point {j}: ({px}, {py})")
+                        # Validate point is within image bounds
+                        if not (0 <= px < original_width and 0 <= py < original_height):
+                            print(f"  WARNING: Point {j} is outside image bounds!")
+                        # Validate point is within object bbox
+                        if not (bbox[0] <= px <= bbox[0] + bbox[2] and bbox[1] <= py <= bbox[1] + bbox[3]):
+                            print(f"  WARNING: Point {j} is outside object bbox!")
+                
                 obj_info.surface_masks = {}
 
-                # Generate surface segmentation if requested and object has a valid mask
+                # Generate surface segmentation if requested
                 if segment and self.segmenter is not None and obj_info.mask is not None:
                     if self.debug:
                         self.profiler.start(f"segment_surfaces_{i}")
@@ -262,7 +376,6 @@ class PerceptionSystem:
                     if self.debug:
                         self.profiler.start(f"estimate_pose_{i}")
                     
-                    # If we have a mask, use it for better pose estimation
                     if obj_info.mask is not None:
                         pose, pixel_pose = self._estimate_object_pose(obj_info.mask, depth_image)
                     else:
@@ -282,7 +395,7 @@ class PerceptionSystem:
             
             if self.debug:
                 self.profiler.stop("process_detections")
-                print(f"Processed {len(object_infos)} detections")
+                print(f"Processed {len(object_infos)} detections with coordinate transformation")
             
             return object_infos
             
@@ -370,7 +483,8 @@ class PerceptionSystem:
             quality_level: float = 0.01,
             min_distance: int = 50,
             visualize: bool = False,
-            orb_params: Dict[str, Any] = None  # Now used for contour parameters
+            orb_params: Dict[str, Any] = None,  # Now used for contour parameters
+            apply_center_shift: bool = True  # Control center-shift behavior
         ) -> Dict[str, Any]:
             """
             Detect points of interest within a specific object mask.
@@ -440,7 +554,7 @@ class PerceptionSystem:
                         obj_info=obj_info,
                         max_points=max_points,
                         depth_data=obj_info.depth_image if hasattr(obj_info, 'depth_image') else None,
-                        apply_center_shift=True,     # Enable center shifting
+                        apply_center_shift=apply_center_shift,     # Use parameter to control center shifting
                         edge_threshold=15.0,         # Points within 15px of edge get shifted  
                         shift_factor=0.4 
                     )
@@ -1215,6 +1329,15 @@ class PerceptionSystem:
                     position_3d = smoothing_factor * position_3d + (1 - smoothing_factor) * self._prev_position
                 
                 self._prev_position = position_3d.copy()
+            print(f"{label} pose: {position_3d}")
+            
+            # DEBUG: Check for depth-dependent scaling issues
+            expected_pixel_x = (position_3d[0] * self.fx / position_3d[2]) + self.cx
+            expected_pixel_y = (position_3d[1] * self.fy / position_3d[2]) + self.cy
+            pixel_error_x = abs(expected_pixel_x - pixel_x)
+            pixel_error_y = abs(expected_pixel_y - pixel_y)
+            print(f"  Back-projection check: expected_pixel=({expected_pixel_x:.1f}, {expected_pixel_y:.1f}), actual=({pixel_x}, {pixel_y})")
+            print(f"  Back-projection error: ({pixel_error_x:.1f}, {pixel_error_y:.1f}) pixels")
             
             return position_3d, confidence
             

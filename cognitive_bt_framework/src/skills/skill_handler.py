@@ -133,6 +133,11 @@ class SkillHandler:
                 pixel_coords=(pixel_x,pixel_y)
             )
         
+        # DEBUG: Show points being passed to skill generator
+        print(f"DEBUG - Points passed to skill generator:")
+        for label, point in points_of_interest.items():
+            print(f"  {label}: normalized=({point.position[0]:.4f}, {point.position[1]:.4f}), pixel_coords={point.pixel_coords}")
+        
         # Get or generate skill using SkillGenerator
         # skill = await self.skill_generator.find_similar_skill(
         #     image=object_info.image,
@@ -149,6 +154,11 @@ class SkillHandler:
                 target_object=target_object,
                 object_info=object_info
             )
+            
+        # DEBUG: Show points returned from skill generator
+        print(f"DEBUG - Points returned from skill generator:")
+        for label, point in skill.points_of_interest.items():
+            print(f"  {label}: normalized=({point.position[0]:.4f}, {point.position[1]:.4f}), pixel_coords={getattr(point, 'pixel_coords', 'Not available')}")
             
         if skill is None:
             print(f"Failed to generate skill for {abstract_action} on {target_object}")
@@ -178,6 +188,10 @@ class SkillHandler:
         
         h, w = object_info.image.shape[:2]
         
+        print(f"DEBUG - Skill Handler Point Processing:")
+        print(f"  Object image shape: {h}x{w}")
+        print(f"  Number of points of interest: {len(skill.points_of_interest)}")
+        
         for label, point in skill.points_of_interest.items():
             # Get normalized coordinates
             norm_x, norm_y = point.position
@@ -189,6 +203,10 @@ class SkillHandler:
             # Store pixel coordinates
             points_pixel[label] = (pixel_x, pixel_y)
             
+            print(f"  Point {label}:")
+            print(f"    Normalized coords: ({norm_x:.4f}, {norm_y:.4f})")
+            print(f"    Pixel coords: ({pixel_x}, {pixel_y})")
+            
             # Convert to 3D coordinates if depth image is available
             if hasattr(object_info, 'depth_image') and object_info.depth_image is not None:
                 try:
@@ -197,15 +215,32 @@ class SkillHandler:
                         max(0, pixel_y-2):min(object_info.depth_image.shape[0], pixel_y+3),
                         max(0, pixel_x-2):min(object_info.depth_image.shape[1], pixel_x+3)
                     ]
+                    print(f"    Depth ROI shape: {depth_roi.shape}")
+                    print(f"    Depth ROI values: {depth_roi}")
+                    
                     # Filter out zero/invalid depths
-                    points_3d[label], _ = self.perception_system._estimate_point_pose(points_pixel[label],
+                    points_3d[label], confidence = self.perception_system._estimate_point_pose(points_pixel[label],
                                                                                    object_info.depth_image, label=label)
+                    print(f"    3D position (camera frame): {points_3d[label]}")
+                    print(f"    Confidence: {confidence:.3f}")
+                    
+                    # DEBUG: Show robot transform if available
+                    if hasattr(self, 'motion_planner') and self.motion_planner:
+                        try:
+                            robot_pos, robot_rot = self.motion_planner.convert_cam_pose_to_base(
+                                points_3d[label], [0, 0, 0, 1], do_translation=True
+                            )
+                            print(f"    3D position (robot frame): {robot_pos}")
+                        except Exception as e:
+                            print(f"    Robot transform error: {e}")
                 except Exception as e:
-                    print(f"Error estimating 3D position for point {label}: {e}")
+                    print(f"    Error estimating 3D position for point {label}: {e}")
                     points_3d[label] = object_pose[:3]
+                    print(f"    Using fallback object pose: {points_3d[label]}")
             else:
                 # No depth image, use object pose
                 points_3d[label] = object_pose[:3]
+                print(f"    No depth image, using object pose: {points_3d[label]}")
         
         # Convert each parsed primitive to executable action
         action_sequence = []
@@ -314,7 +349,7 @@ class SkillHandler:
                             # which should be available in the perception system
                             # For now, we'll use the object's own conversion method if available
                             print("converting point to 3d")
-                            surface_centroid_position = self.perception_system._estimate_point_pose((centroid_x, centroid_y), depth)
+                            surface_centroid_position, _ = self.perception_system._estimate_point_pose((centroid_x, centroid_y), object_info.depth_image)
                         
                         # Calculate surface normal using the depth image and mask
                         surface_normal, confidence = self.perception_system.calculate_surface_normal(
@@ -507,7 +542,7 @@ class SkillHandler:
 
     def _get_default_rotation_angle(self) -> float:
         """Get default rotation angle for twist operations (in radians)"""
-        return np.pi / 2  # 90 degrees default rotation
+        return  np.pi  # 90 degrees default rotation
 
     def _generate_execution_parameters(self,
                                     skill_parameters: Dict[str, Any],

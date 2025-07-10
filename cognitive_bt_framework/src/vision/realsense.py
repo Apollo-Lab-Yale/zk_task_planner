@@ -14,7 +14,8 @@ class Camera:
     def __init__(self, width: int = 640, height: int = 480, fps: int = 30, 
                  depth_averaging_frames: int = 5, debug=True, config_file: str = None,
                  exposure: int = None, gain: int = None, laser_power: int = None, 
-                 auto_exposure: bool = None, use_viewer_defaults: bool = True):
+                 auto_exposure: bool = None, use_viewer_defaults: bool = True,
+                 trigger_calibration: bool = False):
         """
         Simple camera that just works - now with RealSense Viewer quality defaults
         
@@ -30,6 +31,7 @@ class Camera:
             laser_power: Initial laser power (None = auto/default)
             auto_exposure: Enable/disable auto exposure (None = use viewer default)
             use_viewer_defaults: Use RealSense Viewer quality settings
+            trigger_calibration: Trigger device calibration after camera start
         """
         self.width = width
         self.height = height
@@ -37,6 +39,7 @@ class Camera:
         self.debug = debug
         self.depth_averaging_frames = depth_averaging_frames
         self.use_viewer_defaults = use_viewer_defaults
+        self.trigger_calibration = trigger_calibration
         
         # Configuration file management
         self.config_file = config_file or "realsense_config.json"
@@ -57,7 +60,6 @@ class Camera:
         # Configure streams - use native 640x480
         self.config.enable_stream(rs.stream.depth, width, height, rs.format.z16, fps)
         self.config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
-
         # Threading components
         self._frame_queue = queue.Queue(maxsize=5)
         self._running = False
@@ -234,6 +236,42 @@ class Camera:
                 print(f"Failed to apply viewer defaults: {e}")
             return False
 
+    def trigger_device_calibration(self):
+        """
+        Trigger device calibration after the camera is started.
+        This can help improve depth accuracy.
+        """
+        if not self.depth_sensor:
+            if self.debug:
+                print("No depth sensor available for calibration")
+            return False
+        
+        try:
+            # Get the device from the sensor
+            device = self.depth_sensor.get_device()
+            
+            # Check if the device supports on-chip calibration
+            if device.supports(rs.camera_info.product_id):
+                product_id = device.get_info(rs.camera_info.product_id)
+                if self.debug:
+                    print(f"Device product ID: {product_id}")
+            
+            # Trigger calibration if supported
+            if hasattr(device, 'trigger_device_calibration'):
+                device.trigger_device_calibration()
+                if self.debug:
+                    print("Device calibration triggered successfully")
+                return True
+            else:
+                if self.debug:
+                    print("Device calibration not supported on this device")
+                return False
+                
+        except Exception as e:
+            if self.debug:
+                print(f"Failed to trigger device calibration: {e}")
+            return False
+
     def get_parameter_ranges(self):
         """Get the valid ranges for tunable parameters"""
         if not self.depth_sensor:
@@ -331,6 +369,85 @@ class Camera:
                 print(f"Failed to toggle auto exposure: {e}")
             return False
 
+    def get_camera_matrix(self):
+        """
+        Get the camera matrix for 3D projection of aligned depth data.
+        This uses color intrinsics since depth is aligned to color.
+        
+        Returns:
+            3x3 numpy array representing the camera matrix
+        """
+        if not hasattr(self, 'intrinsics') or self.intrinsics is None:
+            return None
+            
+        return np.array([
+            [self.intrinsics.fx, 0, self.intrinsics.ppx],
+            [0, self.intrinsics.fy, self.intrinsics.ppy],
+            [0, 0, 1]
+        ])
+    
+    def validate_3d_projection(self, test_pixel_x=320, test_pixel_y=240, test_depth=1.0):
+        """
+        Validate 3D projection accuracy by testing round-trip conversion.
+        This helps debug alignment and intrinsics issues.
+        
+        Args:
+            test_pixel_x: Test pixel X coordinate
+            test_pixel_y: Test pixel Y coordinate  
+            test_depth: Test depth value in meters
+            
+        Returns:
+            Dictionary with validation results
+        """
+        results = {
+            'test_input': {'pixel_x': test_pixel_x, 'pixel_y': test_pixel_y, 'depth': test_depth},
+            'using_original_depth_intrinsics': {},
+            'using_color_intrinsics': {},
+            'projection_errors': {}
+        }
+        
+        # Test with original depth intrinsics
+        if hasattr(self, 'depth_intrinsics_original'):
+            x_3d_orig = (test_pixel_x - self.depth_intrinsics_original.ppx) * test_depth / self.depth_intrinsics_original.fx
+            y_3d_orig = (test_pixel_y - self.depth_intrinsics_original.ppy) * test_depth / self.depth_intrinsics_original.fy
+            
+            # Back-project to pixels
+            px_back_orig = (x_3d_orig * self.depth_intrinsics_original.fx / test_depth) + self.depth_intrinsics_original.ppx
+            py_back_orig = (y_3d_orig * self.depth_intrinsics_original.fy / test_depth) + self.depth_intrinsics_original.ppy
+            
+            results['using_original_depth_intrinsics'] = {
+                '3d_point': [x_3d_orig, y_3d_orig, test_depth],
+                'back_projected_pixel': [px_back_orig, py_back_orig],
+                'round_trip_error': [abs(px_back_orig - test_pixel_x), abs(py_back_orig - test_pixel_y)]
+            }
+        
+        # Test with color intrinsics (what we should use for aligned depth)
+        x_3d_color = (test_pixel_x - self.color_intrinsics.ppx) * test_depth / self.color_intrinsics.fx
+        y_3d_color = (test_pixel_y - self.color_intrinsics.ppy) * test_depth / self.color_intrinsics.fy
+        
+        # Back-project to pixels
+        px_back_color = (x_3d_color * self.color_intrinsics.fx / test_depth) + self.color_intrinsics.ppx
+        py_back_color = (y_3d_color * self.color_intrinsics.fy / test_depth) + self.color_intrinsics.ppy
+        
+        results['using_color_intrinsics'] = {
+            '3d_point': [x_3d_color, y_3d_color, test_depth],
+            'back_projected_pixel': [px_back_color, py_back_color],
+            'round_trip_error': [abs(px_back_color - test_pixel_x), abs(py_back_color - test_pixel_y)]
+        }
+        
+        # Calculate differences between the two methods
+        if hasattr(self, 'depth_intrinsics_original'):
+            results['projection_errors'] = {
+                '3d_position_difference': [
+                    abs(x_3d_orig - x_3d_color),
+                    abs(y_3d_orig - y_3d_color),
+                    0.0
+                ],
+                'max_3d_error_mm': max(abs(x_3d_orig - x_3d_color), abs(y_3d_orig - y_3d_color)) * 1000
+            }
+        
+        return results
+    
     def get_current_parameters(self):
         """Get current parameter values"""
         if not self.depth_sensor:
@@ -368,13 +485,27 @@ class Camera:
             depth_profile = profile.get_stream(rs.stream.depth).as_video_stream_profile()
             color_profile = profile.get_stream(rs.stream.color).as_video_stream_profile()
             
-            self.intrinsics = depth_profile.get_intrinsics()
+            # Store original intrinsics
+            self.depth_intrinsics_original = depth_profile.get_intrinsics()
+            self.color_intrinsics = color_profile.get_intrinsics()
+            
+            # After alignment, depth uses color intrinsics for 3D projection
+            # This is the key fix - aligned depth should use color intrinsics
+            self.intrinsics = self.color_intrinsics  # For 3D projection of aligned depth
+            self.depth_intrinsics = self.color_intrinsics  # Aligned depth uses color intrinsics
+            
             self.depth_sensor = profile.get_device().first_depth_sensor()
             self.depth_scale = self.depth_sensor.get_depth_scale()
             
             # Apply defaults first if requested
             if self.use_viewer_defaults:
                 self.apply_viewer_defaults()
+            
+            # Trigger calibration if requested
+            if self.trigger_calibration:
+                if self.debug:
+                    print("Triggering device calibration...")
+                self.trigger_device_calibration()
             
             # Get current parameter values after defaults applied
             current_params = self.get_current_parameters()
@@ -394,6 +525,20 @@ class Camera:
                 print(f"  Expected: ({self.width}, {self.height})")
                 print(f"  Depth scale: {self.depth_scale}")
                 print(f"  Using viewer defaults: {self.use_viewer_defaults}")
+                print(f"")
+                print(f"  INTRINSICS COMPARISON:")
+                print(f"  Original Depth intrinsics:")
+                print(f"    fx: {self.depth_intrinsics_original.fx:.2f}, fy: {self.depth_intrinsics_original.fy:.2f}")
+                print(f"    ppx: {self.depth_intrinsics_original.ppx:.2f}, ppy: {self.depth_intrinsics_original.ppy:.2f}")
+                print(f"  Color intrinsics (used for aligned depth):")
+                print(f"    fx: {self.color_intrinsics.fx:.2f}, fy: {self.color_intrinsics.fy:.2f}")
+                print(f"    ppx: {self.color_intrinsics.ppx:.2f}, ppy: {self.color_intrinsics.ppy:.2f}")
+                print(f"  Intrinsics difference:")
+                print(f"    fx diff: {abs(self.depth_intrinsics_original.fx - self.color_intrinsics.fx):.2f}")
+                print(f"    fy diff: {abs(self.depth_intrinsics_original.fy - self.color_intrinsics.fy):.2f}")
+                print(f"    ppx diff: {abs(self.depth_intrinsics_original.ppx - self.color_intrinsics.ppx):.2f}")
+                print(f"    ppy diff: {abs(self.depth_intrinsics_original.ppy - self.color_intrinsics.ppy):.2f}")
+                print(f"")
                 
                 # Print parameter ranges
                 ranges = self.get_parameter_ranges()
@@ -514,7 +659,7 @@ class Camera:
                     print(f"Frame acquisition error: {e}")
                 time.sleep(0.1)
 
-    def get_frames(self, use_averaging=False):
+    def get_frames(self, use_averaging=True):
         """Get frames with guaranteed correct resolution"""
         try:
             aligned_frames = self._frame_queue.get(timeout=1.0)
@@ -1290,7 +1435,7 @@ def test_viewer_quality():
     
     # Create camera with viewer defaults enabled (using actual viewer resolution)
     camera = Camera(
-        width=848,  # RealSense Viewer default resolution
+        width=640,  # RealSense Viewer default resolution
         height=480, 
         fps=30, 
         depth_averaging_frames=3,
@@ -1351,7 +1496,7 @@ def test_both_modes():
     
     # Start with minimal processing (using viewer resolution)
     camera = Camera(
-        width=848,  # RealSense Viewer default resolution
+        width=640,  # RealSense Viewer default resolution
         height=480, 
         fps=30, 
         debug=True,

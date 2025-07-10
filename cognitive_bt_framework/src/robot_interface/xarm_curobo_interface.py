@@ -230,10 +230,10 @@ class CuRoboMotionPlanner:
                 # trajopt_tsteps=32,
                 interpolation_steps=5000,
                 collision_checker_type=CollisionCheckerType.PRIMITIVE,
-                # Optimization parameters
-                num_ik_seeds=32,
-                num_graph_seeds=4,
-                num_trajopt_seeds=6,
+                # Optimization parameters (reduced for speed)
+                num_ik_seeds=16,        # Reduced from 32
+                num_graph_seeds=2,      # Reduced from 4  
+                num_trajopt_seeds=4,    # Reduced from 6
 
                 # Time parameters
                 trajopt_dt=0.5,
@@ -241,13 +241,13 @@ class CuRoboMotionPlanner:
                 # Collision parameters
                 collision_activation_distance=0.03,  # 3cm activation distance
                 collision_max_outside_distance=0.5,
-                # Quality parameters
+                # Quality parameters (relaxed for speed)
                 evaluate_interpolated_trajectory=True,
-                position_threshold=0.005,  # 5mm position accuracy
-                rotation_threshold=0.05,
+                position_threshold=0.01,   # 10mm position accuracy (relaxed from 5mm)
+                rotation_threshold=0.1,    # Relaxed rotation tolerance
                 cspace_threshold=0.05,
                 # Performance parameters
-                use_cuda_graph=False,  # Set to True for faster performance once working
+                use_cuda_graph=True,   # Enabled for faster performance
                 store_debug_in_result=True,
                 minimum_trajectory_dt=0.01,  # 1ms minimum timestep
                 finetune_dt_scale=0.85,
@@ -364,6 +364,7 @@ class CuRoboMotionPlanner:
                 print(f"ROBOT TCP STATE: {state}\n for config: {config}")
                 pose = state.ee_position.cpu().numpy()
                 quat = state.ee_quaternion.cpu().numpy()
+                print(f"RObiot pose: {pose} quat: {quat}")
                 return pose, quat
         except Exception as e:
             print(f"Error getting robot TCP pose: {str(e)}")
@@ -376,7 +377,7 @@ class CuRoboMotionPlanner:
             
             state = self.motion_gen.kinematics.get_state(config)
             print(state)
-            # Extract end-effector pose and quaternion with better debugging
+            # Extract camera pose and quaternion with better debugging
             camera_pose = state.links_position.cpu().numpy()[0][1]  # [x, y, z]
             camera_quat_raw = state.links_quaternion.cpu().numpy()[0][1]
              # Handle different quaternion formats that might be returned
@@ -442,6 +443,7 @@ class CuRoboMotionPlanner:
             else:
                 print("Using dynamic camera transform for pose conversion")
                 camera_pose, camera_rotation = self.get_camera_transform()
+            camera_pose[1] += 0.02
             print(f"Pose before conversion pose: {position}, {orientation}")
             # Convert input position to homogeneous coordinates
             if isinstance(position, (list, tuple)):
@@ -487,13 +489,13 @@ class CuRoboMotionPlanner:
             traceback.print_exc()
             return None, None
     
-    def execute_wrist_twist(self, direction="clockwise", rotation_angle=np.pi/2, speed_factor=1.0, timeout=30.0):
+    def execute_wrist_twist(self, direction="clockwise", rotation_angle=2 * np.pi, speed_factor=1.0, timeout=30.0):
         """
-        Execute a wrist twist motion by rotating only the wrist joint
+        Execute a wrist twist motion by rotating only the wrist joint using velocity control
         
         Args:
             direction: "clockwise" or "counterclockwise" rotation direction
-            rotation_angle: Angle to rotate in radians (default: π/2 = 90 degrees)
+            rotation_angle: Angle to rotate in radians (default: 2π = 360 degrees)
             speed_factor: Speed factor for the motion (0.1 to 2.0)
             timeout: Timeout for the operation in seconds
             
@@ -518,82 +520,100 @@ class CuRoboMotionPlanner:
                 print("Failed to prepare robot for execution")
                 return False
             
-            # Calculate target joint angles
-            target_joints = current_joints.copy()
+            # Set robot to joint velocity control mode
+            print("Setting robot to joint velocity control mode...")
+            code = self.arm.set_mode(4)  # Joint velocity control mode
+            if code != 0:
+                print(f"Failed to set velocity control mode, code: {code}")
+                return False
+            
+            # Enable the robot
+            code = self.arm.set_state(0)
+            if code != 0:
+                print(f"Failed to enable robot, code: {code}")
+                return False
             
             # The wrist joint is typically the last joint (index -1)
             # For xArm Lite6, this would be joint 6 (index 5)
             wrist_joint_index = self.config.dof - 1  # Last joint
             
-            # Calculate rotation based on direction
+            # Calculate velocity based on direction and speed_factor
+            base_velocity = 0.5  # Base velocity in rad/s
+            velocity = base_velocity * speed_factor
+            
             if direction.lower() == "clockwise":
-                # Clockwise rotation (negative angle when viewed from positive axis)
-                rotation_delta = rotation_angle
+                # Clockwise rotation (negative velocity)
+                wrist_velocity = velocity
             elif direction.lower() == "counterclockwise":
-                # Counterclockwise rotation (positive angle when viewed from positive axis)
-                rotation_delta = -rotation_angle
+                # Counterclockwise rotation (positive velocity)
+                wrist_velocity = -velocity
             else:
                 print(f"Invalid direction: {direction}. Must be 'clockwise' or 'counterclockwise'")
                 return False
             
-            # Apply rotation to wrist joint
-            target_joints[wrist_joint_index] += rotation_delta
-            
-            # Ensure joint limits are respected (for xArm, typically ±π)
-            # Wrap angle to [-π, π] range
-            while target_joints[wrist_joint_index] > np.pi:
-                target_joints[wrist_joint_index] -= 2 * np.pi
-            while target_joints[wrist_joint_index] < -np.pi:
-                target_joints[wrist_joint_index] += 2 * np.pi
+            # Create velocity command - all joints zero except wrist
+            joint_velocities = [0.0] * self.config.dof
+            joint_velocities[wrist_joint_index] = wrist_velocity
             
             print(f"Current wrist joint angle: {current_joints[wrist_joint_index]:.3f} rad ({np.degrees(current_joints[wrist_joint_index]):.1f} deg)")
-            print(f"Target wrist joint angle: {target_joints[wrist_joint_index]:.3f} rad ({np.degrees(target_joints[wrist_joint_index]):.1f} deg)")
-            print(f"Rotation delta: {rotation_delta:.3f} rad ({np.degrees(rotation_delta):.1f} deg)")
+            print(f"Wrist velocity: {wrist_velocity:.3f} rad/s")
             
-            # Execute the movement using joint space planning for precise control
-            print("Planning joint space motion for wrist twist...")
-            success, trajectory, dt = self.plan_joint_motion(
-                target_joints=target_joints,
-                planning_timeout=min(timeout * 0.8, 10.0),
-                speed_scaling=1.0 / speed_factor,  # Convert speed_factor to time scaling
-                execute=True,
-                speed_factor=speed_factor
+            # Calculate duration needed for the rotation
+            duration = rotation_angle / abs(wrist_velocity)
+            duration = min(duration, timeout)  # Respect timeout
+            
+            print(f"Executing velocity command for {duration:.2f} seconds...")
+            
+            # Execute velocity command
+            code = self.arm.vc_set_joint_velocity(
+                speeds=joint_velocities, 
+                is_radian=True, 
+                is_sync=True, 
+                duration=int(duration * 1000)  # Convert to milliseconds
             )
             
-            if success:
-                print(f"Wrist twist {direction} completed successfully")
-                return True
-            else:
-                print(f"Failed to plan or execute wrist twist motion")
-                
-                # Fallback: try direct joint angle command
-                print("Attempting direct joint angle command as fallback...")
-                try:
-                    # Calculate appropriate speed for the motion
-                    joint_speed = max(10, min(50, 30 * speed_factor))  # degrees/second, scaled by speed_factor
-                    
-                    success = self.set_robot_joint_angles(
-                        joint_angles=target_joints,
-                        wait=True,
-                        speed=math.radians(joint_speed),  # Convert to rad/s
-                        acc=500
-                    )
-                    
-                    if success:
-                        print(f"Wrist twist {direction} completed using direct command")
-                        return True
-                    else:
-                        print("Direct joint command also failed")
-                        return False
-                        
-                except Exception as fallback_error:
-                    print(f"Fallback method failed: {fallback_error}")
-                    return False
+            if code != 0:
+                print(f"Failed to execute velocity command, code: {code}")
+                return False
+            
+            # Wait for motion to complete
+            import time
+            time.sleep(duration + 0.1)  # Small buffer
+            
+            # Stop all joint motion
+            stop_velocities = [0.0] * self.config.dof
+            self.arm.vc_set_joint_velocity(
+                speeds=stop_velocities, 
+                is_radian=True, 
+                is_sync=True, 
+                duration=0
+            )
+            
+            # Return to position control mode
+            self.arm.set_mode(0)
+            
+            print(f"Wrist twist {direction} completed successfully")
+            return True
                 
         except Exception as e:
             print(f"Error executing wrist twist: {str(e)}")
             import traceback
             print(traceback.format_exc())
+            
+            # Ensure we return to position control mode on error
+            try:
+                if self.arm is not None:
+                    stop_velocities = [0.0] * self.config.dof
+                    self.arm.vc_set_joint_velocity(
+                        speeds=stop_velocities, 
+                        is_radian=True, 
+                        is_sync=True, 
+                        duration=0
+                    )
+                    self.arm.set_mode(0)
+            except:
+                pass
+            
             return False
     
     def execute_trajectory(self, trajectory, dt, speed_factor=1.0):
@@ -1396,7 +1416,7 @@ class CuRoboMotionPlanner:
         target_orientation=None,
         force_top_down=False,
         unconstrained_orientation=False,
-        planning_timeout=10.0,
+        planning_timeout=5.0,   # Reduced from 10.0 seconds
         execute=False,
         speed_factor=1.0
     ):
@@ -1448,14 +1468,11 @@ class CuRoboMotionPlanner:
             if type(target_position) not in (list, List, tuple) and len(target_position) < 3:
                 print(target_position)
                 target_position = target_position[0]
-                
-            if target_position[1] < 0:
-                target_position[1] += 0.07
-            else:
-                target_position[1] -= 0.07
-            # target_position[0] += 0.02
-            if  target_position[2] < 0.03:
-                target_position[2] = -0.03
+            # target_position[1] += 0.05
+            
+            # # target_position[0] += 0.02
+            # if  target_position[2] < 0.03:
+            #     target_position[2] = -0.03
             # target_position = [target_position[0], target_position[1], target_position[2] + 0.04]
             print(f"Target pose shifted: {target_position}")
             
@@ -1471,13 +1488,13 @@ class CuRoboMotionPlanner:
             print(target_orientation_tensor)
             # Create planning configuration with optimized parameters
             plan_config = MotionGenPlanConfig(
-                max_attempts=5,
-                timeout=planning_timeout * 0.9,
+                max_attempts=5,                    # Reduced from 10
+                timeout=planning_timeout * 0.5,   # Reduced timeout (50% instead of 90%)
                 enable_opt=True,
                 enable_graph=True,
                 enable_graph_attempt=2,
-                enable_finetune_trajopt=False,
-                parallel_finetune=False,
+                enable_finetune_trajopt=True,
+                parallel_finetune=True,
                 time_dilation_factor=0.99
             )
             
@@ -1524,7 +1541,7 @@ class CuRoboMotionPlanner:
             target_orientation=None,
             force_top_down=False,
             unconstrained_orientation=False,
-            planning_timeout=10.0,
+            planning_timeout=5.0,   # Reduced from 10.0 seconds
             execute=False,
             speed_factor=1.0,
             is_camera_frame=True
@@ -1593,7 +1610,7 @@ class CuRoboMotionPlanner:
         start_orientation,
         target_position,
         target_orientation=None,
-        planning_timeout=10.0,
+        planning_timeout=5.0,   # Reduced from 10.0 seconds
         time_scaling=0.99,
         execute=False,
         speed_factor=1.0
@@ -2008,7 +2025,7 @@ class CuRoboMotionPlanner:
     def plan_joint_motion(
         self,
         target_joints,
-        planning_timeout=10.0,
+        planning_timeout=5.0,   # Reduced from 10.0 seconds
         speed_scaling=0.99,
         execute=False,
         speed_factor=1.0
@@ -2111,6 +2128,12 @@ class CuRoboMotionPlanner:
             import traceback
             print(traceback.format_exc())
             return False, None, None
+        
+    def retract_gripper(self, distance=0.1):
+        pose = self.arm.get_position(is_radian=True)
+        print(pose)
+        x, y, z, r, p, w = pose[1]
+        return self.arm.set_position(x, y, z + distance * 1000, r, p, w, is_radian=True)
     
     def move_to_home(self, speed=0.3, execute=False, speed_factor=1.0):
         """Plan movement to the home position and optionally execute on the robot
@@ -2133,7 +2156,7 @@ class CuRoboMotionPlanner:
             # Plan joint motion to home position
             return self.plan_joint_motion(
                 target_joints=home_joints,
-                planning_timeout=10.0,
+                planning_timeout=5.0,   # Reduced from 10.0 seconds
                 speed_scaling=speed,
                 execute=execute,
                 speed_factor=speed_factor
@@ -2287,7 +2310,7 @@ class CuRoboMotionPlanner:
         place_orientation=None,
         approach_distance=0.1,
         approach_direction=[0, 0, 1],  # Default approaching from above
-        planning_timeout=10.0,
+        planning_timeout=5.0,   # Reduced from 10.0 seconds
         speed_factor=1.0
     ):
         """Execute a pick and place operation
@@ -2455,7 +2478,7 @@ class CuRoboMotionPlanner:
         is_push=True, 
         custom_normal=None, 
         move_parallel=False, 
-        planning_timeout=10.0,
+        planning_timeout=5.0,   # Reduced from 10.0 seconds
         current_position=None,
         current_orientation=None,
         execute=False,
@@ -3112,7 +3135,12 @@ def example_usage_with_robot():
     
     print("\n=== All Testing Complete ===")
 
+def test_retract():
+    robot_ip = "192.168.1.224"  # Replace with your robot's IP
+    planner = CuRoboMotionPlanner(robot_ip=robot_ip)
+    planner.retract_gripper()
+
 
 if __name__ == "__main__":
     # Use simulation mode if no robot is available
-    test_pull()
+    test_retract()

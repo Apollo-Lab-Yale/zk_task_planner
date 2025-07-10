@@ -37,7 +37,7 @@ class RobustInteractionDetector:
         depth_data: Optional[np.ndarray] = None,
         apply_center_shift: bool = True,
         edge_threshold: float = 15.0,
-        shift_factor: float = 0.4,
+        shift_factor: float = 0.25,
         min_distance: int = 30  # Added parameter for minimum distance between points
     ) -> List[InteractionPoint]:
         """
@@ -114,7 +114,7 @@ class RobustInteractionDetector:
         edge_threshold: float = 15.0,
         shift_factor: float = 0.4,
         min_shift: int = 5,
-        max_shift: int = 25
+        max_shift: int = 10
     ) -> List[InteractionPoint]:
         """
         Shift points near object edges toward the object center for better depth reliability.
@@ -203,6 +203,8 @@ class RobustInteractionDetector:
                 shifted_point.original_position = (x, y)
                 shifted_point.shift_distance = shift_distance
                 
+                # DEBUG: Show center-shift impact
+                print(f"DEBUG Center-shift: Point moved from ({x}, {y}) to ({new_x}, {new_y}), distance: {shift_distance:.1f}px")
                 
                 shifted_points.append(shifted_point)
             else:

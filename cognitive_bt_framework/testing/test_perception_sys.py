@@ -18,12 +18,8 @@ def main():
         print("Warming up camera...")
         time.sleep(2)
 
-        # Get camera matrix from RealSense intrinsics
-        camera_matrix = np.array([
-            [camera.intrinsics.fx, 0, camera.intrinsics.ppx],
-            [0, camera.intrinsics.fy, camera.intrinsics.ppy],
-            [0, 0, 1]
-        ])
+        # Get camera matrix from RealSense intrinsics (automatically uses correct aligned intrinsics)
+        camera_matrix = camera.get_camera_matrix()
 
         # Initialize perception system
         fast_sam_config = FastSAMConfig(
