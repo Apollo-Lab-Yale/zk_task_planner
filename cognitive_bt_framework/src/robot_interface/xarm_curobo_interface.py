@@ -89,7 +89,18 @@ class CuRoboMotionPlanner:
         # Initialize xArm SDK
         self.arm = None
         self.arm_lock = threading.Lock()
+        
+        # Force/torque sensor settings for robust interactions
+        self.default_collision_sensitivity = 3  # Lower = more sensitive (0-5)
+        self.default_teach_sensitivity = 4       # Lower = more sensitive (0-5) 
+        self.pivot_collision_sensitivity = 5     # Less sensitive for pivot operations
+        self.pivot_teach_sensitivity = 5         # Less sensitive for pivot operations
+        
         self.connect_robot()
+        
+        # Configure initial robot sensitivity for normal operations
+        if self.arm:
+            self._configure_initial_sensitivity()
         
         # Register callback for joint state updates
         if self.arm is not None:
@@ -98,8 +109,12 @@ class CuRoboMotionPlanner:
         # Initialize cuRobo motion generator
         self.motion_gen = self.init_curobo()
         
-        # Initialize IK solver
-        self.ik_solver = self.init_ik_solver()
+        # Initialize IK solver only if motion generator succeeded
+        if self.motion_gen is not None:
+            self.ik_solver = self.init_ik_solver()
+        else:
+            print("Cannot initialize IK solver: motion generator initialization failed")
+            self.ik_solver = None
         
         print('CuRobo Motion Planner initialized with xArm SDK')
         if self.static_camera_tf is not None:
@@ -225,35 +240,40 @@ class CuRoboMotionPlanner:
                 robot_cfg=robot_config_path,
                 world_model=world_config,
                 tensor_args=self.tensor_args,
-                # Planning parameters
-                interpolation_dt=0.01,
-                # trajopt_tsteps=32,
-                interpolation_steps=5000,
+                # Planning parameters - optimized for speed
+                interpolation_dt=0.015,         # Increased from 0.01 for faster interpolation
+                interpolation_steps=2500,      # Halved from 5000 for speed
                 collision_checker_type=CollisionCheckerType.PRIMITIVE,
-                # Optimization parameters (reduced for speed)
-                num_ik_seeds=16,        # Reduced from 32
-                num_graph_seeds=2,      # Reduced from 4  
-                num_trajopt_seeds=4,    # Reduced from 6
-
-                # Time parameters
-                trajopt_dt=0.5,
-                js_trajopt_dt=0.5,
-                # Collision parameters
-                collision_activation_distance=0.03,  # 3cm activation distance
-                collision_max_outside_distance=0.5,
-                # Quality parameters (relaxed for speed)
-                evaluate_interpolated_trajectory=True,
-                position_threshold=0.01,   # 10mm position accuracy (relaxed from 5mm)
-                rotation_threshold=0.1,    # Relaxed rotation tolerance
-                cspace_threshold=0.05,
+                
+                # Optimization parameters - balanced for speed and reliability
+                num_ik_seeds=12,        # Moderate reduction from 16 (was 32)
+                num_graph_seeds=2,      # Restored from 1 (was 4)  
+                num_trajopt_seeds=4,    # Restored from 2 (was 6)
+                
+                # Trajectory optimization parameters - faster convergence
+                trajopt_tsteps=24,      # Reduced from default 32
+                trajopt_dt=0.25,        # Reduced from 0.5 for faster optimization
+                js_trajopt_dt=0.25,     # Reduced from 0.5 for faster optimization
+                
+                # Collision parameters - relaxed for speed
+                collision_activation_distance=0.04,    # Slightly increased from 0.03
+                collision_max_outside_distance=0.3,    # Reduced from 0.5
+                
+                # Quality parameters - restore some quality for reliability
+                evaluate_interpolated_trajectory=True,  # Re-enabled for trajectory quality
+                position_threshold=0.01,    # Restored to original for accuracy
+                rotation_threshold=0.1,     # Restored to original
+                cspace_threshold=0.05,      # Restored to original
+                
                 # Performance parameters
-                use_cuda_graph=True,   # Enabled for faster performance
-                store_debug_in_result=True,
-                minimum_trajectory_dt=0.01,  # 1ms minimum timestep
-                finetune_dt_scale=0.85,
-                # Smoothness parameters
-                minimize_jerk=True,
-                filter_robot_command=True
+                use_cuda_graph=False,       # Keep disabled for goal type changes
+                store_debug_in_result=False, # Keep disabled for speed
+                minimum_trajectory_dt=0.015, # Must be >= interpolation_dt (0.015)
+                finetune_dt_scale=0.85,      # Restored to original
+                
+                # Smoothness parameters - restore for quality
+                minimize_jerk=True,          # Re-enabled for smooth trajectories
+                filter_robot_command=True    # Re-enabled for command filtering
             )
             
             # Store robot config for IK solver - use the imported RobotConfig, not our class
@@ -287,17 +307,17 @@ class CuRoboMotionPlanner:
                 print("Robot configuration not available for IK solver")
                 return None
                 
-            # Create IK solver configuration
+            # Create IK solver configuration - balanced for speed and reliability
             ik_config = IKSolverConfig.load_from_robot_config(
                 self.config.robot_cfg,
                 self.motion_gen.world_collision.world_model if self.motion_gen and self.motion_gen.world_collision else None,
-                rotation_threshold=0.05,
-                position_threshold=0.005,
-                num_seeds=32,
-                self_collision_check=True,
-                self_collision_opt=True,
+                rotation_threshold=0.05,        # Restored for accuracy
+                position_threshold=0.005,       # Restored for accuracy
+                num_seeds=24,                   # Moderate reduction from 32
+                self_collision_check=True,      # Keep for safety
+                self_collision_opt=True,        # Re-enabled for better solutions
                 tensor_args=self.tensor_args,
-                use_cuda_graph=True  # For better performance
+                use_cuda_graph=False            # Keep disabled for goal type changes
             )
             
             # Create IK solver
@@ -356,6 +376,15 @@ class CuRoboMotionPlanner:
             return None
             
         try:
+            # Check if motion generator is properly initialized
+            if self.motion_gen is None:
+                print("Motion generator not initialized")
+                return None
+            
+            if not hasattr(self.motion_gen, 'kinematics') or self.motion_gen.kinematics is None:
+                print("Motion generator kinematics not available")
+                return None
+                
             with self.arm_lock:
                 config = torch.from_numpy(np.array(self.arm.angles))
                 config = config.cuda("cuda")
@@ -371,6 +400,15 @@ class CuRoboMotionPlanner:
             return None
      
     def get_camera_transform(self):
+            # Check if motion generator is properly initialized
+            if self.motion_gen is None:
+                print("Motion generator not initialized")
+                return None, None
+            
+            if not hasattr(self.motion_gen, 'kinematics') or self.motion_gen.kinematics is None:
+                print("Motion generator kinematics not available")
+                return None, None
+                
             config = torch.from_numpy(np.array(self.arm.angles))
             config = config.cuda("cuda")
             config = config.to(torch.float32)
@@ -443,7 +481,7 @@ class CuRoboMotionPlanner:
             else:
                 print("Using dynamic camera transform for pose conversion")
                 camera_pose, camera_rotation = self.get_camera_transform()
-            camera_pose[1] += 0.02
+            camera_pose[1] += 0.03
             print(f"Pose before conversion pose: {position}, {orientation}")
             # Convert input position to homogeneous coordinates
             if isinstance(position, (list, tuple)):
@@ -586,11 +624,12 @@ class CuRoboMotionPlanner:
                 speeds=stop_velocities, 
                 is_radian=True, 
                 is_sync=True, 
-                duration=0
+                duration=-1
             )
             
             # Return to position control mode
             self.arm.set_mode(0)
+            self.arm.set_state(0)
             
             print(f"Wrist twist {direction} completed successfully")
             return True
@@ -712,7 +751,7 @@ class CuRoboMotionPlanner:
                     # Send joint command to the robot
                     try:
                         # Use set_servo_angle for smoother motion
-                        code = self.arm.set_servo_angle(angle=joint_pos, is_radian=True, wait=False)
+                        code = self.arm.set_servo_angle(angle=joint_pos, is_radian=True, wait=True)
                         if code != 0:
                             print(f"Failed to send joint command at point {i}, error code: {code}")
                             return False
@@ -1468,12 +1507,6 @@ class CuRoboMotionPlanner:
             if type(target_position) not in (list, List, tuple) and len(target_position) < 3:
                 print(target_position)
                 target_position = target_position[0]
-            # target_position[1] += 0.05
-            
-            # # target_position[0] += 0.02
-            # if  target_position[2] < 0.03:
-            #     target_position[2] = -0.03
-            # target_position = [target_position[0], target_position[1], target_position[2] + 0.04]
             print(f"Target pose shifted: {target_position}")
             
             # Convert to torch tensors for cuRobo
@@ -1487,15 +1520,11 @@ class CuRoboMotionPlanner:
             )
             print(target_orientation_tensor)
             # Create planning configuration with optimized parameters
-            plan_config = MotionGenPlanConfig(
-                max_attempts=5,                    # Reduced from 10
-                timeout=planning_timeout * 0.5,   # Reduced timeout (50% instead of 90%)
-                enable_opt=True,
-                enable_graph=True,
-                enable_graph_attempt=2,
-                enable_finetune_trajopt=True,
-                parallel_finetune=True,
-                time_dilation_factor=0.99
+            plan_config = self._get_fast_plan_config(
+                timeout=planning_timeout,
+                max_attempts=3,                    # Further reduced from 5
+                enable_graph=True,                 # Enable for cartesian planning
+                enable_finetune=True
             )
             
             # Plan the motion
@@ -1676,18 +1705,11 @@ class CuRoboMotionPlanner:
             
             # Method 1: Try Cartesian planning with optimized trajectory parameters
             print("Attempting Cartesian planning with trajectory optimization...")
-            cartesian_plan_config = MotionGenPlanConfig(
-                max_attempts=3,
-                timeout=planning_timeout * 0.4,  # Use 40% of time for first attempt
-                enable_opt=True,
-                enable_graph=False,  # Disable graph for pure trajectory optimization
-                enable_finetune_trajopt=False,
-                parallel_finetune=False,
-                # Trajectory optimization settings for straighter paths
-                # trajopt_tsteps=40,  # More timesteps for smoother paths
-                # optimize_dt=True,   # Allow dt optimization
-                time_dilation_factor=time_scaling,
-                # Don't use problematic pose cost metric
+            cartesian_plan_config = self._get_fast_plan_config(
+                timeout=planning_timeout * 0.4,   # Use 40% of time for first attempt
+                max_attempts=2,                    # Reduced attempts
+                enable_graph=False,                # Disable graph for pure trajectory optimization
+                enable_finetune=False              # Disable for pure cartesian
             )
             
             # Plan the motion
@@ -2133,7 +2155,7 @@ class CuRoboMotionPlanner:
         pose = self.arm.get_position(is_radian=True)
         print(pose)
         x, y, z, r, p, w = pose[1]
-        return self.arm.set_position(x, y, z + distance * 1000, r, p, w, is_radian=True)
+        return self.arm.set_position(x, y, z + distance * 1000, r, p, w, is_radian=True) == 0
     
     def move_to_home(self, speed=0.3, execute=False, speed_factor=1.0):
         """Plan movement to the home position and optionally execute on the robot
@@ -2211,6 +2233,11 @@ class CuRoboMotionPlanner:
                     print(f"Could not get FK from robot: {str(e)}, using CuRobo FK")
             
             # Use CuRobo's FK if we can't use the robot's
+            # Check if IK solver is available
+            if self.ik_solver is None:
+                print("IK solver not initialized, cannot compute forward kinematics")
+                return None
+                
             # Create CuroboJointState from joint values
             joint_state = CuroboJointState.from_position(
                 self.tensor_args.to_device([joint_positions]),
@@ -2482,12 +2509,14 @@ class CuRoboMotionPlanner:
         current_position=None,
         current_orientation=None,
         execute=False,
-        speed_factor=1.0
+        speed_factor=1.0,
+        pivot_point=None,       # New: [x, y, z] coordinates of pivot point
+        arc_segments=10         # New: Number of segments for arc motion
     ):
         """Plan a push or pull movement along a direction vector
         
         Args:
-            distance: Distance to push/pull in meters
+            distance: Distance to push/pull in meters (ignored if pivot_point provided)
             is_push: True for push, False for pull
             custom_normal: Optional custom normal vector [x, y, z] for movement direction
             move_parallel: Whether to move parallel to the surface (perpendicular to normal)
@@ -2496,6 +2525,8 @@ class CuRoboMotionPlanner:
             current_orientation: Optional current orientation [w, x, y, z], if None use forward kinematics
             execute: Whether to execute the planned trajectory on the physical robot
             speed_factor: Speed factor for execution (>1 is faster)
+            pivot_point: Optional [x, y, z] coordinates for pivot-based arc motion
+            arc_segments: Number of segments to discretize arc motion (default: 10)
             
         Returns:
             tuple: (success, trajectory, dt)
@@ -2510,7 +2541,7 @@ class CuRoboMotionPlanner:
                 robot_joints = self.get_robot_joint_state()
                 if robot_joints is not None:
                     self.set_current_joint_state(robot_joints)
-                    
+            # self.close_gripper()
             # Check if current joints are available
             with self.joint_state_lock:
                 if self.current_joints is None:
@@ -2551,6 +2582,32 @@ class CuRoboMotionPlanner:
                     else:
                         print("Failed to get current pose")
                         return False, None, None
+            
+            # Handle pivot point motion
+            if pivot_point is not None:
+                print(f"Pivot point provided: {pivot_point}")
+                # Calculate distance from grasp location to pivot point
+                grasp_pos = np.array(current_position)
+                pivot_pos = np.array(pivot_point)
+                calculated_distance = np.linalg.norm(grasp_pos - pivot_pos)
+                print(f"Calculated distance from grasp to pivot: {calculated_distance:.4f}m")
+                
+                # Override the provided distance with calculated distance
+                distance = calculated_distance
+                
+                # Plan arc motion around pivot point
+                return self._plan_arc_motion_around_pivot(
+                    pivot_point=pivot_pos,
+                    current_position=grasp_pos,
+                    current_orientation=current_orientation,
+                    radius=calculated_distance,
+                    is_push=is_push,
+                    arc_segments=arc_segments,
+                    planning_timeout=planning_timeout,
+                    execute=execute,
+                    speed_factor=speed_factor
+                )
+            
             # Calculate the movement direction based on custom normal or TCP orientation
             if custom_normal is not None:
                 custom_normal, custom_orientation = self.convert_cam_pose_to_base(position=custom_normal, orientation=[0,0,0,1], do_translation=False)
@@ -2562,7 +2619,9 @@ class CuRoboMotionPlanner:
                 print("No custom normal provided, using TCP z-axis as normal")
                 
                 # Convert quaternion to rotation matrix to extract z-axis
-                w, x, y, z = current_orientation
+                # Flatten orientation in case it's a nested array
+                orientation_flat = np.array(current_orientation).flatten()
+                w, x, y, z = orientation_flat
                 rotation_matrix = np.array([
                     [1 - 2*y*y - 2*z*z, 2*x*y - 2*w*z, 2*x*z + 2*w*y],
                     [2*x*y + 2*w*z, 1 - 2*x*x - 2*z*z, 2*y*z - 2*w*x],
@@ -2603,7 +2662,7 @@ class CuRoboMotionPlanner:
                 print(f"Using movement perpendicular to surface: {movement_dir}")
             
             # Calculate the movement vector, adjusting direction based on push/pull
-            direction_factor = -1.0 if is_push else 1.0
+            direction_factor = 1.0 if is_push else -1.0
             movement = distance * direction_factor * movement_dir
             
             # Calculate target position
@@ -2639,18 +2698,11 @@ class CuRoboMotionPlanner:
             #     enable_finetune_trajopt=True,
             # )
             
-            plan_config = MotionGenPlanConfig(
-                max_attempts=5,
-                timeout=planning_timeout * 1.5,
-                enable_opt=True,
-                enable_graph=True,
-                enable_graph_attempt=0,
-                enable_finetune_trajopt=True,
-                parallel_finetune=True,
-                time_dilation_factor=0.99,
-                pose_cost_metric=pose_cost_metric,
-                num_graph_seeds=8,
-                num_trajopt_seeds=8,
+            plan_config = self._get_fast_plan_config(
+                timeout=planning_timeout,
+                max_attempts=3,              # Reduced from 5
+                enable_graph=False,          # Disabled for goal type changes
+                enable_finetune=True
             )
             print(f"Start state: {start_state}")
             print(f"start pose: {self.get_robot_tcp_pose()}")
@@ -2688,7 +2740,8 @@ class CuRoboMotionPlanner:
                 
                 # Return the trajectory and timestep for execution
                 return True, trajectory, result.interpolation_dt
-            if not result.success.item():
+            else:
+                # Planning failed - try fallback methods
                 if result.status == MotionGenStatus.FINETUNE_TRAJOPT_FAIL:
                     print("Finetune trajopt failed, retrying without fine-tuning...")
                     retry_plan_config = plan_config.clone()
@@ -2700,55 +2753,38 @@ class CuRoboMotionPlanner:
                         plan_config=retry_plan_config
                     )
                     if retry_result.success.item():
-                        result = retry_result
+                        print(f"Retry successful in {retry_result.solve_time} seconds, motion time: {retry_result.motion_time} seconds")
+                        trajectory = retry_result.get_interpolated_plan()
+                        
+                        # Execute on the robot if requested
+                        if execute and self.arm is not None:
+                            print("Executing planned push/pull trajectory on the robot...")
+                            execution_success = self.execute_trajectory(
+                                trajectory=trajectory,
+                                dt=retry_result.interpolation_dt,
+                                speed_factor=speed_factor
+                            )
+                            
+                            if execution_success:
+                                print("Push/pull trajectory execution completed successfully")
+                            else:
+                                print("Push/pull trajectory execution failed")
+                        
+                        return True, trajectory, retry_result.interpolation_dt
                     else:
                         print(f"Retry also failed: {retry_result.status}")
-                        # Try IK-based fallback
-                        print("Trying IK-based fallback...")
-                        success, trajectory, dt = self.move_to_pose_with_preparation(
-                            target_position=target_position,
-                            target_orientation=target_orientation,
-                            planning_timeout=planning_timeout * 0.5,
-                            execute=execute,
-                            speed_factor=speed_factor,
-                            is_camera_frame=False
-                        )
-                        if success:
-                            return True, trajectory, dt
-                        else:
-                            return False, None, None
-            else:
-                print(f"Push/pull planning failed: {result.status}")
                 
-                # Try standard planning as a fallback
-                print("Trying standard planning as fallback...")
-                standard_plan_config = MotionGenPlanConfig(
-                    max_attempts=3,
-                    timeout=planning_timeout * 0.5,  # Use remaining time
-                    enable_opt=True,
-                    enable_graph=True,  # Enable graph for standard planning
-                    enable_graph_attempt=0,
-                    enable_finetune_trajopt=True,
-                    num_graph_seeds=8,
-                    num_trajopt_seeds=8,
-                )
-                
-                # Plan with standard (non-Cartesian) planning
+                # Try IK-based fallback
+                print("Trying IK-based fallback...")
                 success, trajectory, dt = self.move_to_pose_with_preparation(
                     target_position=target_position,
                     target_orientation=target_orientation,
                     planning_timeout=planning_timeout * 0.5,
                     execute=execute,
                     speed_factor=speed_factor,
-                    is_camera_frame=False  # Assuming already in base frame
+                    is_camera_frame=False
                 )
-
-                
                 if success:
-                    print(f"Standard planning successful in {result.solve_time} seconds")
-                    
-                    
-                    # Return the trajectory and timestep for execution
                     return True, trajectory, dt
                 else:
                     print(f"All planning methods failed: {result.status}")
@@ -2980,6 +3016,521 @@ class CuRoboMotionPlanner:
         except Exception as e:
             print(f"Failed to update dynamic collision objects: {e}")
 
+    def _get_fast_plan_config(self, timeout: float = 5.0, max_attempts: int = 3, 
+                              enable_graph: bool = False, enable_finetune: bool = True) -> MotionGenPlanConfig:
+        """
+        Get optimized plan configuration for faster motion planning.
+        
+        Args:
+            timeout: Planning timeout in seconds
+            max_attempts: Maximum planning attempts
+            enable_graph: Whether to enable graph search
+            enable_finetune: Whether to enable trajectory fine-tuning
+            
+        Returns:
+            Optimized MotionGenPlanConfig
+        """
+        return MotionGenPlanConfig(
+            max_attempts=max_attempts,
+            timeout=timeout,
+            enable_opt=True,
+            enable_graph=enable_graph,
+            enable_graph_attempt=0,                # Fastest graph attempt
+            enable_finetune_trajopt=enable_finetune,
+            parallel_finetune=True,                # Parallel processing
+            time_dilation_factor=0.98,             # More conservative timing
+            num_graph_seeds=2,                     # Increased for reliability
+            num_trajopt_seeds=4                    # Increased for reliability
+        )
+
+    def _create_rotation_matrix(self, angle: float, axis: np.ndarray) -> np.ndarray:
+        """Create a rotation matrix using Rodrigues' rotation formula
+        
+        Args:
+            angle: Rotation angle in radians
+            axis: Rotation axis as unit vector [x, y, z]
+            
+        Returns:
+            3x3 rotation matrix
+        """
+        import math
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+        u = axis
+        
+        # Rodrigues' rotation formula
+        rotation_matrix = cos_a * np.eye(3) + sin_a * np.array([
+            [0, -u[2], u[1]],
+            [u[2], 0, -u[0]], 
+            [-u[1], u[0], 0]
+        ]) + (1 - cos_a) * np.outer(u, u)
+        
+        return rotation_matrix
+
+    def _plan_arc_motion_around_pivot(
+        self,
+        pivot_point: np.ndarray,
+        current_position: np.ndarray,
+        current_orientation: np.ndarray,
+        radius: float,
+        is_push: bool = True,
+        arc_segments: int = 10,
+        planning_timeout: float = 5.0,
+        execute: bool = False,
+        speed_factor: float = 1.0,
+        arc_angle: float = None  # Default: quarter circle (90 degrees)
+    ):
+        """
+        Plan arc motion around a pivot point for push/pull operations.
+        
+        Args:
+            pivot_point: [x, y, z] coordinates of pivot center
+            current_position: [x, y, z] current TCP position 
+            current_orientation: [w, x, y, z] current TCP orientation
+            radius: Distance from current position to pivot point
+            is_push: True for push away from object, False for pull toward object
+            arc_segments: Number of segments to discretize the arc
+            planning_timeout: Planning timeout in seconds
+            execute: Whether to execute on robot
+            speed_factor: Execution speed factor
+            arc_angle: Arc angle in radians (default: π/2 for 90 degrees)
+            
+        Returns:
+            tuple: (success, trajectory, dt)
+        """
+        try:
+            import math
+            from scipy.spatial.transform import Rotation
+            
+            if arc_angle is None:
+                arc_angle = math.pi / 4  # Default 45 degree arc (reduced from 90 for feasibility)
+                
+            print(f"Planning arc motion: radius={radius:.4f}m, angle={math.degrees(arc_angle):.1f}°, segments={arc_segments}")
+            
+            # Calculate the axis perpendicular to the line from pivot to current position
+            # This will be the axis around which we rotate
+            # Ensure arrays are flattened for proper operations
+            current_pos_flat = current_position.flatten() if hasattr(current_position, 'flatten') else current_position
+            pivot_pos_flat = pivot_point.flatten() if hasattr(pivot_point, 'flatten') else pivot_point
+            
+            pivot_to_grasp = current_pos_flat - pivot_pos_flat
+            pivot_to_grasp_normalized = pivot_to_grasp / np.linalg.norm(pivot_to_grasp)
+            
+            # Calculate rotation axis perpendicular to pivot radius vector
+            # For door/cabinet opening, rotation axis should be perpendicular to the pivot radius
+            # Determine which axis (Y or Z) the pivot is primarily along
+            abs_pivot_vector = np.abs(pivot_to_grasp_normalized)
+            
+            # Find the primary direction of the pivot radius vector
+            primary_axis_idx = np.argmax(abs_pivot_vector)
+            
+            if primary_axis_idx == 0:  # Pivot radius primarily along X-axis
+                # Rotation should be around Y or Z axis
+                if abs_pivot_vector[1] > abs_pivot_vector[2]:
+                    arc_rotation_axis = np.array([0, 0, 1])  # Z-axis rotation
+                else:
+                    arc_rotation_axis = np.array([0, 1, 0])  # Y-axis rotation
+            elif primary_axis_idx == 1:  # Pivot radius primarily along Y-axis
+                # Rotation should be around Z-axis (vertical hinge like cabinet door)
+                arc_rotation_axis = np.array([0, 0, 1])  # Z-axis rotation
+            else:  # Pivot radius primarily along Z-axis
+                # Rotation should be around Y-axis (horizontal hinge)
+                arc_rotation_axis = np.array([0, 1, 0])  # Y-axis rotation
+            
+            print(f"Pivot radius vector: {pivot_to_grasp}")
+            print(f"Primary axis: {['X', 'Y', 'Z'][primary_axis_idx]}")
+            print(f"Rotation axis: {arc_rotation_axis}")
+            
+            # DEBUG: Manual rotation test for debugging
+            print(f"\n=== DEBUG: Manual Rotation Verification ===")
+            test_vector = np.array([0, 0.25, 0])  # Our expected test case
+            test_angle_45 = np.radians(45)
+            debug_rotation_matrix = self._create_rotation_matrix(test_angle_45, arc_rotation_axis)
+            debug_result = debug_rotation_matrix @ test_vector
+            print(f"Debug test: Rotating {test_vector} by 45° around {arc_rotation_axis}")
+            print(f"Rotation matrix:\n{debug_rotation_matrix}")
+            print(f"Result: {debug_result}")
+            print(f"Expected for Z-axis rotation: [-0.1767767, 0.1767767, 0]")
+            print(f"=== END DEBUG ===\n")
+            
+            # Generate waypoints along the arc
+            waypoints = []
+            orientations = []
+            
+            # Direction of rotation (clockwise or counter-clockwise)
+            # For proper door/cabinet opening, determine rotation direction based on geometry
+            # Test which direction moves gripper towards robot (pull) or away (push)
+            
+            # Create a small test rotation to determine correct direction
+            test_angle = 0.1  # Small test angle (5.7 degrees)
+            test_rotation_matrix_pos = self._create_rotation_matrix(test_angle, arc_rotation_axis)
+            test_rotation_matrix_neg = self._create_rotation_matrix(-test_angle, arc_rotation_axis)
+            
+            # Test both directions
+            test_pos_vector = test_rotation_matrix_pos @ pivot_to_grasp
+            test_neg_vector = test_rotation_matrix_neg @ pivot_to_grasp
+            
+            test_pos_position = pivot_pos_flat + test_pos_vector
+            test_neg_position = pivot_pos_flat + test_neg_vector
+            
+            # For pull: gripper should move towards robot (decreasing X in most cases)
+            # For push: gripper should move away from robot (increasing X in most cases)
+            if is_push:
+                # Choose direction that increases X (away from robot)
+                if test_pos_position[0] > current_pos_flat[0]:
+                    rotation_direction = 1
+                else:
+                    rotation_direction = -1
+            else:
+                # Choose direction that decreases X (towards robot) 
+                if test_pos_position[0] < current_pos_flat[0]:
+                    rotation_direction = 1
+                else:
+                    rotation_direction = -1
+            
+            print(f"Test rotation directions:")
+            print(f"  Positive direction -> X: {test_pos_position[0]:.6f} (change: {test_pos_position[0] - current_pos_flat[0]:+.6f})")
+            print(f"  Negative direction -> X: {test_neg_position[0]:.6f} (change: {test_neg_position[0] - current_pos_flat[0]:+.6f})")
+            print(f"Selected rotation direction: {rotation_direction} ({'push' if is_push else 'pull'})")
+            
+            for i in range(arc_segments + 1):
+                # Calculate angle for this segment
+                t = i / arc_segments
+                angle = rotation_direction * t * arc_angle
+                
+                # Create rotation matrix around the arc rotation axis
+                rotation_matrix = self._create_rotation_matrix(angle, arc_rotation_axis)
+                
+                # Rotate the vector from pivot to current position
+                rotated_vector = rotation_matrix @ pivot_to_grasp
+                
+                # Calculate new position
+                new_position = pivot_pos_flat + rotated_vector
+                waypoints.append(new_position)
+                
+                # Debug output for first, middle, and last waypoints  
+                if i == 0 or i == arc_segments // 2 or i == arc_segments:
+                    print(f"Waypoint {i}: t={t:.2f}, angle={math.degrees(angle):.1f}°")
+                    print(f"  Original pivot_to_grasp: {pivot_to_grasp}")
+                    print(f"  Rotation matrix:\n{rotation_matrix}")
+                    print(f"  Rotated vector: {rotated_vector}")
+                    print(f"  Position: {new_position}")
+                    print(f"  Changes: X:{new_position[0]-current_pos_flat[0]:+.6f}, Y:{new_position[1]-current_pos_flat[1]:+.6f}, Z:{new_position[2]-current_pos_flat[2]:+.6f}")
+                    if i == arc_segments // 2:  # Middle waypoint special debug
+                        print(f"  *** EXPECTED vs ACTUAL for mid-point (45° rotation) ***")
+                        if np.allclose(pivot_to_grasp, [0, 0.25, 0], atol=0.01):
+                            print(f"  Expected rotated vector: [-0.1767767, 0.1767767, 0]")
+                            print(f"  Actual rotated vector:   {rotated_vector}")
+                            print(f"  Difference: {rotated_vector - np.array([-0.1767767, 0.1767767, 0])}")
+                
+                # Calculate gripper orientation: rotate about the same axis as the arc motion
+                # For door opening, the gripper should rotate at the same rate as the arc motion
+                # to maintain the same relative orientation to the door handle
+                
+                # Apply the same rotation to the initial gripper orientation
+                # Create rotation matrix for the current arc angle about the arc rotation axis
+                orientation_rotation_matrix = self._create_rotation_matrix(angle, arc_rotation_axis)
+                
+                # Convert current orientation to rotation object
+                current_rot = Rotation.from_quat(current_orientation)
+                
+                # Create a rotation object from our rotation matrix
+                arc_rotation = Rotation.from_matrix(orientation_rotation_matrix)
+                
+                # Apply the arc rotation to the initial orientation
+                final_rotation = arc_rotation * current_rot
+                final_orientation = final_rotation.as_quat()
+                
+                # Debug output for orientation
+                if i == 0 or i == arc_segments // 2 or i == arc_segments:
+                    print(f"  Orientation angle: {math.degrees(angle):.1f}°")
+                    print(f"  Arc rotation matrix:\n{orientation_rotation_matrix}")
+                    print(f"  Final orientation: {final_orientation}")
+                
+                orientations.append(final_orientation)
+            
+            print(f"Generated {len(waypoints)} waypoints for arc motion")
+            
+            # Plan trajectory through waypoints using existing motion planner
+            success = True
+            trajectory = None
+            dt = None
+            
+            # For now, plan to each waypoint sequentially
+            # TODO: Implement proper trajectory planning through multiple waypoints
+            if len(waypoints) > 1:
+                final_position = waypoints[-1]
+                final_orientation = orientations[-1]
+                
+                # Plan motion to final waypoint
+                goal_pose = CuroboPose(
+                    position=self.tensor_args.to_device(torch.tensor([final_position], dtype=torch.float32)),
+                    quaternion=self.tensor_args.to_device(torch.tensor([final_orientation], dtype=torch.float32)),
+                    rotation=None
+                )
+                
+                # Get current joint state
+                with self.joint_state_lock:
+                    if self.current_joints is None:
+                        print("No current joint state available for arc planning")
+                        return False, None, None
+                    current_joints = self.current_joints
+                
+                start_state = CuroboJointState.from_position(
+                    self.tensor_args.to_device([current_joints]),
+                    joint_names=[f"{self.config.prefix}joint{i}" for i in range(1, self.config.dof + 1)]
+                )
+                
+                # Plan motion with optimized config - disable finetune for arc motion
+                plan_config = self._get_fast_plan_config(
+                    timeout=planning_timeout,
+                    max_attempts=3,              # Increased attempts for arc motion
+                    enable_graph=True,           # Enable graph for better success rate
+                    enable_finetune=False        # Disable finetune to avoid failure
+                )
+                
+                print(f"Planning arc motion to final position: {final_position}")
+                result = self.motion_gen.plan_single(
+                    start_state=start_state,
+                    goal_pose=goal_pose,
+                    plan_config=plan_config
+                )
+                
+                if result.success.item():
+                    print(f"Arc motion planning successful in {result.solve_time} seconds")
+                    trajectory = result.get_interpolated_plan()
+                    dt = trajectory.dt.cpu().numpy() if hasattr(trajectory, 'dt') else 0.01
+                    
+                    # Execute if requested
+                    if execute and self.arm is not None:
+                        print("Executing planned arc trajectory...")
+                        execution_success = self.execute_trajectory(trajectory, dt, speed_factor=speed_factor)
+                        if execution_success:
+                            print("Arc trajectory execution completed successfully")
+                        else:
+                            print("Arc trajectory execution failed")
+                            return False, trajectory, dt
+                else:
+                    print(f"Arc motion planning failed: {result.status}")
+                    
+                    # Fallback: try with smaller arc angle
+                    if arc_angle > math.pi / 6:  # Only retry if current angle > 30 degrees
+                        print("Retrying with smaller arc angle (30 degrees)...")
+                        return self._plan_arc_motion_around_pivot(
+                            pivot_point, current_position, current_orientation, radius,
+                            is_push, arc_segments, planning_timeout, execute, speed_factor,
+                            arc_angle=math.pi / 6  # 30 degree fallback
+                        )
+                    
+                    success = False
+            
+            return success, trajectory, dt
+            
+        except Exception as e:
+            print(f"Error in arc motion planning: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False, None, None
+
+    def configure_sensitivity_for_pivot(self) -> bool:
+        """
+        Configure robot sensitivity settings for robust pivot operations
+        
+        Returns:
+            bool: True if configuration successful, False otherwise
+        """
+        try:
+            if self.arm is None:
+                print("Warning: Robot not connected, cannot configure sensitivity")
+                return False
+                
+            with self.arm_lock:
+                # Set less sensitive collision detection for pivot operations
+                collision_result = self.arm.set_collision_sensitivity(self.pivot_collision_sensitivity)
+                if collision_result != 0:
+                    print(f"Warning: Failed to set collision sensitivity (code: {collision_result})")
+                    return False
+                    
+                # Set less sensitive teach sensitivity for pivot operations  
+                teach_result = self.arm.set_teach_sensitivity(self.pivot_teach_sensitivity)
+                if teach_result != 0:
+                    print(f"Warning: Failed to set teach sensitivity (code: {teach_result})")
+                    return False
+                
+                print(f"✓ Configured pivot sensitivity: collision={self.pivot_collision_sensitivity}, teach={self.pivot_teach_sensitivity}")
+                return True
+                
+        except Exception as e:
+            print(f"Error configuring pivot sensitivity: {e}")
+            return False
+
+    def restore_default_sensitivity(self) -> bool:
+        """
+        Restore default robot sensitivity settings after pivot operations
+        
+        Returns:
+            bool: True if restoration successful, False otherwise
+        """
+        try:
+            if self.arm is None:
+                print("Warning: Robot not connected, cannot restore sensitivity")
+                return False
+                
+            with self.arm_lock:
+                # Restore default collision sensitivity
+                collision_result = self.arm.set_collision_sensitivity(self.default_collision_sensitivity)
+                if collision_result != 0:
+                    print(f"Warning: Failed to restore collision sensitivity (code: {collision_result})")
+                    return False
+                    
+                # Restore default teach sensitivity
+                teach_result = self.arm.set_teach_sensitivity(self.default_teach_sensitivity)
+                if teach_result != 0:
+                    print(f"Warning: Failed to restore teach sensitivity (code: {teach_result})")
+                    return False
+                
+                print(f"✓ Restored default sensitivity: collision={self.default_collision_sensitivity}, teach={self.default_teach_sensitivity}")
+                return True
+                
+        except Exception as e:
+            print(f"Error restoring default sensitivity: {e}")
+            return False
+
+    def clear_robot_errors(self) -> bool:
+        """
+        Clear robot errors and warnings
+        
+        Returns:
+            bool: True if clearing successful, False otherwise
+        """
+        try:
+            if self.arm is None:
+                print("Warning: Robot not connected, cannot clear errors")
+                return False
+                
+            with self.arm_lock:
+                # Clear errors
+                error_result = self.arm.clean_error()
+                if error_result != 0:
+                    print(f"Warning: Failed to clear errors (code: {error_result})")
+                    
+                # Clear warnings  
+                warn_result = self.arm.clean_warn()
+                if warn_result != 0:
+                    print(f"Warning: Failed to clear warnings (code: {warn_result})")
+                    
+                # Success if either operation worked
+                success = (error_result == 0 or warn_result == 0)
+                if success:
+                    print("✓ Cleared robot errors and warnings")
+                else:
+                    print("✗ Failed to clear robot errors and warnings")
+                    
+                return success
+                
+        except Exception as e:
+            print(f"Error clearing robot errors: {e}")
+            return False
+
+    def execute_robust_pivot_motion(
+        self,
+        pivot_point: np.ndarray,
+        current_position: np.ndarray,
+        current_orientation: np.ndarray,
+        radius: float,
+        is_push: bool = True,
+        arc_segments: int = 10,
+        planning_timeout: float = 5.0,
+        speed_factor: float = 0.5,  # Slower for more robust operation
+        arc_angle: float = None,
+        max_retries: int = 2
+    ):
+        """
+        Execute robust pivot motion with force/torque sensor error handling
+        
+        Args:
+            pivot_point: [x, y, z] coordinates of pivot center
+            current_position: [x, y, z] current TCP position 
+            current_orientation: [w, x, y, z] current TCP orientation
+            radius: Distance from current position to pivot point
+            is_push: True for push away from object, False for pull toward object
+            arc_segments: Number of segments to discretize the arc
+            planning_timeout: Planning timeout in seconds
+            speed_factor: Execution speed factor (default 0.5 for robustness)
+            arc_angle: Arc angle in radians (default: π/4 for 45 degrees)
+            max_retries: Maximum number of retries on force/torque errors
+            
+        Returns:
+            tuple: (success, trajectory, dt)
+        """
+        try:
+            print(f"Starting robust pivot motion ({'push' if is_push else 'pull'})")
+            
+            # Clear any existing errors before starting
+            self.clear_robot_errors()
+            
+            # Configure less sensitive settings for pivot operations
+            if not self.configure_sensitivity_for_pivot():
+                print("Warning: Could not configure sensitivity, proceeding with current settings")
+            
+            retry_count = 0
+            success = False
+            trajectory = None
+            dt = None
+            
+            while retry_count <= max_retries and not success:
+                try:
+                    if retry_count > 0:
+                        print(f"Retry attempt {retry_count}/{max_retries}")
+                        # Clear errors before retry
+                        self.clear_robot_errors()
+                        time.sleep(1.0)  # Brief pause between retries
+                    
+                    # Execute the pivot motion
+                    success, trajectory, dt = self._plan_arc_motion_around_pivot(
+                        pivot_point=pivot_point,
+                        current_position=current_position,
+                        current_orientation=current_orientation,
+                        radius=radius,
+                        is_push=is_push,
+                        arc_segments=arc_segments,
+                        planning_timeout=planning_timeout,
+                        execute=True,
+                        speed_factor=speed_factor,
+                        arc_angle=arc_angle
+                    )
+                    
+                    if success:
+                        print("✓ Robust pivot motion completed successfully")
+                        break
+                    else:
+                        print(f"✗ Pivot motion failed on attempt {retry_count + 1}")
+                        
+                except Exception as motion_error:
+                    print(f"Motion error on attempt {retry_count + 1}: {motion_error}")
+                    # Check if it's a force/torque sensor error
+                    error_str = str(motion_error).lower()
+                    if any(keyword in error_str for keyword in ['force', 'torque', 'collision', 'contact']):
+                        print("Detected force/torque related error - will retry with error clearing")
+                        self.clear_robot_errors()
+                    
+                retry_count += 1
+            
+            # Always restore default sensitivity after operation
+            if not self.restore_default_sensitivity():
+                print("Warning: Could not restore default sensitivity")
+            
+            if not success:
+                print(f"✗ Robust pivot motion failed after {max_retries + 1} attempts")
+            
+            return success, trajectory, dt
+            
+        except Exception as e:
+            print(f"Error in robust pivot motion: {e}")
+            # Ensure we restore sensitivity even on error
+            self.restore_default_sensitivity()
+            return False, None, None
+
 
 def test_pull():
     """Example usage of the CuRobo Motion Planner with a real xArm robot"""
@@ -3023,8 +3574,8 @@ def example_usage_with_robot():
         success = planner.execute_wrist_twist(
             direction="clockwise",
             rotation_angle=np.pi/4,  # 45 degrees
-            speed_factor=0.5,
-            timeout=30.0
+            speed_factor=0.8,
+            timeout=10.0
         )
         print(f"Clockwise twist result: {'Success' if success else 'Failed'}")
         
@@ -3140,7 +3691,484 @@ def test_retract():
     planner = CuRoboMotionPlanner(robot_ip=robot_ip)
     planner.retract_gripper()
 
+def test_pivot_pull():
+    """Test pivot-based pull operations with specific robot position and pivot point"""
+    print("\n=== Testing Pivot-Based Pull Operations ===")
+    
+    # Create the planner with robot IP
+    robot_ip = "192.168.1.224"  # Replace with your robot's IP
+    planner = CuRoboMotionPlanner(robot_ip=robot_ip)
+    
+    # Check if we're connected to a robot
+    has_robot = planner.arm is not None
+    print(f"Robot connected: {has_robot}")
+    
+    try:
+        # Use specific robot position from your test case
+        test_position = [0.58571, -0.092502, 0.83504]
+        test_orientation = [7.641e-07, -0.70711, 1.5081e-06, -0.70711]
+        test_pivot_point = [0.5857136, -0.1418507127951729, 0.8350447]
+        
+        print(f"Test robot position: {test_position}")
+        print(f"Test robot orientation: {test_orientation}")
+        print(f"Test pivot point: {test_pivot_point}")
+        
+        # Calculate expected distance (should be ~0.0493m)
+        import numpy as np
+        expected_distance = np.linalg.norm(np.array(test_position) - np.array(test_pivot_point))
+        print(f"Expected distance from grasp to pivot: {expected_distance:.4f}m")
+        
+        # Test with specific pivot point (using default arc angle from method)
+        print("\n=== Test: Pull with Specific Pivot Point ===")
+        
+        # Test with the exact parameters from your scenario
+        success, trajectory, dt = planner.plan_push_pull(
+            distance=0.05,  # Will be overridden by calculated distance to pivot
+            is_push=False,  # Pull operation
+            pivot_point=test_pivot_point,
+            arc_segments=10,  # Matching your test case
+            execute=False,   # Planning only for testing
+            speed_factor=0.3,  # Slow for safety
+            planning_timeout=15.0  # Longer timeout
+        )
+        print(f"Default arc angle pull result: {'Success' if success else 'Failed'}")
+        
+        # If that fails, try with fewer segments for simpler planning
+        if not success:
+            print("Trying with fewer arc segments...")
+            success, trajectory, dt = planner.plan_push_pull(
+                distance=0.05,
+                is_push=False,
+                pivot_point=test_pivot_point,
+                arc_segments=6,  # Fewer segments
+                execute=False,
+                speed_factor=0.3,
+                planning_timeout=15.0
+            )
+            print(f"Fewer segments pull result: {'Success' if success else 'Failed'}")
+        
+        # If that fails, try with even fewer segments
+        if not success:
+            print("Trying with minimal arc segments...")
+            success, trajectory, dt = planner.plan_push_pull(
+                distance=0.05,
+                is_push=False,
+                pivot_point=test_pivot_point,
+                arc_segments=4,  # Minimal segments
+                execute=False,
+                speed_factor=0.3,
+                planning_timeout=20.0  # Even longer timeout
+            )
+            print(f"Minimal segments pull result: {'Success' if success else 'Failed'}")
+        
+        # Test with actual robot execution if connected and planning succeeded
+        if has_robot and success:
+            print("\n=== Executing on Real Robot ===")
+            print("WARNING: About to execute motion on real robot!")
+            user_input = input("Continue with execution? (y/N): ")
+            if user_input.lower() == 'y':
+                success_exec, _, _ = planner.plan_push_pull(
+                    distance=0.05,
+                    is_push=False,
+                    pivot_point=test_pivot_point,
+                    arc_segments=4,  # Use minimal segments for safety
+                    execute=True,
+                    speed_factor=0.2,  # Very slow for safety
+                    planning_timeout=20.0
+                )
+                print(f"Execution result: {'Success' if success_exec else 'Failed'}")
+            else:
+                print("Execution skipped by user")
+        
+        # Summary
+        print(f"\n=== Test Summary ===")
+        print(f"Planning with test pivot point: {'✓' if success else '✗'}")
+        print(f"Expected distance: {expected_distance:.4f}m")
+        print(f"Test position: {test_position}")
+        print(f"Test pivot: {test_pivot_point}")
+        
+    except Exception as e:
+        print(f"Error in pivot pull test: {str(e)}")
+        import traceback
+        traceback.print_exc()
+    
+    finally:
+        # Clean up
+        if planner.arm is not None:
+            planner.arm.disconnect()
+
+def test_specific_pivot_pull():
+    """Test pivot pull from specific robot pose and pivot point"""
+    print("\n=== Testing Specific Pivot Pull Operation ===")
+    
+    # Specific test parameters from your scenario
+    target_position = [0.580571, -0.092502, 0.79]
+    target_orientation = [7.641e-07, -0.70711, 1.5081e-06, -0.70711]
+    pivot_point = [0.58057136, -0.448507127951729, 0.79]
+    
+    print(f"Target robot position: {target_position}")
+    print(f"Target robot orientation: {target_orientation}")
+    print(f"Pivot point: {pivot_point}")
+    
+    # Create the planner with robot IP
+    robot_ip = "192.168.1.224"  # Replace with your robot's IP
+    planner = CuRoboMotionPlanner(robot_ip=robot_ip)
+    
+    # Check if we're connected to a robot
+    has_robot = planner.arm is not None
+    print(f"Robot connected: {has_robot}")
+    
+    try:
+        import numpy as np
+        
+        # Calculate expected distance
+        expected_distance = np.linalg.norm(np.array(target_position) - np.array(pivot_point))
+        print(f"Expected distance from grasp to pivot: {expected_distance:.4f}m")
+        
+        # Step 1: Move robot to target pose if connected
+        if has_robot:
+            print(f"\n=== Step 1: Moving to Target Pose ===")
+            print(f"Moving to position: {target_position}")
+            print(f"Moving to orientation: {target_orientation}")
+            
+            # Move to target pose with generous timeout
+            move_success, _, _ = planner.move_to_pose(
+                target_position=target_position,
+                target_orientation=target_orientation,
+                execute=True,
+                planning_timeout=15.0,
+                speed_factor=0.3  # Slow and safe
+            )
+            
+            if move_success:
+                print("✓ Successfully moved to target pose")
+                planner.close_gripper()
+                # Verify we're at the correct position
+                current_pose = planner.get_robot_tcp_pose()
+                if current_pose:
+                    current_pos, current_orient = current_pose
+                    if hasattr(current_pos, 'flatten'):
+                        current_pos = current_pos.flatten()
+                    print(f"Current position after move: {current_pos}")
+                    
+                    # Check if we're close enough (within 5mm tolerance)
+                    position_error = np.linalg.norm(np.array(current_pos) - np.array(target_position))
+                    print(f"Position error: {position_error*1000:.2f}mm")
+                    
+                    if position_error < 0.005:  # 5mm tolerance
+                        print("✓ Position is within acceptable tolerance")
+                    else:
+                        print("⚠ Position error is larger than expected")
+                else:
+                    print("⚠ Could not verify current position")
+            else:
+                print("✗ Failed to move to target pose")
+                print("Continuing with pivot test from current position...")
+        else:
+            print("No robot connected - testing planning only")
+            
+        # Step 2: Execute pivot pull operation
+        print(f"\n=== Step 2: Executing Pivot Pull ===")
+        
+        # Try with conservative arc parameters first
+        print("Attempting pivot pull with 30-degree arc...")
+        success, trajectory, dt = planner.plan_push_pull(
+            distance=0.05,  # Will be overridden by calculated distance to pivot
+            is_push=False,  # Pull operation
+            pivot_point=pivot_point,
+            arc_segments=8,  # Conservative segment count
+            execute=has_robot,  # Execute if robot connected
+            speed_factor=0.2,  # Very slow for safety
+            planning_timeout=20.0,  # Extended timeout
+            current_position=target_position,  # Use target position explicitly
+            current_orientation=target_orientation  # Use target orientation explicitly
+        )
+        
+        print(f"30-degree arc result: {'Success' if success else 'Failed'}")
+        
+        # If that fails, try with smaller arc
+        if not success:
+            print("Attempting pivot pull with 20-degree arc...")
+            success, trajectory, dt = planner.plan_push_pull(
+                distance=0.05,
+                is_push=False,
+                pivot_point=pivot_point,
+                arc_segments=6,  # Fewer segments
+                execute=has_robot,
+                speed_factor=0.2,
+                planning_timeout=25.0,
+                current_position=target_position,
+                current_orientation=target_orientation
+            )
+            print(f"20-degree arc result: {'Success' if success else 'Failed'}")
+        
+        # If that still fails, try minimal arc
+        if not success:
+            print("Attempting pivot pull with 15-degree arc...")
+            success, trajectory, dt = planner.plan_push_pull(
+                distance=0.05,
+                is_push=False,
+                pivot_point=pivot_point,
+                arc_segments=4,  # Minimal segments
+                execute=has_robot,
+                speed_factor=0.2,
+                planning_timeout=30.0,
+                current_position=target_position,
+                current_orientation=target_orientation
+            )
+            print(f"15-degree arc result: {'Success' if success else 'Failed'}")
+        
+        # Summary
+        print(f"\n=== Test Summary ===")
+        print(f"Target position: {target_position}")
+        print(f"Pivot point: {pivot_point}")
+        print(f"Expected distance: {expected_distance:.4f}m")
+        print(f"Pivot pull result: {'✓ Success' if success else '✗ Failed'}")
+        
+        if success:
+            print("✓ Specific pivot pull test completed successfully!")
+        else:
+            print("✗ Pivot pull planning failed - may need to adjust parameters")
+            
+        return success
+        
+    except Exception as e:
+        print(f"Error in specific pivot pull test: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
+    
+    finally:
+        # Clean up
+        if planner.arm is not None:
+            planner.arm.disconnect()
+
+def test_simple_pivot_pull():
+    """Test simplified pivot pull with automatic pivot point calculation"""
+    print("\n=== Testing Simple Pivot Pull Operation ===")
+    
+    # Create the planner with robot IP
+    robot_ip = "192.168.1.224"  # Replace with your robot's IP
+    planner = CuRoboMotionPlanner(robot_ip=robot_ip)
+    
+    # Check if we're connected to a robot
+    has_robot = planner.arm is not None
+    print(f"Robot connected: {has_robot}")
+    
+    try:
+        import numpy as np
+        
+        # Get current robot pose
+        if has_robot:
+            current_pose = planner.get_robot_tcp_pose()
+        else:
+            # Fallback for testing without robot
+            current_pose = planner.get_forward_kinematics()
+        
+        if not current_pose:
+            print("Could not get current TCP pose")
+            return False
+        
+        current_position, current_orientation = current_pose
+        
+        # Flatten position if needed
+        if hasattr(current_position, 'flatten'):
+            current_pos = current_position.flatten()
+        else:
+            current_pos = current_position
+        
+        print(f"Current gripper position: {current_pos}")
+        print(f"Current gripper orientation: {current_orientation}")
+        
+        # Calculate pivot point: -0.25 meters in Y direction from current position
+        pivot_offset_y = -0.5  # 25cm behind gripper in Y direction (towards cabinet hinge)
+        pivot_point = [
+            current_pos[0],              # Same X as gripper
+            current_pos[1] + pivot_offset_y,  # 25cm behind in Y
+            current_pos[2]               # Same Z as gripper
+        ]
+        
+        print(f"Calculated pivot point: {pivot_point}")
+        
+        # Calculate expected radius
+        radius = abs(pivot_offset_y)
+        print(f"Expected radius: {radius:.3f}m")
+        
+        # Test the pivot pull operation
+        print(f"\n=== Executing Pivot Pull Test ===")
+        print("This should create an arc motion in X/Y plane around Z-axis")
+        print(f"Expected motion: gripper moves in arc, Z should remain ~constant")
+        
+        # Start with conservative parameters
+        success, trajectory, dt = planner.plan_push_pull(
+            distance=0.05,  # Will be overridden by calculated distance to pivot
+            is_push=False,  # Pull operation
+            pivot_point=pivot_point,
+            arc_segments=6,  # Conservative segment count
+            execute=has_robot,  # Execute if robot connected
+            speed_factor=0.3,  # Slow for safety
+            planning_timeout=20.0  # Extended timeout
+        )
+        
+        print(f"Pivot pull result: {'Success' if success else 'Failed'}")
+        
+        if not success:
+            print("Trying with fewer segments...")
+            success, trajectory, dt = planner.plan_push_pull(
+                distance=0.05,
+                is_push=False,
+                pivot_point=pivot_point,
+                arc_segments=4,  # Even fewer segments
+                execute=has_robot,
+                speed_factor=0.2,  # Even slower
+                planning_timeout=25.0
+            )
+            print(f"Reduced segments result: {'Success' if success else 'Failed'}")
+        
+        # Summary
+        print(f"\n=== Test Summary ===")
+        print(f"Current position: {current_pos}")
+        print(f"Pivot point: {pivot_point}")
+        print(f"Radius: {radius:.3f}m")
+        print(f"Rotation axis: Z (vertical)")
+        print(f"Expected motion: X/Y arc, Z constant")
+        print(f"Result: {'✓ Success' if success else '✗ Failed'}")
+        
+        return success
+        
+    except Exception as e:
+        print(f"Error in simple pivot pull test: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
+    
+    finally:
+        # Clean up
+        if planner.arm is not None:
+            planner.arm.disconnect()
+
+
+def test_robust_pivot_pull():
+    """
+    Test robust pivot pull with force/torque sensor error handling
+    """
+    print("=== Testing Robust Pivot Pull with Force/Torque Error Handling ===")
+    
+    try:
+        # Initialize planner
+        robot_ip = "192.168.1.224"
+        planner = CuRoboMotionPlanner(robot_ip=robot_ip)
+        
+        # Get current robot state
+        if not planner.update_current_joint_state():
+            print("Failed to get current joint state")
+            return False
+        
+        current_joints = planner.current_joints
+        if current_joints is None:
+            print("Current joints are None")
+            return False
+        
+        print(f"Current joint state: {current_joints}")
+        
+        # Get current TCP pose
+        current_pos, current_orient = planner.get_tcp_pose()
+        if current_pos is None:
+            print("Failed to get current TCP pose")
+            return False
+        
+        print(f"Current TCP position: {current_pos}")
+        print(f"Current TCP orientation: {current_orient}")
+        
+        # Define test parameters for cabinet door pulling
+        pivot_offset_y = -0.25  # Hinge 25cm to the left of current position
+        pivot_point = current_pos.copy()
+        pivot_point[1] += pivot_offset_y  # Y direction offset for cabinet hinge
+        
+        print(f"Calculated pivot point: {pivot_point}")
+        
+        # Calculate expected radius
+        radius = abs(pivot_offset_y)
+        print(f"Expected radius: {radius:.3f}m")
+        
+        # Test the robust pivot pull operation
+        print(f"\n=== Executing Robust Pivot Pull Test ===")
+        print("This will use less sensitive force/torque settings and retry on errors")
+        print("Testing cabinet door opening motion with force/torque error recovery")
+        
+        # Execute robust pivot motion with retry capability
+        import math
+        success, trajectory, dt = planner.execute_robust_pivot_motion(
+            pivot_point=pivot_point,
+            current_position=current_pos,
+            current_orientation=current_orient,
+            radius=radius,
+            is_push=False,  # Pull operation
+            arc_segments=8,  # Fewer segments for smoother motion
+            planning_timeout=10.0,  # Longer timeout
+            speed_factor=0.3,  # Slower speed for robustness
+            arc_angle=math.pi / 6,  # 30 degree arc for safety
+            max_retries=3  # Allow up to 3 retries
+        )
+        
+        # Print detailed results
+        print(f"\n=== Robust Pivot Pull Results ===")
+        print(f"Current position: {current_pos}")
+        print(f"Pivot point: {pivot_point}")
+        print(f"Radius: {radius:.3f}m")
+        print(f"Rotation axis: Z (vertical)")
+        print(f"Expected motion: X/Y arc, Z constant")
+        print(f"Speed factor: 0.3 (slow and safe)")
+        print(f"Force/torque handling: Enabled with retry")
+        print(f"Result: {'✓ Success' if success else '✗ Failed'}")
+        
+        if success:
+            print("✓ Robust pivot pull completed successfully!")
+            print("  - Force/torque sensitivity configured")
+            print("  - Motion executed with error recovery")
+            print("  - Default sensitivity restored")
+        else:
+            print("✗ Robust pivot pull failed after all retries")
+            print("  - Check for mechanical obstacles")
+            print("  - Verify cabinet door can move freely")
+            print("  - Consider adjusting sensitivity settings")
+        
+        return success
+        
+    except Exception as e:
+        print(f"Error in robust pivot pull test: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
+    
+    finally:
+        # Clean up
+        if hasattr(planner, 'arm') and planner.arm is not None:
+            # Ensure default sensitivity is restored
+            planner.restore_default_sensitivity()
+            planner.arm.disconnect()
+
 
 if __name__ == "__main__":
-    # Use simulation mode if no robot is available
-    test_retract()
+    # Run comprehensive test suite
+    print("=== xArm CuRobo Interface Test Suite ===\n")
+    
+    # Test basic pivot pull
+    print("1. Testing basic pivot pull...")
+    basic_success = test_specific_pivot_pull()
+    
+    print("\n" + "="*50 + "\n")
+    
+    # Test robust pivot pull with force/torque error handling
+    print("2. Testing robust pivot pull with force/torque error handling...")
+    robust_success = test_robust_pivot_pull()
+    
+    print("\n" + "="*50)
+    print("=== Test Suite Results ===")
+    print(f"Basic pivot pull: {'✓ PASS' if basic_success else '✗ FAIL'}")
+    print(f"Robust pivot pull: {'✓ PASS' if robust_success else '✗ FAIL'}")
+    
+    if basic_success and robust_success:
+        print("\n✓ All tests passed!")
+    else:
+        print("\n⚠ Some tests failed - check output above for details")

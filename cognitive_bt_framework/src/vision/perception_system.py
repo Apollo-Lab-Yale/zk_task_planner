@@ -323,7 +323,7 @@ class PerceptionSystem:
                             if self.debug:
                                 print(f"Error processing mask {mask_idx}: {str(e)}")
                             continue
-                
+                print("Got masks")
                 # Create ObjectInfo with transformed coordinates
                 obj_info = ObjectInfo(
                     id=i,
@@ -338,8 +338,8 @@ class PerceptionSystem:
                 )
                 
                 # Continue with rest of processing...
-                obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=10, min_distance=50, apply_center_shift=True)
-                
+                obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=12, min_distance=40, apply_center_shift=True)
+                print("Detected regions of interest")
                 # DEBUG: Validate points of interest coordinates
                 if obj_info.points and 'pixel_coords' in obj_info.points:
                     print(f"DEBUG - Points of interest for detection {i} ({class_name}):")
@@ -484,7 +484,7 @@ class PerceptionSystem:
             min_distance: int = 50,
             visualize: bool = False,
             orb_params: Dict[str, Any] = None,  # Now used for contour parameters
-            apply_center_shift: bool = True  # Control center-shift behavior
+            apply_center_shift: bool = False  # Control center-shift behavior
         ) -> Dict[str, Any]:
             """
             Detect points of interest within a specific object mask.
@@ -521,17 +521,12 @@ class PerceptionSystem:
                 # Check if the object has a mask
                 if obj_info.mask is None:
                     if self.debug:
-                        print(f"No mask available for object '{obj_info.name}', generating one...")
+                        print(f"No mask available for object '{obj_info.name}', using bounding box...")
                     
-                    # Generate a mask if not available
-                    mask = self._generate_segmentation(image, obj_info)
-                    if mask is None:
-                        # Fallback to bounding box mask
-                        if self.debug:
-                            print("Using bounding box as fallback mask")
-                        x, y, w, h = obj_info.bbox
-                        mask = np.zeros(image.shape[:2], dtype=bool)
-                        mask[y:y+h, x:x+w] = True
+                    # Use bounding box directly instead of expensive segmentation for speed
+                    x, y, w, h = obj_info.bbox
+                    mask = np.zeros(image.shape[:2], dtype=bool)
+                    mask[y:y+h, x:x+w] = True
                 else:
                     mask = obj_info.mask
                 
@@ -546,17 +541,23 @@ class PerceptionSystem:
                     # Get depth data if available
                     depth_data = obj_info.depth_image if hasattr(obj_info, 'depth_image') else None
                     
-                    # Detect interaction points using the robust method
+                    # Skip depth data processing if not available to save time
+                    depth_data = None
+                    if hasattr(obj_info, 'depth_image') and obj_info.depth_image is not None:
+                        depth_data = obj_info.depth_image
+                    
+                    # Detect interaction points using the robust method with optimizations
                     interaction_points = self.interaction_detector.detect_interaction_points(
                         image=image,
                         mask=mask,
                         min_distance=min_distance,
                         obj_info=obj_info,
                         max_points=max_points,
-                        depth_data=obj_info.depth_image if hasattr(obj_info, 'depth_image') else None,
-                        apply_center_shift=apply_center_shift,     # Use parameter to control center shifting
-                        edge_threshold=15.0,         # Points within 15px of edge get shifted  
-                        shift_factor=0.4 
+                        depth_data=depth_data,
+                        apply_center_shift=apply_center_shift,
+                        edge_threshold=15.0,
+                        shift_factor=0.4,
+                        fast_mode=True  # Enable fast mode for better performance
                     )
                     
                     if self.debug:

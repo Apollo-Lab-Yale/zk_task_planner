@@ -4,7 +4,6 @@ import open3d as o3d
 from typing import Dict, List, Optional, Tuple
 import copy
 
-from cognitive_bt_framework.src.sim.robosuite.robosuite_sim import RobosuiteSimEnv
 from cognitive_bt_framework.src.vision.sam.fast_sam import FastSAMMaskGenerator, FastSAMConfig
 from cognitive_bt_framework.src.llm_interface.llm_interface_openai import LLMInterfaceOpenAI
 

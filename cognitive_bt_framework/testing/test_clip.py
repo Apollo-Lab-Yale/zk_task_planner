@@ -335,7 +335,6 @@ class OWLViTStateDetector:
 def test_detector():
     """Test script for OWLViTStateDetector"""
     import matplotlib.pyplot as plt
-    from cognitive_bt_framework.src.sim.robosuite.robosuite_sim import RobosuiteSimEnv
     
     # Initialize detector and simulation
     config = OWLViTStateConfig(

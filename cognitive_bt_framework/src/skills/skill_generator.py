@@ -217,39 +217,69 @@ class SkillGenerator:
 
 
      # Helper function to find optimal label position avoiding overlaps
-    def find_optimal_label_position(self, px, py, alpha_id, all_points, placed_labels, img_width, img_height):
+    def find_optimal_label_position(self, px, py, alpha_id, all_points, placed_labels, img_width, img_height, object_center=None):
         """
         Find the best position for a label that doesn't overlap with points or other labels.
-        Improved version with better overlap avoidance and more positioning options.
+        Prioritizes horizontal alignment from the point with comprehensive overlap avoidance.
+        Also considers object center to position labels on the appropriate side.
+        
+        Args:
+            px, py: Point coordinates
+            alpha_id: Label text
+            all_points: All point coordinates for overlap checking
+            placed_labels: Already placed label rectangles
+            img_width, img_height: Image dimensions
+            object_center: Optional tuple (cx, cy) representing object center
         """
         
         # Get label dimensions
-        label_bg_size = cv2.getTextSize(alpha_id, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]  # Slightly smaller font
-        label_width, label_height = label_bg_size[0] + 6, label_bg_size[1] + 6  # More padding
+        label_bg_size = cv2.getTextSize(alpha_id, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+        label_width, label_height = label_bg_size[0] + 6, label_bg_size[1] + 6
         
-        # Define more candidate positions in concentric circles around the point
-        base_distance = 25  # Base distance from point
-        distances = [base_distance, base_distance * 1.5, base_distance * 2, base_distance * 2.5]  # Multiple radii
+        # Define horizontal distances to try (prioritize closer horizontal positions)
+        horizontal_distances = [25, 35, 45, 60, 80, 100]  # Increasing distances
         
-        candidate_positions = []
+        # Determine preferred side based on object center
+        if object_center is not None:
+            cx, cy = object_center
+            # If point is to the left of center, prefer left side labels
+            # If point is to the right of center, prefer right side labels
+            point_is_left_of_center = px < cx
+            preferred_side = 'left' if point_is_left_of_center else 'right'
+        else:
+            # Default to right side if no object center provided
+            preferred_side = 'right'
         
-        # For each distance, try 8 directions
-        for distance in distances:
-            angles = [0, 45, 90, 135, 180, 225, 270, 315]  # 8 directions in degrees
-            for angle in angles:
-                rad = np.radians(angle)
-                offset_x = int(distance * np.cos(rad))
-                offset_y = int(distance * np.sin(rad))
+        # First, try strictly horizontal positions (preferred side first)
+        horizontal_candidates = []
+        
+        for distance in horizontal_distances:
+            if preferred_side == 'left':
+                # Left side (preferred when point is left of center)
+                label_x = px - distance - label_width
+                label_y = py - label_height // 2
+                horizontal_candidates.append((label_x, label_y, distance, 180, 'left'))
                 
-                label_x = px + offset_x
-                label_y = py + offset_y
+                # Right side (fallback)
+                label_x = px + distance
+                label_y = py - label_height // 2
+                horizontal_candidates.append((label_x, label_y, distance, 0, 'right'))
+            else:
+                # Right side (preferred when point is right of center or no center given)
+                label_x = px + distance
+                label_y = py - label_height // 2  # Center vertically with point
+                horizontal_candidates.append((label_x, label_y, distance, 0, 'right'))
                 
-                candidate_positions.append((offset_x, offset_y, label_x, label_y, distance, angle))
+                # Left side (fallback)
+                label_x = px - distance - label_width
+                label_y = py - label_height // 2
+                horizontal_candidates.append((label_x, label_y, distance, 180, 'left'))
         
+        # Check horizontal candidates first
         best_position = None
         best_score = -1
         
-        for offset_x, offset_y, label_x, label_y, distance, angle in candidate_positions:
+        for label_x, label_y, distance, _, direction in horizontal_candidates:
             # Check if label is within image bounds with margin
             margin = 10
             if (label_x < margin or label_y < margin or 
@@ -257,23 +287,21 @@ class SkillGenerator:
                 label_y + label_height > img_height - margin):
                 continue
             
-            # Check distance from all points with improved overlap detection
-            min_point_distance = float('inf')
+            # Check for point overlaps with enhanced collision detection
             point_overlap = False
+            min_point_distance = float('inf')
             
             for other_px, other_py in all_points:
                 # Calculate distance from label rectangle to point using proper rectangle-circle collision
-                # Find closest point on the rectangle to the circle center
                 closest_x = max(label_x, min(other_px, label_x + label_width))
                 closest_y = max(label_y, min(other_py, label_y + label_height))
                 
-                # Distance from closest point on rectangle to circle center
                 distance_to_rect = np.sqrt((closest_x - other_px)**2 + (closest_y - other_py)**2)
                 min_point_distance = min(min_point_distance, distance_to_rect)
                 
-                # Check if rectangle overlaps with circle (point has radius 10, need clearance)
+                # Enhanced clearance for better visual separation
                 point_radius = 10
-                required_clearance = 20  # Additional clearance
+                required_clearance = 25  # Increased clearance for better separation
                 if distance_to_rect < point_radius + required_clearance:
                     point_overlap = True
                     break
@@ -281,13 +309,13 @@ class SkillGenerator:
             if point_overlap:
                 continue
             
-            # Check overlap with all placed labels
+            # Check overlap with all placed labels with enhanced buffer
             has_overlap = False
             min_label_distance = float('inf')
             
             for placed_x, placed_y, placed_w, placed_h in placed_labels:
-                # Check for rectangle overlap with extra buffer
-                buffer = 5  # Minimum space between labels
+                # Enhanced buffer for better visual separation
+                buffer = 8  # Increased minimum space between labels
                 if not (label_x + label_width + buffer < placed_x or 
                     placed_x + placed_w + buffer < label_x or
                     label_y + label_height + buffer < placed_y or 
@@ -304,54 +332,169 @@ class SkillGenerator:
                                         (label_center_y - placed_center_y)**2)
                     min_label_distance = min(min_label_distance, center_dist)
             
-            # Score this position (higher is better)
             if has_overlap:
-                continue  # Skip overlapping positions entirely
+                continue
             
-            # Good position, score based on multiple factors
-            distance_score = min_point_distance  # Prefer further from points
+            # Score this position (higher is better)
+            distance_score = min_point_distance
             label_clearance_score = min_label_distance if min_label_distance != float('inf') else 100
             
-            # Prefer certain directions (right and bottom-right are usually best)
-            direction_preference = 0
-            if 315 <= angle <= 45 or angle == 0:  # Right side
-                direction_preference = 20
-            elif 45 < angle <= 135:  # Bottom side
-                direction_preference = 15
-            elif 135 < angle <= 225:  # Left side  
-                direction_preference = 5
-            else:  # Top side
-                direction_preference = 10
+            # Strong preference for horizontal alignment
+            horizontal_bonus = 50  # High bonus for horizontal positioning
             
-            # Prefer closer distances if possible
-            distance_penalty = distance / 10
+            # Prefer the side that matches object center position
+            if direction == preferred_side:
+                direction_preference = 40  # High bonus for preferred side
+            else:
+                direction_preference = 15  # Lower bonus for non-preferred side
             
-            score = distance_score + label_clearance_score + direction_preference - distance_penalty
+            # Prefer closer distances but not too close
+            distance_penalty = distance / 15
+            
+            score = distance_score + label_clearance_score + horizontal_bonus + direction_preference - distance_penalty
             
             if score > best_score:
                 best_score = score
+                offset_x = label_x - px
+                offset_y = label_y - py
                 best_position = (label_x, label_y, offset_x, offset_y)
         
-        # If no good position found, try a systematic grid search as fallback
+        # If no horizontal position works, try slightly angled positions
+        if best_position is None:
+            angled_candidates = []
+            
+            for distance in horizontal_distances:
+                # Try small angles from horizontal (±15°, ±30°)
+                for angle_deg in [-30, -15, 15, 30]:
+                    rad = np.radians(angle_deg)
+                    
+                    if preferred_side == 'left':
+                        # Left side with angle (preferred)
+                        offset_x = int(-distance * np.cos(rad))
+                        offset_y = int(distance * np.sin(rad))
+                        label_x = px + offset_x - label_width
+                        label_y = py + offset_y - label_height // 2
+                        angled_candidates.append((label_x, label_y, offset_x, offset_y, distance, angle_deg, 'left'))
+                        
+                        # Right side with angle (fallback)
+                        offset_x = int(distance * np.cos(rad))
+                        offset_y = int(distance * np.sin(rad))
+                        label_x = px + offset_x
+                        label_y = py + offset_y - label_height // 2
+                        angled_candidates.append((label_x, label_y, offset_x, offset_y, distance, angle_deg, 'right'))
+                    else:
+                        # Right side with angle (preferred)
+                        offset_x = int(distance * np.cos(rad))
+                        offset_y = int(distance * np.sin(rad))
+                        label_x = px + offset_x
+                        label_y = py + offset_y - label_height // 2
+                        angled_candidates.append((label_x, label_y, offset_x, offset_y, distance, angle_deg, 'right'))
+                        
+                        # Left side with angle (fallback)
+                        offset_x = int(-distance * np.cos(rad))
+                        offset_y = int(distance * np.sin(rad))
+                        label_x = px + offset_x - label_width
+                        label_y = py + offset_y - label_height // 2
+                        angled_candidates.append((label_x, label_y, offset_x, offset_y, distance, angle_deg, 'left'))
+            
+            # Check angled candidates
+            for label_x, label_y, offset_x, offset_y, distance, angle_deg, direction in angled_candidates:
+                margin = 10
+                if (label_x < margin or label_y < margin or 
+                    label_x + label_width > img_width - margin or 
+                    label_y + label_height > img_height - margin):
+                    continue
+                
+                # Check for point overlaps
+                point_overlap = False
+                min_point_distance = float('inf')
+                
+                for other_px, other_py in all_points:
+                    closest_x = max(label_x, min(other_px, label_x + label_width))
+                    closest_y = max(label_y, min(other_py, label_y + label_height))
+                    distance_to_rect = np.sqrt((closest_x - other_px)**2 + (closest_y - other_py)**2)
+                    min_point_distance = min(min_point_distance, distance_to_rect)
+                    
+                    point_radius = 10
+                    required_clearance = 25
+                    if distance_to_rect < point_radius + required_clearance:
+                        point_overlap = True
+                        break
+                
+                if point_overlap:
+                    continue
+                
+                # Check overlap with placed labels
+                has_overlap = False
+                min_label_distance = float('inf')
+                
+                for placed_x, placed_y, placed_w, placed_h in placed_labels:
+                    buffer = 8
+                    if not (label_x + label_width + buffer < placed_x or 
+                        placed_x + placed_w + buffer < label_x or
+                        label_y + label_height + buffer < placed_y or 
+                        placed_y + placed_h + buffer < label_y):
+                        has_overlap = True
+                        break
+                    else:
+                        label_center_x = label_x + label_width // 2
+                        label_center_y = label_y + label_height // 2
+                        placed_center_x = placed_x + placed_w // 2
+                        placed_center_y = placed_y + placed_h // 2
+                        center_dist = np.sqrt((label_center_x - placed_center_x)**2 + 
+                                            (label_center_y - placed_center_y)**2)
+                        min_label_distance = min(min_label_distance, center_dist)
+                
+                if has_overlap:
+                    continue
+                
+                # Score angled positions (lower than horizontal but still good)
+                distance_score = min_point_distance
+                label_clearance_score = min_label_distance if min_label_distance != float('inf') else 100
+                
+                # Bonus for being close to horizontal
+                angle_penalty = abs(angle_deg) / 5  # Penalty increases with angle
+                near_horizontal_bonus = 35  # Good bonus for near-horizontal
+                
+                # Prefer the side that matches object center position
+                if direction == preferred_side:
+                    direction_preference = 30  # High bonus for preferred side
+                else:
+                    direction_preference = 10  # Lower bonus for non-preferred side
+                distance_penalty = distance / 15
+                
+                score = distance_score + label_clearance_score + near_horizontal_bonus + direction_preference - angle_penalty - distance_penalty
+                
+                if score > best_score:
+                    best_score = score
+                    best_position = (label_x, label_y, offset_x, offset_y)
+        
+        # If still no good position found, try the grid search fallback
         if best_position is None:
             best_position = self._grid_search_label_position(
                 px, py, label_width, label_height, placed_labels, img_width, img_height, all_points
             )
         
-        # Final fallback: place to the right with offset to minimize overlap
+        # Final fallback: place on preferred side with vertical offset to minimize overlap
         if best_position is None:
-            # Find a y-offset that minimizes overlap
-            best_y_offset = -10
+            best_y_offset = 0
             min_overlap_count = float('inf')
             
-            for y_offset in range(-50, 51, 10):
-                label_x = px + 30
-                label_y = py + y_offset
+            # Use preferred side for final fallback
+            fallback_distance = 30
+            if preferred_side == 'left':
+                fallback_x = px - fallback_distance - label_width
+            else:
+                fallback_x = px + fallback_distance
+            
+            for y_offset in range(-50, 51, 5):  # Smaller steps for finer positioning
+                label_x = fallback_x
+                label_y = py + y_offset - label_height // 2
                 
                 if label_y < 0 or label_y + label_height > img_height:
                     continue
                 
-                # Check for point overlaps first
+                # Check for point overlaps
                 point_overlap = False
                 for other_px, other_py in all_points:
                     closest_x = max(label_x, min(other_px, label_x + label_width))
@@ -359,7 +502,7 @@ class SkillGenerator:
                     distance_to_rect = np.sqrt((closest_x - other_px)**2 + (closest_y - other_py)**2)
                     
                     point_radius = 10
-                    required_clearance = 20
+                    required_clearance = 25
                     if distance_to_rect < point_radius + required_clearance:
                         point_overlap = True
                         break
@@ -369,17 +512,20 @@ class SkillGenerator:
                     
                 overlap_count = 0
                 for placed_x, placed_y, placed_w, placed_h in placed_labels:
-                    if not (label_x + label_width < placed_x or 
-                        placed_x + placed_w < label_x or
-                        label_y + label_height < placed_y or 
-                        placed_y + placed_h < label_y):
+                    buffer = 8
+                    if not (label_x + label_width + buffer < placed_x or 
+                        placed_x + placed_w + buffer < label_x or
+                        label_y + label_height + buffer < placed_y or 
+                        placed_y + placed_h + buffer < label_y):
                         overlap_count += 1
                 
                 if overlap_count < min_overlap_count:
                     min_overlap_count = overlap_count
                     best_y_offset = y_offset
             
-            best_position = (px + 30, py + best_y_offset, 30, best_y_offset)
+            final_offset_x = fallback_x - px
+            final_offset_y = best_y_offset - label_height // 2
+            best_position = (fallback_x, py + best_y_offset - label_height // 2, final_offset_x, final_offset_y)
         
         return best_position
 
@@ -631,6 +777,21 @@ class SkillGenerator:
         points_img = image.copy()
 
         if points is not None and len(points) > 0:
+            # Calculate object center for label positioning
+            object_center = None
+            if obj_info.bbox is not None:
+                # Use bounding box center
+                bbox_x, bbox_y, bbox_w, bbox_h = obj_info.bbox
+                object_center = (bbox_x + bbox_w // 2, bbox_y + bbox_h // 2)
+            elif obj_info.mask is not None:
+                # Use mask centroid
+                y_coords, x_coords = np.where(obj_info.mask)
+                if len(y_coords) > 0:
+                    object_center = (int(np.mean(x_coords)), int(np.mean(y_coords)))
+            else:
+                # Use image center as fallback
+                object_center = (w // 2, h // 2)
+            
             # Collect all point coordinates for overlap checking
             all_point_coords = []
             placed_labels = []  # Track placed label positions
@@ -651,7 +812,7 @@ class SkillGenerator:
                 # Draw each point with improved positioning
                 for idx, i in enumerate(sorted_indices):
                     px, py = pixel_coords[i]
-                    score = scores[i]
+                    _ = scores[i]
                     point_id = ids[i]
                     
                     # Get color for this point (cycle through available colors)
@@ -672,7 +833,7 @@ class SkillGenerator:
                     
                     # Find optimal label position using improved algorithm
                     label_x, label_y, offset_x, offset_y = self.find_optimal_label_position(
-                        px, py, alpha_id, all_point_coords, placed_labels, w, h
+                        px, py, alpha_id, all_point_coords, placed_labels, w, h, object_center
                     )
                     
                     # Get label dimensions for tracking
@@ -761,7 +922,7 @@ class SkillGenerator:
                     
                     # Find optimal label position using improved algorithm
                     label_x, label_y, offset_x, offset_y = self.find_optimal_label_position(
-                        px, py, alpha_id, all_point_coords, placed_labels, w, h
+                        px, py, alpha_id, all_point_coords, placed_labels, w, h, object_center
                     )
                     
                     # Get label dimensions for tracking
@@ -850,7 +1011,7 @@ class SkillGenerator:
                     # Add depth scale information
                     if hasattr(obj_info, 'depth_scale') and obj_info.depth_scale:
                         # Convert to same units as RealSense (usually millimeters for display)
-                        depth_mm = depth * 1000  # Convert meters to mm
+                        _ = depth * 1000  # Convert meters to mm
                         min_mm = min_val * 1000
                         max_mm = max_val * 1000
                         
@@ -1146,7 +1307,7 @@ class SkillGenerator:
                     alpha_id = get_alpha_id(idx + 1)
                 
                 # Calculate surface area as percentage of total image
-                area_percentage = (np.sum(surface_mask) / (image.shape[0] * image.shape[1])) * 100
+                _ = (np.sum(surface_mask) / (image.shape[0] * image.shape[1])) * 100
                 
                 # Find centroid of the surface
                 y_coords, x_coords = np.where(surface_mask)
@@ -1155,10 +1316,10 @@ class SkillGenerator:
                     centroid_x = int(np.mean(x_coords))
                     
                     # Calculate normal for this surface
-                    normal = self._calculate_surface_normals(surface_mask, object_info.depth_image)
+                    _ = self._calculate_surface_normals(surface_mask, object_info.depth_image)
                     
                     # Normalize coordinates for description
-                    norm_x, norm_y = centroid_x / image.shape[1], centroid_y / image.shape[0]
+                    _, _ = centroid_x / image.shape[1], centroid_y / image.shape[0]
                     
                     desc = f"Surface {alpha_id}"
                     surface_descriptions.append(desc)
@@ -1257,9 +1418,15 @@ class SkillGenerator:
                     - Always orient the gripper's z-axis to maximize force transmission in the intended direction
                 - ensure your explainations cover all parameter and action selections in detail verify your understanding of parameters before selection
                 - when opening an object ensure its lid/ cover is completely removed from the top for example a bottle cap should be removed using "pull" or "retract_gripper"
-                - POINTS ARE COLOR CODED PAY ATTENTION TO WHERE THE POINT ACTUALLY IS
-                    in your explaination include why you selected a particular point and how you determined the associated label
-                    
+                - POINTS ARE COLOR CODED PAY ATTENTION TO WHERE THE POINT ACTUALLY IS. Points are also atatched to their label by a color matched line segment verify this line before selecting a label. 
+                    the correct label may not be the closest label to the point ensure you select the point label using the line and matching color to the point.
+                    in your explaination include why you selected a particular point and explain in detail the exact criteria you used to determin the label associated with the point
+                    this detail should include the color of the label or the line pointing from the label to the point or some combination of these and other criteria relating to the image, additionally include why this point
+                    is relevant to the current task / object and the features of the image/object you used to determine the component of the object that the point indicates. Object component explaination should include exact image details 
+                    that you used to determine the object component.
+                - push and pull actions when opening an object will usually be perpendicular with the surface.
+                - selected pivot points should always be different than the interaction point. the pivot point indicates the distance in the x direction of the image frame
+                that the robot needs to rotate about such that the pivot point is the center of the arc movement. For doors this should be the approximate x location of the hinges.
                 When in doubt, choose the best grounded option based on visible contact affordances and robot camera constraints (e.g., collision with the wrist camera).
 
                 Carefully verify label references and syntax. Output must be complete and syntactically valid.

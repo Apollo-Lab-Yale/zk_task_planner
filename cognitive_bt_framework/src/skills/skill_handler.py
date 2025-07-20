@@ -87,7 +87,8 @@ class SkillHandler:
         abstract_action: str, 
         target_object: str,
         image: np.ndarray,
-        depth_image: Optional[np.ndarray] = None
+        depth_image: Optional[np.ndarray] = None,
+        object_info: ObjectInfo = None
     ) -> Optional[InstantiatedSkill]:
         """
         Generate and instantiate a skill for the given action and object
@@ -102,11 +103,12 @@ class SkillHandler:
             Instantiated skill if successful, None otherwise
         """
         # Get object information from perception system
-        object_info = self.perception_system.detect_object(
-            target_object=target_object,
-            image=image,
-            depth_image=depth_image
-        )
+        if object_info is None:
+            object_info = self.perception_system.detect_object(
+                target_object=target_object,
+                image=image,
+                depth_image=depth_image
+            )
         
         if object_info is None:
             print(f"Could not detect object: {target_object}")
