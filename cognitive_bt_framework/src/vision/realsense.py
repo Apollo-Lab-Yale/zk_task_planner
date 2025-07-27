@@ -94,6 +94,12 @@ class Camera:
         self.colormap_index = 0
         self.clipping_distance_m = 3.0
         
+        # Camera orientation handling
+        self.camera_orientation = 0  # 0: normal, 90: rotated 90° clockwise, 180: upside down, 270: rotated 90° counterclockwise
+        self.save_orientation_results = True  # Enable saving orientation correction results
+        self.orientation_save_dir = "orientation_correction_results"
+        self.frame_count_for_saving = 0
+        
         # Mouse callback variables
         self.mouse_x = 0
         self.mouse_y = 0
@@ -373,16 +379,42 @@ class Camera:
         """
         Get the camera matrix for 3D projection of aligned depth data.
         This uses color intrinsics since depth is aligned to color.
+        Adjusts the principal point based on camera orientation.
         
         Returns:
             3x3 numpy array representing the camera matrix
         """
         if not hasattr(self, 'intrinsics') or self.intrinsics is None:
             return None
+        
+        # Get the original intrinsics
+        fx, fy = self.intrinsics.fx, self.intrinsics.fy
+        ppx, ppy = self.intrinsics.ppx, self.intrinsics.ppy
+        
+        # Adjust principal point based on rotation
+        if self.camera_orientation == 90:
+            # 90 degree clockwise rotation: swap and adjust coordinates
+            new_fx, new_fy = fy, fx
+            new_ppx = self.height - 1 - ppy
+            new_ppy = ppx
+        elif self.camera_orientation == 180:
+            # 180 degree rotation: invert coordinates
+            new_fx, new_fy = fx, fy
+            new_ppx = self.width - 1 - ppx
+            new_ppy = self.height - 1 - ppy
+        elif self.camera_orientation == 270:
+            # 270 degree clockwise rotation: swap and adjust coordinates
+            new_fx, new_fy = fy, fx
+            new_ppx = ppy
+            new_ppy = self.width - 1 - ppx
+        else:
+            # No rotation
+            new_fx, new_fy = fx, fy
+            new_ppx, new_ppy = ppx, ppy
             
         return np.array([
-            [self.intrinsics.fx, 0, self.intrinsics.ppx],
-            [0, self.intrinsics.fy, self.intrinsics.ppy],
+            [new_fx, 0, new_ppx],
+            [0, new_fy, new_ppy],
             [0, 0, 1]
         ])
     
@@ -472,6 +504,199 @@ class Camera:
                 print(f"Error getting current parameters: {e}")
         
         return params
+
+    def set_camera_orientation(self, orientation):
+        """
+        Set the camera orientation for image correction
+        
+        Args:
+            orientation: 0 (normal), 90 (rotated 90° clockwise), 180 (upside down), 270 (rotated 90° counterclockwise)
+        """
+        if orientation not in [0, 90, 180, 270]:
+            if self.debug:
+                print(f"Invalid orientation: {orientation}. Must be 0, 90, 180, or 270 degrees")
+            return False
+            
+        self.camera_orientation = orientation
+        if self.debug:
+            print(f"Camera orientation set to: {orientation} degrees")
+        return True
+    
+    def get_camera_orientation(self):
+        """Get the current camera orientation"""
+        return self.camera_orientation
+    
+    def set_save_orientation_results(self, enable=True, save_dir=None):
+        """
+        Enable or disable saving of orientation correction results
+        
+        Args:
+            enable: Whether to save results
+            save_dir: Custom directory for saving results (optional)
+        """
+        self.save_orientation_results = enable
+        if save_dir:
+            self.orientation_save_dir = save_dir
+        
+        if enable and self.debug:
+            print(f"Orientation result saving enabled. Results will be saved to: {self.orientation_save_dir}")
+        elif self.debug:
+            print("Orientation result saving disabled")
+    
+    def save_current_orientation_results(self):
+        """
+        Manually trigger saving of current frame's orientation correction results
+        Useful for debugging or testing specific frames
+        """
+        try:
+            frames = self.get_frames(use_averaging=False)
+            if frames is None:
+                if self.debug:
+                    print("No frames available to save orientation results")
+                return False
+            
+            # Get the uncorrected frames by calling the original processing
+            aligned_frames = self._frame_queue.get(timeout=1.0)
+            color_frame = aligned_frames.get_color_frame()
+            depth_frame = aligned_frames.get_depth_frame()
+            
+            if not color_frame or not depth_frame:
+                if self.debug:
+                    print("Could not get raw frames for orientation comparison")
+                return False
+            
+            original_color = np.asanyarray(color_frame.get_data())
+            processed_depth_frame = self._apply_post_processing(depth_frame)
+            original_depth = np.asanyarray(processed_depth_frame.get_data())
+            
+            # Apply rotation to get corrected images
+            corrected_color = self._rotate_image(original_color)
+            corrected_depth = self._rotate_image(original_depth)
+            
+            # Save the comparison
+            self._save_orientation_results(original_color, corrected_color, 
+                                         original_depth, corrected_depth)
+            
+            if self.debug:
+                print("Manual orientation results saved successfully")
+            return True
+            
+        except Exception as e:
+            if self.debug:
+                print(f"Error manually saving orientation results: {e}")
+            return False
+    
+    def _rotate_image(self, image):
+        """
+        Rotate image based on camera orientation to ensure it's right-side up
+        
+        Args:
+            image: Input image (color or depth)
+            
+        Returns:
+            Rotated image
+        """
+        if self.camera_orientation == 0:
+            return image
+        elif self.camera_orientation == 90:
+            return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+        elif self.camera_orientation == 180:
+            return cv2.rotate(image, cv2.ROTATE_180)
+        elif self.camera_orientation == 270:
+            return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        else:
+            return image
+    
+    def _save_orientation_results(self, original_color, corrected_color, original_depth, corrected_depth):
+        """
+        Save before/after images showing the results of orientation correction
+        
+        Args:
+            original_color: Original color image before rotation
+            corrected_color: Color image after rotation
+            original_depth: Original depth image before rotation  
+            corrected_depth: Depth image after rotation
+        """
+        try:
+            # Create output directory if it doesn't exist
+            os.makedirs(self.orientation_save_dir, exist_ok=True)
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            
+            # Create side-by-side comparison images
+            
+            # Color image comparison (convert BGR to RGB for consistent saving)
+            original_color_rgb = cv2.cvtColor(original_color, cv2.COLOR_BGR2RGB)
+            corrected_color_rgb = cv2.cvtColor(corrected_color, cv2.COLOR_BGR2RGB)
+            
+            # Resize images to same height if rotation changed dimensions
+            max_height = max(original_color_rgb.shape[0], corrected_color_rgb.shape[0])
+            if original_color_rgb.shape[0] != max_height:
+                scale = max_height / original_color_rgb.shape[0]
+                new_width = int(original_color_rgb.shape[1] * scale)
+                original_color_rgb = cv2.resize(original_color_rgb, (new_width, max_height))
+            if corrected_color_rgb.shape[0] != max_height:
+                scale = max_height / corrected_color_rgb.shape[0]
+                new_width = int(corrected_color_rgb.shape[1] * scale)
+                corrected_color_rgb = cv2.resize(corrected_color_rgb, (new_width, max_height))
+            
+            # Create side-by-side color comparison
+            color_comparison = np.hstack([original_color_rgb, corrected_color_rgb])
+            
+            # Add labels
+            cv2.putText(color_comparison, f"ORIGINAL (0°)", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            cv2.putText(color_comparison, f"CORRECTED ({self.camera_orientation}°)", 
+                       (original_color_rgb.shape[1] + 10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            
+            # Save color comparison (convert back to BGR for OpenCV saving)
+            color_filename = f"{self.orientation_save_dir}/color_orientation_{self.camera_orientation}deg_{timestamp}.png"
+            cv2.imwrite(color_filename, cv2.cvtColor(color_comparison, cv2.COLOR_RGB2BGR))
+            
+            # Depth image comparison (create colorized versions for visualization)
+            original_depth_colored = self.create_depth_colormap(original_depth)
+            corrected_depth_colored = self.create_depth_colormap(corrected_depth)
+            
+            # Convert depth colormaps to RGB for consistency
+            original_depth_rgb = cv2.cvtColor(original_depth_colored, cv2.COLOR_BGR2RGB)
+            corrected_depth_rgb = cv2.cvtColor(corrected_depth_colored, cv2.COLOR_BGR2RGB)
+            
+            # Resize depth images to same height if needed
+            max_height = max(original_depth_rgb.shape[0], corrected_depth_rgb.shape[0])
+            if original_depth_rgb.shape[0] != max_height:
+                scale = max_height / original_depth_rgb.shape[0]
+                new_width = int(original_depth_rgb.shape[1] * scale)
+                original_depth_rgb = cv2.resize(original_depth_rgb, (new_width, max_height))
+            if corrected_depth_rgb.shape[0] != max_height:
+                scale = max_height / corrected_depth_rgb.shape[0]
+                new_width = int(corrected_depth_rgb.shape[1] * scale)
+                corrected_depth_rgb = cv2.resize(corrected_depth_rgb, (new_width, max_height))
+            
+            # Create side-by-side depth comparison
+            depth_comparison = np.hstack([original_depth_rgb, corrected_depth_rgb])
+            
+            # Add labels to depth comparison
+            cv2.putText(depth_comparison, f"ORIGINAL (0°)", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            cv2.putText(depth_comparison, f"CORRECTED ({self.camera_orientation}°)", 
+                       (original_depth_rgb.shape[1] + 10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            
+            # Save depth comparison
+            depth_filename = f"{self.orientation_save_dir}/depth_orientation_{self.camera_orientation}deg_{timestamp}.png"
+            cv2.imwrite(depth_filename, cv2.cvtColor(depth_comparison, cv2.COLOR_RGB2BGR))
+            
+            if self.debug:
+                print(f"Saved orientation correction results:")
+                print(f"  Color: {color_filename}")
+                print(f"  Depth: {depth_filename}")
+                print(f"  Original shape: {original_color.shape}")
+                print(f"  Corrected shape: {corrected_color.shape}")
+                
+        except Exception as e:
+            if self.debug:
+                print(f"Error saving orientation results: {e}")
 
     def start(self) -> bool:
         """Start camera with verified resolution"""
@@ -660,7 +885,7 @@ class Camera:
                 time.sleep(0.1)
 
     def get_frames(self, use_averaging=True):
-        """Get frames with guaranteed correct resolution"""
+        """Get frames with guaranteed correct resolution and apply orientation correction"""
         try:
             aligned_frames = self._frame_queue.get(timeout=1.0)
 
@@ -687,7 +912,18 @@ class Camera:
                 else:
                     return None
 
-            return color_image, depth_image
+            # Apply orientation correction to both color and depth images
+            color_image_corrected = self._rotate_image(color_image)
+            depth_image_corrected = self._rotate_image(depth_image)
+            
+            # Save orientation correction results if enabled and rotation was applied
+            if (self.save_orientation_results and self.camera_orientation != 0 and 
+                self.frame_count_for_saving % 10 == 0):  # Save every 10th frame to avoid too many files
+                self._save_orientation_results(color_image, color_image_corrected, 
+                                             depth_image, depth_image_corrected)
+            
+            self.frame_count_for_saving += 1
+            return color_image_corrected, depth_image_corrected
 
         except queue.Empty:
             return None, None

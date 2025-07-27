@@ -98,6 +98,73 @@ class SkillGenerator:
             return cv2.imread(str(image_path))
         return None
 
+    def _create_mask_debug_image(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """
+        Create a debug visualization of the object mask overlay on the original image
+        
+        Args:
+            image: Original input image
+            mask: Binary mask of the detected object
+            
+        Returns:
+            Debug image with mask overlay
+        """
+        debug_img = image.copy()
+        h, w = image.shape[:2]
+        
+        # Ensure mask has same dimensions as image
+        if mask.shape[:2] != (h, w):
+            mask = cv2.resize(
+                mask.astype(np.uint8),
+                (w, h),
+                interpolation=cv2.INTER_NEAREST
+            ).astype(bool)
+        
+        # Create colored overlay for the mask
+        mask_overlay = np.zeros_like(debug_img, dtype=np.uint8)
+        mask_overlay[mask] = [0, 255, 0]  # Green overlay for detected object
+        
+        # Add overlay with transparency
+        debug_img = cv2.addWeighted(debug_img, 0.7, mask_overlay, 0.3, 0)
+        
+        # Add title
+        cv2.putText(
+            debug_img,
+            "Object Mask Debug",
+            (10, 30),
+            cv2.FONT_HERSHEY_DUPLEX,
+            0.7,
+            (255, 255, 255),
+            2
+        )
+        
+        # Add mask statistics
+        mask_area = np.sum(mask)
+        total_area = h * w
+        coverage_percent = (mask_area / total_area) * 100
+        
+        cv2.putText(
+            debug_img,
+            f"Mask Coverage: {coverage_percent:.1f}%",
+            (10, 60),
+            cv2.FONT_HERSHEY_DUPLEX,
+            0.5,
+            (255, 255, 255),
+            1
+        )
+        
+        cv2.putText(
+            debug_img,
+            f"Mask Area: {mask_area} pixels",
+            (10, 80),
+            cv2.FONT_HERSHEY_DUPLEX,
+            0.5,
+            (255, 255, 255),
+            1
+        )
+        
+        return debug_img
+
 
 
     def _project_normal_to_image(self, normal: Tuple[float, float, float], 
@@ -232,9 +299,9 @@ class SkillGenerator:
             object_center: Optional tuple (cx, cy) representing object center
         """
         
-        # Get label dimensions
-        label_bg_size = cv2.getTextSize(alpha_id, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-        label_width, label_height = label_bg_size[0] + 6, label_bg_size[1] + 6
+        # Get label dimensions - using COMPLEX font for better readability (Times-like)
+        label_bg_size = cv2.getTextSize(alpha_id, cv2.FONT_HERSHEY_COMPLEX, 0.7, 2)[0]
+        label_width, label_height = label_bg_size[0] + 8, label_bg_size[1] + 6  # Extra width for letter spacing
         
         # Define horizontal distances to try (prioritize closer horizontal positions)
         horizontal_distances = [25, 35, 45, 60, 80, 100]  # Increasing distances
@@ -719,8 +786,8 @@ class SkillGenerator:
                         surface_img,
                         alpha_id,
                         (centroid_x, centroid_y),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
+                        cv2.FONT_HERSHEY_DUPLEX,
+                        0.6,
                         (0, 0, 0),  # Black outline
                         4
                     )
@@ -730,8 +797,8 @@ class SkillGenerator:
                         surface_img,
                         alpha_id,
                         (centroid_x, centroid_y),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
+                        cv2.FONT_HERSHEY_DUPLEX,
+                        0.6,
                         (255, 255, 255),  # White text
                         2
                     )
@@ -745,7 +812,7 @@ class SkillGenerator:
             surface_img,
             "Surface Segmentation with Normals",
             (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
+            cv2.FONT_HERSHEY_DUPLEX,
             0.7,
             (255, 255, 255),
             2
@@ -756,7 +823,7 @@ class SkillGenerator:
             surface_img,
             "Arrows show surface normals",
             (10, 60),
-            cv2.FONT_HERSHEY_SIMPLEX,
+            cv2.FONT_HERSHEY_DUPLEX,
             0.5,
             (255, 255, 255),
             1
@@ -767,7 +834,7 @@ class SkillGenerator:
             surface_img,
             f"Using {'depth data' if has_depth else 'PCA estimation'} for normals",
             (10, 80),
-            cv2.FONT_HERSHEY_SIMPLEX,
+            cv2.FONT_HERSHEY_DUPLEX,
             0.5,
             (255, 255, 255),
             1
@@ -836,9 +903,9 @@ class SkillGenerator:
                         px, py, alpha_id, all_point_coords, placed_labels, w, h, object_center
                     )
                     
-                    # Get label dimensions for tracking
-                    label_bg_size = cv2.getTextSize(alpha_id, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-                    label_width, label_height = label_bg_size[0] + 6, label_bg_size[1] + 6
+                    # Get label dimensions for tracking - using COMPLEX font for better readability (Times-like)
+                    label_bg_size = cv2.getTextSize(alpha_id, cv2.FONT_HERSHEY_COMPLEX, 0.7, 2)[0]
+                    label_width, label_height = label_bg_size[0] + 8, label_bg_size[1] + 6  # Extra width for letter spacing
                     
                     # Draw connecting line if label is far from point
                     if abs(offset_x) > 20 or abs(offset_y) > 20:
@@ -865,13 +932,13 @@ class SkillGenerator:
                     cv2.rectangle(points_img, (label_rect[0], label_rect[1]), 
                                 (label_rect[2], label_rect[3]), (0, 0, 0), 2)
                     
-                    # Draw label text with black outline for better visibility
+                    # Draw label text with black outline for better visibility - using COMPLEX font for Times-like appearance
                     # Black outline
                     cv2.putText(points_img, alpha_id, (label_x, label_y),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4, cv2.LINE_AA)
+                            cv2.FONT_HERSHEY_COMPLEX, 0.7, (0, 0, 0), 5, cv2.LINE_AA)
                     # White text
                     cv2.putText(points_img, alpha_id, (label_x, label_y),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+                            cv2.FONT_HERSHEY_COMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
                     
                     # Track this label's position for future overlap checking
                     placed_labels.append((label_rect[0], label_rect[1], 
@@ -925,9 +992,9 @@ class SkillGenerator:
                         px, py, alpha_id, all_point_coords, placed_labels, w, h, object_center
                     )
                     
-                    # Get label dimensions for tracking
-                    label_bg_size = cv2.getTextSize(alpha_id, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-                    label_width, label_height = label_bg_size[0] + 6, label_bg_size[1] + 6
+                    # Get label dimensions for tracking - using COMPLEX font for better readability (Times-like)
+                    label_bg_size = cv2.getTextSize(alpha_id, cv2.FONT_HERSHEY_COMPLEX, 0.7, 2)[0]
+                    label_width, label_height = label_bg_size[0] + 8, label_bg_size[1] + 6  # Extra width for letter spacing
                     
                     # Draw connecting line if label is far from point
                     if abs(offset_x) > 20 or abs(offset_y) > 20:
@@ -954,13 +1021,13 @@ class SkillGenerator:
                     cv2.rectangle(points_img, (label_rect[0], label_rect[1]), 
                                 (label_rect[2], label_rect[3]), (0, 0, 0), 2)
                     
-                    # Draw label text with black outline for better visibility
+                    # Draw label text with black outline for better visibility - using COMPLEX font for Times-like appearance
                     # Black outline
                     cv2.putText(points_img, alpha_id, (label_x, label_y),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4, cv2.LINE_AA)
+                            cv2.FONT_HERSHEY_COMPLEX, 0.7, (0, 0, 0), 5, cv2.LINE_AA)
                     # White text
                     cv2.putText(points_img, alpha_id, (label_x, label_y),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+                            cv2.FONT_HERSHEY_COMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
                     
                     # Track this label's position for future overlap checking
                     placed_labels.append((label_rect[0], label_rect[1], 
@@ -968,7 +1035,7 @@ class SkillGenerator:
 
         # Add title to the points image
         cv2.putText(points_img, "Points of Interest", (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                cv2.FONT_HERSHEY_DUPLEX, 0.7, (255, 255, 255), 2)
         
         # Create the third image: Depth visualization with RealSense-quality processing
         depth_img = None
@@ -1019,7 +1086,7 @@ class SkillGenerator:
                             depth_img,
                             f"Depth: {min_mm:.0f}-{max_mm:.0f}mm",
                             (10, 60),
-                            cv2.FONT_HERSHEY_SIMPLEX,
+                            cv2.FONT_HERSHEY_DUPLEX,
                             0.5,
                             (255, 255, 255),
                             1
@@ -1029,7 +1096,7 @@ class SkillGenerator:
                             depth_img,
                             f"Depth: {min_val:.3f}-{max_val:.3f}m",
                             (10, 60),
-                            cv2.FONT_HERSHEY_SIMPLEX,
+                            cv2.FONT_HERSHEY_DUPLEX,
                             0.5,
                             (255, 255, 255),
                             1
@@ -1040,7 +1107,7 @@ class SkillGenerator:
                         depth_img,
                         "Processed Depth Visualization",
                         (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX,
+                        cv2.FONT_HERSHEY_DUPLEX,
                         0.7,
                         (255, 255, 255),
                         2
@@ -1080,7 +1147,7 @@ class SkillGenerator:
                 depth_img,
                 "Depth data not available",
                 (int(w/2) - 100, int(h/2)),
-                cv2.FONT_HERSHEY_SIMPLEX,
+                cv2.FONT_HERSHEY_DUPLEX,
                 0.7,
                 (255, 255, 255),
                 2
@@ -1267,6 +1334,13 @@ class SkillGenerator:
         surface_img_path = self._save_image(surface_img, f"surface_{image_id}")
         points_img_path = self._save_image(points_img, f"points_{image_id}")
         
+        # Save object mask as debug image (not provided to LLM)
+        if object_info is not None and object_info.mask is not None:
+            mask_debug_img = self._create_mask_debug_image(image, object_info.mask)
+            self._save_image(mask_debug_img, f"mask_{image_id}")
+            if self.debug:
+                print(f"Saved mask debug image: mask_{image_id}.png")
+        
         if self.debug:
             self.get_logger().info(f"Saved surface image to {surface_img_path}")
             self.get_logger().info(f"Saved points image to {points_img_path}")
@@ -1328,9 +1402,11 @@ class SkillGenerator:
         combined_prompt = [
             {
                 "role": "system",
-                "content": f"""You are a grounded visual skill planner.
+                "content": f"""You are a robotic task planner with semantic-geometric understanding for automated assistance.
 
-                Your task is to generate a complete, structured skill definition for performing **{abstract_action}** on a **{target_object}**, using only the provided visual inputs.
+                CONTEXT: This is for robotic task automation to assist with everyday objects and activities.
+
+                Your task is to generate a complete, structured skill definition for performing **{abstract_action}** on a **{target_object}**, using only the provided visual inputs. You must generate BOTH the current skill format AND additional semantic-geometric information for robust skill reuse.
 
                 --- VISUAL INPUT FORMAT ---
                 You are provided with two images:
@@ -1346,7 +1422,8 @@ class SkillGenerator:
                 1. Determine the **appropriate subtype** of `{abstract_action}` based on object geometry.
                 2. Select a **sequence of action primitives** to achieve it.
                 3. Set **precise parameters** based only on the visible surfaces, normals, and geometry.
-                4. Return a **single valid raw JSON** with no text or formatting outside of it.
+                4. Generate semantic point labels and geometric relationships for skill reuse.
+                5. Return a **single valid raw JSON** with no text or formatting outside of it.
 
                 --- AVAILABLE PRIMITIVES ---
                 - move_gripper_to_pose('point_label', is_top_down_grasp, is_side_grasp)
@@ -1360,9 +1437,9 @@ class SkillGenerator:
                 --- PUSH / PULL PARAMETER GUIDE ---
 
                 **1. force_direction ('perpendicular' | 'parallel')**
-                - Use `'perpendicular'` if the force should act **into or out of the surface** — e.g., pushing a button, pulling a latch straight out.
-                - Use `'parallel'` if the interaction requires a **sliding or dragging** motion along the surface — e.g., sliding a door, rotating a lid.
-                - Align the direction with the **normal vector** shown in the FIRST IMAGE.
+                - Use `'perpendicular'` if the force should be applied **along the surface normal** (into or out of the surface) — e.g., pushing a button straight in, pulling a latch directly outward from the surface.
+                - Use `'parallel'` if the force should be applied **parallel to the surface but perpendicular to the surface normal** (sliding or dragging motion along the surface) — e.g., sliding a door laterally, rotating a lid around its axis.
+                - **NORMAL VECTOR REFERENCE**: The surface normal vectors are shown as arrows in the FIRST IMAGE - use these to determine the correct force direction relative to each surface.
 
                 **2. is_button (true | false)**
                 - Use `true` when the push/pull is:
@@ -1372,16 +1449,19 @@ class SkillGenerator:
                 - Use `false` when the action involves sustained contact or continuous movement (e.g., sliding, opening).
 
                 **3. has_pivot (true | false)**
-                - Use `true` when the action requires **rotating around a fixed point** on the object (e.g., opening a hinged lid, rotating a handle).
-                - Use `false` when the force applies evenly across the surface (no clear rotation axis).
+                - Use `true` when the action requires **rotating around a fixed point** on the object (e.g., opening a hinged door, hinged lid, rotating a handle).
+                - Use `false` when the force applies evenly across the surface with **linear motion** (e.g., sliding drawers, linear pulls, no clear rotation axis).
+                - **OBJECT GUIDELINES:** Doors and lids typically use `has_pivot=true`, drawers typically use `has_pivot=false`.
 
                 **4. pivot_point_label ('a', 'b', ..., or '')**
                 - Provide a **point label from the SECOND IMAGE** if `has_pivot = true`, representing the center or hinge of rotation.
                 - Use `''` (empty string) if `has_pivot = false`.
 
                 --- EXAMPLES ---
-                - push('a', 'perpendicular', true, false, '') → Push a surface straight in like a button
-                - pull('b', 'parallel', false, true, 'd') → Slide or rotate a surface around point 'd'
+                - push('a', 'perpendicular', true, false, '') → Push a surface along its normal vector (straight into the surface) like a button
+                - pull('b', 'parallel', false, true, 'd') → Pull/slide a surface parallel to the surface (perpendicular to normal) around pivot point 'd'
+                - push('c', 'parallel', false, false, '') → Push a surface parallel to itself (sliding motion along the surface)
+                - pull('d', 'perpendicular', false, false, '') → Pull a surface along its normal vector (straight out from the surface)
 
                 --- OUTPUT FORMAT ---
 
@@ -1401,13 +1481,15 @@ class SkillGenerator:
                 }},
                 "prerequisites": ["list of preconditions"],
                 "constraints": ["list of safety or collision limits"],
-                "explanations": ["detailed explaination for why you chose each primitive and each parameter chosen"]
+                "explanations": ["detailed explaination for why you chose each primitive and each parameter chosen"],
                 }}
                 <end_json>
 
                 --- CRITICAL RULES ---
                 - DO NOT invent new functions or primitives.
                 - ONLY use surface labels for push/pull, point labels for move_gripper_to_pose.
+                - **CRITICAL POINT SELECTION RULE**: ONLY consider the actual COLORED CIRCLE positions for manipulation. NEVER select points based on where connecting lines intersect objects - the line is for identification only, not manipulation positioning.
+                - **CRITICAL FEATURE IDENTIFICATION RULE**: Always prioritize the clearest, most obviously functional interaction points. When handles and other circular features coexist, choose handles over potentially decorative circles. Verify that selected features are truly functional rather than structural or decorative elements.
                 - All parameters must match physical and geometric properties shown in the images.
                 - close/open gripper are the only methods that affect the gripper they must be called individually no other method will close/open the gripper
                 - NEVER include markdown, explanation outside of the JSON block, or invalid syntax.
@@ -1417,16 +1499,122 @@ class SkillGenerator:
                     - For VERTICAL movements (lifting, pressing down): USE TOP-DOWN GRASP
                     - Always orient the gripper's z-axis to maximize force transmission in the intended direction
                 - ensure your explainations cover all parameter and action selections in detail verify your understanding of parameters before selection
-                - when opening an object ensure its lid/ cover is completely removed from the top for example a bottle cap should be removed using "pull" or "retract_gripper"
-                - POINTS ARE COLOR CODED PAY ATTENTION TO WHERE THE POINT ACTUALLY IS. Points are also atatched to their label by a color matched line segment verify this line before selecting a label. 
-                    the correct label may not be the closest label to the point ensure you select the point label using the line and matching color to the point.
-                    in your explaination include why you selected a particular point and explain in detail the exact criteria you used to determin the label associated with the point
-                    this detail should include the color of the label or the line pointing from the label to the point or some combination of these and other criteria relating to the image, additionally include why this point
-                    is relevant to the current task / object and the features of the image/object you used to determine the component of the object that the point indicates. Object component explaination should include exact image details 
-                    that you used to determine the object component.
-                - push and pull actions when opening an object will usually be perpendicular with the surface.
-                - selected pivot points should always be different than the interaction point. the pivot point indicates the distance in the x direction of the image frame
-                that the robot needs to rotate about such that the pivot point is the center of the arc movement. For doors this should be the approximate x location of the hinges.
+                - when opening an object ensure its cover/lid is completely removed or opened - removable components should be detached using "pull" or "retract_gripper" actions
+
+                --- VISION SYSTEM NOISE HANDLING ---
+                **IMPORTANT: The vision system may contain errors and noise. Points and surfaces may be incorrectly detected or belong to adjacent objects rather than the target object.**
+                
+                **NOISE SOURCES TO CONSIDER:**
+                - Points may be detected on adjacent objects (neighboring cabinets, drawers, doors) instead of the target object
+                - Surface segmentation might include parts of multiple objects in the same mask
+                - Detection boundaries may be imprecise due to lighting, shadows, or occlusion
+                - Similar visual features (handles, edges, seams, textures) across multiple objects can cause misidentification
+                - Perspective distortion and depth ambiguity can affect point positioning accuracy
+                
+                **VERIFICATION STEPS BEFORE PARAMETER SELECTION:**
+                1. **TARGET OBJECT IDENTIFICATION**: Carefully examine the target object's distinct visual features (color, texture, shape, markings, hardware)
+                2. **POINT VALIDATION**: For each point you consider using, verify the POINT LOCATION (not label location) belongs to the TARGET OBJECT by:
+                   - **CRITICAL**: Labels may be offset for visibility but focus on where the colored circle/point actually lies
+                   - Checking if the actual point position overlaps with target object's visual boundaries and functional components
+                   - Confirming the point is positioned on the correct object component (interaction surface, edge, mechanism) for the intended action
+                   - Rejecting points whose actual position appears to be on adjacent or background objects, even if the label suggests otherwise
+                3. **SPATIAL CONSISTENCY**: Ensure interaction and pivot points make geometric sense for the target object's size and mechanism
+                4. **VISUAL MARKER CONFIRMATION**: Use distinct visual cues (seams, edges, hardware, color changes) to confirm object boundaries and validate point positions
+                
+                **ROBUST SELECTION CRITERIA:**
+                - **PRIORITIZE CLEAREST INTERACTION POINTS**: Always choose the most obviously functional feature available
+                    • Handles over circular features that might be decorative
+                    • Clear buttons over circular markings or mounting hardware
+                    • Obvious grip points over ambiguous protrusions
+                    • Well-defined knobs over round structural elements
+                - **FEATURE VERIFICATION**: Before selecting, verify the feature is truly functional:
+                    • Does it have ergonomic design indicating human interaction?
+                    • Is it positioned logically for the intended operation?
+                    • Does it show wear patterns or design features suggesting use?
+                    • Is it clearly distinct from decorative or structural elements?
+                - Prioritize points with clear visual connection to target object functional features (handles, knobs, buttons, levers, operational surfaces)
+                - Avoid points near object boundaries where they might belong to adjacent cabinets, drawers, or background structures
+                - Use multiple visual cues (color, texture, depth, geometry) to confirm point relevance to target object
+                - When in doubt between similar points, choose the one with clearest visual association to target object's operational components
+                - Prefer points that are well-centered on functional elements rather than at edges or transitions between objects
+                - **POINT SELECTION AND VALIDATION:**
+                    - **CRITICAL: POINT vs LABEL vs LINE DISTINCTION**: 
+                        • Points are COLORED CIRCLES that mark exact interaction locations
+                        • Labels are TEXT positioned for visibility (may be offset from points)
+                        • Lines connect labels to points for identification ONLY
+                        • **NEVER select based on where the line intersects the object - ONLY use the actual colored circle position**
+                        • The line path is irrelevant for manipulation - only the endpoint (colored circle) matters
+                    - Follow the colored line from label to the ENDPOINT (colored circle) to identify which point corresponds to each label. The correct label may not be the spatially closest to the point.
+                    - **CRITICAL ERROR TO AVOID**: Do not select points based on line intersections with object features - only consider the actual colored circle positions.
+                    - **CRITICAL POINT POSITION VALIDATION:** Before using any point, verify the ACTUAL POINT POSITION belongs to the target object by examining:
+                        • Point location relative to target object boundaries and functional components
+                        • Visual consistency with target object's interaction surfaces, mechanisms, or structural elements
+                        • Functional relevance to the target object's operation (interaction points, pivot locations, surfaces)
+                        • Rejection of points whose actual position lies on adjacent or background objects
+                    - **PRECISE INTERACTION POINT SELECTION:** For optimal manipulation success:
+                        • **PRIORITIZE OBVIOUS FUNCTIONAL FEATURES**: Choose handles over decorative elements, buttons over circular markings, pull tabs over structural features
+                        • **FEATURE IDENTIFICATION VERIFICATION**: Confirm that circular/round features are actually knobs/buttons and not decorative elements, mounting hardware, or structural components
+                        • **FUNCTIONAL vs DECORATIVE DISTINCTION**: 
+                            - Handles typically protrude and have ergonomic shapes for gripping
+                            - Actual knobs/buttons are designed for rotation/pressing and often have tactile features
+                            - Decorative circles, mounting points, or structural elements should be avoided
+                            - When multiple potential interaction points exist, choose the most clearly functional one
+                        • Choose points that are PRECISELY positioned on verified functional components (centers of handles, confirmed knobs/buttons, optimal grip points)
+                        • Avoid points that are offset from or adjacent to key interaction areas
+                        • Prioritize points that maximize contact effectiveness and force transmission
+                        • For doors/lids: select points on actual handles or confirmed grip areas that provide optimal leverage
+                        • For buttons/switches: center points precisely on confirmed activatable surfaces (not decorative circles)
+                        • For drawers: choose points on actual handles or pull areas for effective linear motion
+                    - **EXPLANATION REQUIREMENTS:** In your explanation include:
+                        • Why you selected a particular point and the exact visual criteria used to determine the label-point association
+                        • Color matching between label and connecting line to verify correct point identification
+                        • **CRITICAL**: Confirm you are describing the COLORED CIRCLE position, not any line intersection points
+                        • **FEATURE IDENTIFICATION JUSTIFICATION**: Explicitly describe what makes the selected feature functional rather than decorative:
+                            - For handles: describe ergonomic shape, protrusion, grip design
+                            - For knobs: describe rotation mechanisms, tactile features, operational design
+                            - For buttons: describe activation surface, clickable design, functional purpose
+                            - Explain why you rejected nearby decorative or structural elements
+                        • Why the specific COLORED CIRCLE position is optimal for the intended action and target object component
+                        • Explicitly state that you ignored line path and focused only on the endpoint circle
+                        • Target object component details (color, shape, markings, hardware) that confirm point relevance and functionality
+                        • How you distinguished target object features from similar features on adjacent objects
+                        • **COMPARATIVE ANALYSIS**: If multiple potential interaction points exist, explain why you chose one over others
+                    - **POSITIONING ACCURACY:** The gripper will move to the exact COLORED CIRCLE position, so ensure points are:
+                        • **CRITICAL**: Selected based on COLORED CIRCLE location, not line intersections with objects
+                        • Precisely centered on interaction components (handle centers, button centers, optimal grip points)
+                        • Not offset from functional areas which would cause action failure
+                        • Positioned to maximize manipulation effectiveness for the specific action
+                        • **VERIFY**: The COLORED CIRCLE itself is optimally positioned, regardless of line path
+                    - **GEOMETRIC CONSISTENCY:** Ensure all selected points make spatial sense relative to each other and the target object's mechanism and constraints
+                - **FORCE DIRECTION CLARIFICATION**: 
+                    • 'perpendicular' = force applied along the surface normal (into/out of surface)
+                    • 'parallel' = force applied parallel to surface (perpendicular to surface normal)
+                    • Opening actions typically use 'perpendicular' force (along surface normal) for direct engagement
+                - **PIVOT POINT GEOMETRY RULES FOR ROTATIONAL MECHANISMS (doors, lids, hinged objects, rotating components):**
+                    - Selected pivot points must always be different from the interaction point. The pivot point indicates the rotation center for arc-based movements.
+                    - **TARGET OBJECT VALIDATION FIRST:** Before selecting any pivot point, verify the actual point position belongs to the target object:
+                        • Confirm the point position is within the target object's visual boundaries and functional components
+                        • Check that the point aligns with target object's mounting features, edges, or structural elements
+                        • Reject points positioned on neighboring objects even if they seem geometrically appropriate
+                        • Use visual distinctions (color, texture, depth, hardware) to confirm point belongs to target object
+                    - **GEOMETRIC POSITIONING PRINCIPLES:** The pivot point should be located to create optimal rotational mechanics:
+                        • Position pivot point opposite the interaction point across the object's rotation axis
+                        • For doors/lids with visible hinges: place pivot at or near the hinge mechanism location
+                        • For drawers and sliding objects: use linear motion (has_pivot=false) instead of rotational
+                        • For objects without visible hinges: infer rotation axis from object geometry and place pivot accordingly
+                        • Ensure pivot placement allows natural opening motion without collision or interference
+                    - **VISUAL CUES FOR PIVOT LOCATION IDENTIFICATION:**
+                        • Look for visible hinges, mounting hardware, or rotation mechanisms - these indicate actual rotation axes
+                        • Identify stationary edges or attachment points - these typically don't move during operation
+                        • Observe object geometry to infer natural rotation patterns and constraints
+                        • Consider mechanism type: edge-mounted hinges (doors), center-mounted rotations (lids), sliding mechanisms (drawers)
+                        • For cabinet doors: pivot is typically at the vertical edge with visible hinges
+                        • For container lids: pivot is often at the back edge or along visible hinge lines
+                        • Use depth and visual continuity to distinguish target object features from background elements
+                    - **GEOMETRIC VALIDATION:** Ensure pivot point selection creates mechanically sound movement:
+                        • Verify pivot-to-interaction distance matches object dimensions and rotation requirements
+                        • Confirm the rotation would produce natural opening motion for the specific mechanism type
+                        • Check that selected pivot allows full range of motion without geometric interference
                 When in doubt, choose the best grounded option based on visible contact affordances and robot camera constraints (e.g., collision with the wrist camera).
 
                 Carefully verify label references and syntax. Output must be complete and syntactically valid.
@@ -1441,12 +1629,21 @@ class SkillGenerator:
                 Abstract Action: {abstract_action}
                 Target Object: {target_object}
 
+                **CRITICAL: FOCUS ONLY ON THE TARGET OBJECT ({target_object})**
+                The images may contain multiple similar objects. You must identify and focus exclusively on the target object specified above. 
+                Verify that all selected points and surfaces belong to the target object, not adjacent or background objects.
+                Use visual cues like distinct colors, textures, shapes, and hardware to distinguish the target object from similar nearby objects.
+
                 Please analyze the two visualizations:
                 - FIRST IMAGE: Surface segments with normal vectors (for push/pull)
                 - SECOND IMAGE: Points of interest (for grasping/manipulation)
 
+                Generate:
+                1. Skill parameterization for the current setup (primitive_sequence, parameters, prerequisites, constraints, explanations)
+                2. Semantic reuse criteria for future scenarios (semantic_reuse_data with point labels, geometric relationships, and reuse matching)
+
                 Use only the predefined action primitives.
-                Output must be a raw JSON object between '{{' and '}}'. No extra text or formatting.
+                Output must be a raw JSON object between '{{' and '}}' with both sections. No extra text or formatting.
                 """
                     },
                     {

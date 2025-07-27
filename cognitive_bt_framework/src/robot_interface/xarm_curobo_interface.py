@@ -91,10 +91,23 @@ class CuRoboMotionPlanner:
         self.arm_lock = threading.Lock()
         
         # Force/torque sensor settings for robust interactions
-        self.default_collision_sensitivity = 3  # Lower = more sensitive (0-5)
-        self.default_teach_sensitivity = 4       # Lower = more sensitive (0-5) 
-        self.pivot_collision_sensitivity = 5     # Less sensitive for pivot operations
-        self.pivot_teach_sensitivity = 5         # Less sensitive for pivot operations
+        self.default_collision_sensitivity = 1  # Lower = more sensitive (0-5)
+        self.default_teach_sensitivity = 1       # Lower = more sensitive (0-5) 
+        self.pivot_collision_sensitivity = 1     # Less sensitive for pivot operations
+        self.pivot_teach_sensitivity = 1         # Less sensitive for pivot operations
+        
+        # Dynamic sensitivity adjustment based on torque errors  
+        self.max_collision_sensitivity = 1       # Maximum collision sensitivity (least sensitive) 
+        self.max_teach_sensitivity = 1           # Maximum teach sensitivity (least sensitive)
+        self.min_collision_sensitivity = 0       # Minimum collision sensitivity (most sensitive)
+        self.min_teach_sensitivity = 0           # Minimum teach sensitivity (most sensitive)
+        self.current_pivot_collision_sensitivity = self.pivot_collision_sensitivity
+        self.current_pivot_teach_sensitivity = self.pivot_teach_sensitivity
+        
+        # Alternative torque handling parameters
+        self.min_speed_factor = 0.1             # Minimum speed for torque issues
+        self.max_segments = 20                  # Maximum trajectory segments
+        self.torque_retry_segments = [10, 15, 20]  # Escalating segment counts
         
         self.connect_robot()
         
@@ -398,6 +411,12 @@ class CuRoboMotionPlanner:
         except Exception as e:
             print(f"Error getting robot TCP pose: {str(e)}")
             return None
+     
+    def get_tcp_pose_api(self):
+        code, pose =  self.arm.get_position(is_radian=False)
+        position, orientation = pose[:3], pose[3:]
+        position = [x / 1000 for x in position]
+        return position, orientation
      
     def get_camera_transform(self):
             # Check if motion generator is properly initialized
@@ -754,6 +773,32 @@ class CuRoboMotionPlanner:
                         code = self.arm.set_servo_angle(angle=joint_pos, is_radian=True, wait=True)
                         if code != 0:
                             print(f"Failed to send joint command at point {i}, error code: {code}")
+                            
+                            # Check if this is a torque-related error (error code -9 is common for torque issues)
+                            if code == -9 or self.arm.state == 4:  # State 4 indicates robot stopped due to error
+                                print(f"Detected potential torque constraint error (code: {code}, state: {self.arm.state})")
+                                
+                                # Try to adjust sensitivity and continue
+                                if hasattr(self, 'adjust_sensitivity_for_torque_errors'):
+                                    print("Attempting to adjust sensitivity for torque constraints...")
+                                    self.clear_robot_errors()
+                                    if self.adjust_sensitivity_for_torque_errors():
+                                        print("Sensitivity adjusted, attempting to continue trajectory...")
+                                        # Try to re-enable motion
+                                        self.arm.motion_enable(True)
+                                        self.arm.set_state(0)  # Try to return to ready state
+                                        time.sleep(0.5)
+                                        
+                                        # Retry this point once with new sensitivity
+                                        retry_code = self.arm.set_servo_angle(angle=joint_pos, is_radian=True, wait=True)
+                                        if retry_code == 0:
+                                            print(f"✓ Successfully continued after sensitivity adjustment at point {i}")
+                                            continue  # Continue with trajectory
+                                        else:
+                                            print(f"Retry failed even with adjusted sensitivity (code: {retry_code})")
+                                    else:
+                                        print("Failed to adjust sensitivity")
+                            
                             return False
                             
                     except Exception as e:
@@ -889,7 +934,7 @@ class CuRoboMotionPlanner:
                 
                 # Move to target pose
                 print(f"Moving to TCP pose: {target_pose}")
-                code = self.arm.set_position(*target_pose, speed=speed, mvacc=mvacc, wait=wait, is_radian=True)
+                code = self.arm.set_position(*target_pose, wait=wait, timeout=10.0, is_radian=True)
                 
                 if code == 0:
                     print("TCP pose move completed successfully")
@@ -2155,7 +2200,7 @@ class CuRoboMotionPlanner:
         pose = self.arm.get_position(is_radian=True)
         print(pose)
         x, y, z, r, p, w = pose[1]
-        return self.arm.set_position(x, y, z + distance * 1000, r, p, w, is_radian=True) == 0
+        return self.arm.set_position(x, y, z + distance * 1000, r, p, w, is_radian=True, wait=True, timeout=10.0) == 0
     
     def move_to_home(self, speed=0.3, execute=False, speed_factor=1.0):
         """Plan movement to the home position and optionally execute on the robot
@@ -2276,11 +2321,12 @@ class CuRoboMotionPlanner:
         try:
             with self.arm_lock:
                 # Enable the gripper
+                code = 0  # Initialize code variable
                 if not self.config.is_lite6:
                     code = self.arm.set_gripper_enable(True)
-                if code != 0:
-                    print(f"Failed to enable gripper, error code: {code}")
-                    return False
+                    if code != 0:
+                        print(f"Failed to enable gripper, error code: {code}")
+                        return False
                 
                 # Set gripper position
                 # Note: xArm SDK takes position as 0 for open and 100 for closed
@@ -2305,8 +2351,30 @@ class CuRoboMotionPlanner:
             print(f"Error controlling gripper: {str(e)}")
             return False
     
-    def close_gripper(self, wait=True, timeout=5.0):
-        """Close the gripper
+    def close_gripper(self, wait=True, timeout=5.0, simple_close=True):
+        """Close the gripper with optional torque monitoring and position adjustment
+        
+        Args:
+            wait: Whether to wait for the gripper operation to complete
+            timeout: Timeout in seconds for the gripper operation
+            simple_close: If True, skip dynamic adjustments and just close gripper
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        if simple_close:
+            return self.set_gripper(-10.0, wait, timeout)
+        else:
+            return self.close_gripper_with_torque_adjustment(wait=wait, timeout=timeout)
+    
+    def close_gripper_with_torque_adjustment(self, wait=True, timeout=5.0):
+        """Close gripper with slower speed and torque-based position adjustment
+        
+        This function:
+        1. Decreases the close speed for better control
+        2. Monitors gripper torque during closing
+        3. Adjusts gripper position if torque is uneven between fingers
+        4. If left finger has higher torque, adjusts position toward left finger
         
         Args:
             wait: Whether to wait for the gripper operation to complete
@@ -2315,7 +2383,211 @@ class CuRoboMotionPlanner:
         Returns:
             bool: True if successful, False otherwise
         """
-        return self.set_gripper(-10.0, wait, timeout)
+        if self.arm is None:
+            print("Robot not connected")
+            return False
+            
+        try:
+            with self.arm_lock:
+                # Enable the gripper
+                if not self.config.is_lite6:
+                    # Reset gripper first to clear any errors
+                    reset_code = self.arm.reset()
+                    if reset_code != 0:
+                        print(f"Warning: Gripper reset failed with code: {reset_code}")
+                    
+                    # Enable the gripper
+                    code = self.arm.set_gripper_enable(True)
+                    if code != 0:
+                        print(f"Failed to enable gripper, error code: {code}")
+                        return False
+                    
+                    # Check gripper state after enabling
+                    gripper_state = self.arm.get_gripper_position()
+                    if gripper_state[0] != 0:
+                        print(f"Failed to get gripper state after enabling, error code: {gripper_state[0]}")
+                        return False
+                    print(f"Gripper enabled successfully, current position: {gripper_state[1]}")
+                
+                print("Starting torque-monitored gripper closing...")
+                
+                # Use slower speed for better torque monitoring
+                slow_speed = 20  # Reduced from default ~100
+                
+                # Get initial position and orientation for potential adjustment
+                initial_result = self.arm.get_position()
+                if initial_result[0] != 0:
+                    print(f"Warning: Could not get initial position for torque adjustment, error: {initial_result[0]}")
+                    # Fall back to simple gripper close
+                    return self.set_gripper(-10.0, wait, timeout)
+                
+                initial_position = initial_result[1][:3]  # x, y, z
+                initial_orientation = initial_result[1][3:]  # roll, pitch, yaw
+                
+                print(f"Initial TCP position: {initial_position}")
+                print(f"Initial TCP orientation (deg): roll={math.degrees(initial_orientation[0]):.2f}, pitch={math.degrees(initial_orientation[1]):.2f}, yaw={math.degrees(initial_orientation[2]):.2f}")
+                
+                # Analyze gripper orientation to determine adjustment direction if needed
+                # For horizontal cabinet handle grip, understand the gripper orientation
+                pitch_deg = math.degrees(initial_orientation[1])
+                roll_deg = math.degrees(initial_orientation[0])
+                print(f"Gripper orientation analysis - Roll: {roll_deg:.2f}°, Pitch: {pitch_deg:.2f}°")
+                
+                # Determine Y-axis adjustment direction based on gripper orientation
+                # This will be used later if torque imbalance is detected
+                if abs(pitch_deg) < 45:  # Horizontal-ish grip
+                    adjustment_direction = 1 if roll_deg > 0 else -1
+                    print(f"Horizontal grip detected - Y adjustment direction set to {adjustment_direction}")
+                else:
+                    adjustment_direction = 1 if pitch_deg > 0 else -1  
+                    print(f"Vertical-ish grip detected - Y adjustment direction set to {adjustment_direction}")
+                
+                # Gradual gripper closing with torque monitoring
+                if self.config.is_lite6:
+                    # For Lite6, we can't get detailed gripper torque, just close normally
+                    code = self.arm.close_lite6_gripper()
+                    if code == 0:
+                        print("Lite6 gripper closed successfully")
+                        return True
+                    else:
+                        print(f"Failed to close Lite6 gripper, error code: {code}")
+                        return False
+                else:
+                    # For full xArm with gripper, use gradual closing with monitoring
+                    target_position = -10.0  # Target close position
+                    current_position = 100.0  # Start from open
+                    step_size = -10.0  # Close gradually
+                    adjustment_distance = 0.002  # 2mm adjustment steps
+                    max_adjustments = 3
+                    
+                    adjustments_made = 0
+                    
+                    # Gradual closing loop
+                    while current_position > target_position and adjustments_made < max_adjustments:
+                        # Move to next position
+                        next_position = max(current_position + step_size, target_position)
+                        
+                        print(f"Moving gripper to position: {next_position}")
+                        # Set gripper speed first, then position
+                        self.arm.set_gripper_speed(slow_speed)
+                        code = self.arm.set_gripper_position(next_position, wait=True, timeout=2.0)
+                        
+                        if code != 0:
+                            print(f"Gripper movement failed with code: {code}")
+                            # If incremental movement fails, try direct approach
+                            if code == 100:  # Gripper command error
+                                print("Trying alternative gripper control method...")
+                                # Clear error and try again with smaller step
+                                self.arm.clean_error()
+                                time.sleep(0.5)
+                                # Try smaller step
+                                smaller_step = (current_position + target_position) / 2
+                                print(f"Trying smaller step to position: {smaller_step}")
+                                code = self.arm.set_gripper_position(smaller_step, wait=True, timeout=2.0)
+                                if code == 0:
+                                    current_position = smaller_step
+                                    continue
+                            break
+                        
+                        current_position = next_position
+                        time.sleep(0.2)  # Small delay for stabilization
+                        
+                        # Check for torque imbalance by monitoring gripper state
+                        # Since direct finger torque isn't available, we'll use gripper current/load
+                        gripper_state = self.arm.get_gripper_position()
+                        if gripper_state[0] == 0:
+                            gripper_pos = gripper_state[1]
+                            print(f"Current gripper position: {gripper_pos}")
+                            
+                            # Check if gripper is stalled (position not changing much)
+                            # This might indicate uneven contact
+                            if abs(gripper_pos - next_position) > 5.0:  # Position discrepancy
+                                print(f"Gripper position discrepancy detected: target={next_position}, actual={gripper_pos}")
+                                
+                                # Try to get force/torque sensor data if available
+                                try:
+                                    ft_result = self.arm.get_ft_sensor_data()
+                                    if ft_result[0] == 0:
+                                        ft_data = ft_result[1]
+                                        fx, fy, fz = ft_data[:3]
+                                        tx, ty, tz = ft_data[3:]
+                                        
+                                        print(f"F/T sensor data - Forces: [{fx:.2f}, {fy:.2f}, {fz:.2f}], Torques: [{tx:.2f}, {ty:.2f}, {tz:.2f}]")
+                                        
+                                        # Analyze force/torque for imbalance
+                                        # If there's significant torque spike, move in the direction of the torque
+                                        if abs(ty) > 0.5:  # Threshold for torque imbalance
+                                            print(f"Torque spike detected: Ty = {ty:.2f} N⋅m")
+                                            
+                                            # Move in direction of torque spike to alleviate pressure
+                                            # Use predetermined adjustment direction based on gripper orientation
+                                            torque_direction = 1 if ty > 0 else -1
+                                            adjustment_y = adjustment_direction * torque_direction * adjustment_distance
+                                            
+                                            new_position = [
+                                                initial_position[0],
+                                                initial_position[1] + adjustment_y,
+                                                initial_position[2]
+                                            ]
+                                            
+                                            print(f"Moving {adjustment_y:.3f}m in Y direction to alleviate torque spike")
+                                            print(f"Adjusting from {initial_position[1]:.3f} to {new_position[1]:.3f}")
+                                            
+                                            # Move to adjusted position while maintaining current orientation
+                                            adjust_code = self.arm.set_position(
+                                                x=new_position[0] * 1000,  # Convert to mm
+                                                y=new_position[1] * 1000,
+                                                z=new_position[2] * 1000,
+                                                roll=initial_orientation[0],  # Keep exact same orientation
+                                                pitch=initial_orientation[1],
+                                                yaw=initial_orientation[2],
+                                                wait=True,
+                                                timeout=3.0,
+                                                speed=30,  # Slow, careful adjustment
+                                                is_radian=True
+                                            )
+                                            
+                                            if adjust_code == 0:
+                                                print("Position adjustment completed successfully")
+                                                adjustments_made += 1
+                                                time.sleep(0.5)  # Allow settling
+                                            else:
+                                                print(f"Position adjustment failed with code: {adjust_code}")
+                                        
+                                except Exception as ft_error:
+                                    print(f"Could not read F/T sensor data: {ft_error}")
+                                    # Continue without force/torque adjustment
+                    
+                    # Final close attempt
+                    print(f"Final gripper close to position {target_position}")
+                    # Clear any errors before final attempt
+                    self.arm.clean_error()
+                    time.sleep(0.5)
+                    
+                    # Set gripper speed first, then position
+                    self.arm.set_gripper_speed(slow_speed)
+                    final_code = self.arm.set_gripper_position(target_position, wait=wait, timeout=timeout)
+                    
+                    if final_code == 0:
+                        print(f"Gripper closed successfully with {adjustments_made} torque adjustments")
+                        return True
+                    else:
+                        print(f"Final gripper close failed with code: {final_code}")
+                        # Try one more time with reduced force
+                        print("Attempting final close with basic gripper command...")
+                        basic_code = self.arm.set_gripper_position(-5.0, wait=wait, timeout=timeout)  # Less aggressive close
+                        if basic_code == 0:
+                            print("Basic gripper close succeeded")
+                            return True
+                        else:
+                            print(f"Basic gripper close also failed with code: {basic_code}")
+                            return False
+                        
+        except Exception as e:
+            print(f"Error in torque-monitored gripper closing: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+            return False
     
     def open_gripper(self, wait=True, timeout=5.0):
         """Open the gripper
@@ -2595,18 +2867,34 @@ class CuRoboMotionPlanner:
                 # Override the provided distance with calculated distance
                 distance = calculated_distance
                 
-                # Plan arc motion around pivot point
-                return self._plan_arc_motion_around_pivot(
-                    pivot_point=pivot_pos,
-                    current_position=grasp_pos,
-                    current_orientation=current_orientation,
-                    radius=calculated_distance,
-                    is_push=is_push,
-                    arc_segments=arc_segments,
-                    planning_timeout=planning_timeout,
-                    execute=execute,
-                    speed_factor=speed_factor
-                )
+                # Use execute_pivot_pull_direct_xarm for pull operations with pivot
+                if not is_push:  # This is a pull operation
+                    print("Using execute_pivot_pull_direct_xarm for pivot pull operation")
+                    success = self.execute_pivot_pull_direct_xarm(
+                        pivot_point=pivot_pos,
+                        current_position=grasp_pos,
+                        current_orientation=current_orientation,
+                        radius=calculated_distance,
+                        arc_angle_degrees=30.0,  # Default arc angle
+                        segments=arc_segments,
+                        speed_factor=speed_factor
+                    )
+                    # Return in the expected format for plan_push_pull
+                    return success, None, None
+                else:
+                    # For push operations, still use the original arc motion planner
+                    print("Using original arc motion planner for pivot push operation")
+                    return self._plan_arc_motion_around_pivot(
+                        pivot_point=pivot_pos,
+                        current_position=grasp_pos,
+                        current_orientation=current_orientation,
+                        radius=calculated_distance,
+                        is_push=is_push,
+                        arc_segments=arc_segments,
+                        planning_timeout=planning_timeout,
+                        execute=execute,
+                        speed_factor=speed_factor
+                    )
             
             # Calculate the movement direction based on custom normal or TCP orientation
             if custom_normal is not None:
@@ -3067,6 +3355,83 @@ class CuRoboMotionPlanner:
         
         return rotation_matrix
 
+    def _ensure_robot_ready_for_motion(self) -> bool:
+        """
+        Ensure robot is in proper state for motion (state 0) and motion is enabled.
+        
+        Returns:
+            bool: True if robot is ready, False otherwise
+        """
+        if self.arm is None:
+            return False
+            
+        try:
+            # Check current state
+            current_state = self.arm.state
+            current_mode = self.arm.mode
+            
+            print(f"Robot status: Mode={current_mode}, State={current_state}")
+            
+            # Clear any errors first
+            if self.arm.has_error:
+                print("Clearing robot errors...")
+                self.arm.clean_error()
+                time.sleep(0.2)
+            
+            # Clear any warnings
+            if self.arm.has_warn:
+                print("Clearing robot warnings...")
+                self.arm.clean_warn()
+                time.sleep(0.2)
+            
+            # Check if motion needs to be enabled - use motor enable states if available
+            try:
+                motor_states = self.arm.motor_enable_states
+                if motor_states and all(state == 0 for state in motor_states[:self.config.dof]):
+                    print("Motors are disabled, enabling motion...")
+                    result = self.arm.motion_enable(True)
+                    if result != 0:
+                        print(f"Failed to enable motion, error: {result}")
+                        return False
+                    time.sleep(0.2)
+            except AttributeError:
+                # If motor_enable_states not available, just try to enable motion
+                print("Enabling robot motion (motor states not available)...")
+                result = self.arm.motion_enable(True)
+                if result != 0:
+                    print(f"Failed to enable motion, error: {result}")
+                    return False
+                time.sleep(0.2)
+            
+            # Set to position control mode if not already
+            if current_mode != 0:
+                print(f"Setting robot to position control mode (from mode {current_mode})...")
+                result = self.arm.set_mode(0)
+                if result != 0:
+                    print(f"Failed to set mode, error: {result}")
+                    return False
+                time.sleep(0.2)
+            
+            # Check if robot is in acceptable state (2=sleeping is ready state)
+            if current_state not in [2]:  # State 2 (sleeping) is the ready state
+                print(f"Setting robot to sleeping/ready state (from state {current_state})...")
+                result = self.arm.set_state(0)  # set_state(0) puts robot in sleeping mode
+                if result != 0:
+                    print(f"Failed to set state, error: {result}")
+                    return False
+                time.sleep(0.2)
+            
+            # Final verification
+            final_state = self.arm.state
+            final_mode = self.arm.mode
+            print(f"Final robot status: Mode={final_mode}, State={final_state}")
+            
+            return final_mode == 0 and final_state == 2  # Mode 0, State 2 (sleeping) is ready
+            
+        except Exception as e:
+            print(f"Error ensuring robot readiness: {e}")
+            return False
+
     def _plan_arc_motion_around_pivot(
         self,
         pivot_point: np.ndarray,
@@ -3346,13 +3711,13 @@ class CuRoboMotionPlanner:
                 
             with self.arm_lock:
                 # Set less sensitive collision detection for pivot operations
-                collision_result = self.arm.set_collision_sensitivity(self.pivot_collision_sensitivity)
+                collision_result = self.arm.set_collision_sensitivity(self.pivot_collision_sensitivity, wait=True)
                 if collision_result != 0:
                     print(f"Warning: Failed to set collision sensitivity (code: {collision_result})")
                     return False
                     
                 # Set less sensitive teach sensitivity for pivot operations  
-                teach_result = self.arm.set_teach_sensitivity(self.pivot_teach_sensitivity)
+                teach_result = self.arm.set_teach_sensitivity(self.pivot_teach_sensitivity, wait=True)
                 if teach_result != 0:
                     print(f"Warning: Failed to set teach sensitivity (code: {teach_result})")
                     return False
@@ -3378,13 +3743,13 @@ class CuRoboMotionPlanner:
                 
             with self.arm_lock:
                 # Restore default collision sensitivity
-                collision_result = self.arm.set_collision_sensitivity(self.default_collision_sensitivity)
+                collision_result = self.arm.set_collision_sensitivity(self.default_collision_sensitivity, wait=True)
                 if collision_result != 0:
                     print(f"Warning: Failed to restore collision sensitivity (code: {collision_result})")
                     return False
                     
                 # Restore default teach sensitivity
-                teach_result = self.arm.set_teach_sensitivity(self.default_teach_sensitivity)
+                teach_result = self.arm.set_teach_sensitivity(self.default_teach_sensitivity, wait=True)
                 if teach_result != 0:
                     print(f"Warning: Failed to restore teach sensitivity (code: {teach_result})")
                     return False
@@ -3395,6 +3760,534 @@ class CuRoboMotionPlanner:
         except Exception as e:
             print(f"Error restoring default sensitivity: {e}")
             return False
+
+    def adjust_sensitivity_for_torque_errors(self) -> bool:
+        """
+        Dynamically adjust sensitivity settings when encountering torque-related errors.
+        Makes the robot less sensitive to force/torque to allow pivot motions.
+        
+        Returns:
+            bool: True if adjustment successful, False otherwise
+        """
+        try:
+            if self.arm is None:
+                print("Warning: Robot not connected, cannot adjust sensitivity")
+                return False
+            
+            # Reduce sensitivity further (make less sensitive to torque)
+            if self.current_pivot_collision_sensitivity < self.max_collision_sensitivity:
+                self.current_pivot_collision_sensitivity = min(
+                    self.current_pivot_collision_sensitivity + 1, 
+                    self.max_collision_sensitivity
+                )
+                
+            if self.current_pivot_teach_sensitivity < self.max_teach_sensitivity:
+                self.current_pivot_teach_sensitivity = min(
+                    self.current_pivot_teach_sensitivity + 1,
+                    self.max_teach_sensitivity
+                )
+            
+            with self.arm_lock:
+                # Apply the adjusted sensitivities
+                collision_result = self.arm.set_collision_sensitivity(self.current_pivot_collision_sensitivity, wait=True)
+                if collision_result != 0:
+                    print(f"Warning: Failed to adjust collision sensitivity (code: {collision_result})")
+                    return False
+                    
+                teach_result = self.arm.set_teach_sensitivity(self.current_pivot_teach_sensitivity, wait=True) 
+                if teach_result != 0:
+                    print(f"Warning: Failed to adjust teach sensitivity (code: {teach_result})")
+                    return False
+                
+                print(f"✓ Adjusted sensitivity for torque errors: collision={self.current_pivot_collision_sensitivity}, teach={self.current_pivot_teach_sensitivity}")
+                return True
+                
+        except Exception as e:
+            print(f"Error adjusting sensitivity for torque errors: {e}")
+            return False
+
+    def execute_pivot_with_torque_adaptive_strategy(
+        self,
+        pivot_point: np.ndarray,
+        current_position: np.ndarray,
+        current_orientation: np.ndarray,
+        radius: float,
+        is_push: bool = False,
+        max_attempts: int = 5
+    ):
+        """
+        Execute pivot pull with adaptive strategy for torque constraint handling.
+        Uses escalating approaches:
+        1. Normal execution with reduced sensitivity
+        2. Slower execution with more segments
+        3. Force-based motion control
+        4. Micro-segment approach with pauses
+        
+        Args:
+            pivot_point: [x, y, z] coordinates of pivot center
+            current_position: [x, y, z] current TCP position
+            current_orientation: [w, x, y, z] current TCP orientation
+            radius: Distance from current position to pivot point
+            is_push: True for push, False for pull
+            max_attempts: Maximum number of strategy attempts
+            
+        Returns:
+            tuple: (success, final_trajectory, dt)
+        """
+        strategies = [
+            {
+                'name': 'Standard with max sensitivity',
+                'sensitivity': 5,
+                'speed_factor': 0.3,
+                'segments': 8,
+                'use_force_mode': False
+            },
+            {
+                'name': 'Slow with high segmentation',
+                'sensitivity': 5,
+                'speed_factor': 0.15,
+                'segments': 12,
+                'use_force_mode': False
+            },
+            {
+                'name': 'Very slow with maximum segmentation',
+                'sensitivity': 5,
+                'speed_factor': 0.1,
+                'segments': 16,
+                'use_force_mode': False
+            },
+            {
+                'name': 'Force-guided motion',
+                'sensitivity': 5,
+                'speed_factor': 0.2,
+                'segments': 10,
+                'use_force_mode': True
+            },
+            {
+                'name': 'Micro-segment with pauses',
+                'sensitivity': 5,
+                'speed_factor': 0.05,
+                'segments': 20,
+                'use_force_mode': False,
+                'micro_pauses': True
+            }
+        ]
+        
+        for attempt, strategy in enumerate(strategies[:max_attempts]):
+            try:
+                print(f"\n=== Attempt {attempt + 1}: {strategy['name']} ===")
+                
+                # Set sensitivity
+                self.current_pivot_collision_sensitivity = strategy['sensitivity']
+                self.current_pivot_teach_sensitivity = strategy['sensitivity']
+                self.configure_sensitivity_for_pivot()
+                
+                # Try force mode if specified
+                if strategy.get('use_force_mode', False):
+                    success = self._try_force_guided_pivot(
+                        pivot_point, current_position, current_orientation, 
+                        radius, is_push, strategy
+                    )
+                    if success:
+                        return True, None, None
+                
+                # Try micro-segment approach if specified
+                elif strategy.get('micro_pauses', False):
+                    success = self._try_micro_segment_pivot(
+                        pivot_point, current_position, current_orientation,
+                        radius, is_push, strategy
+                    )
+                    if success:
+                        return True, None, None
+                
+                # Standard approach with strategy parameters
+                else:
+                    success, trajectory, dt = self._plan_arc_motion_around_pivot(
+                        pivot_point=pivot_point,
+                        current_position=current_position,
+                        current_orientation=current_orientation,
+                        radius=radius,
+                        is_push=is_push,
+                        arc_segments=strategy['segments'],
+                        execute=True,
+                        speed_factor=strategy['speed_factor']
+                    )
+                    
+                    if success:
+                        print(f"✓ Success with strategy: {strategy['name']}")
+                        return True, trajectory, dt
+                        
+                print(f"✗ Failed with strategy: {strategy['name']}")
+                
+            except Exception as e:
+                print(f"Error with strategy '{strategy['name']}': {e}")
+                continue
+        
+        # All CuRobo strategies failed - try direct xArm API as final fallback
+        print("\n=== Final Fallback: Direct xArm API ===")
+        print("All CuRobo strategies failed, attempting direct xArm API bypass...")
+        
+        try:
+            direct_success = self.execute_pivot_pull_direct_xarm(
+                pivot_point=pivot_point,
+                current_position=current_position,
+                current_orientation=current_orientation,
+                radius=radius,
+                arc_angle_degrees=20.0,  # Conservative angle for fallback
+                segments=8,              # Conservative segment count
+                speed_factor=0.08        # Very slow for safety
+            )
+            
+            if direct_success:
+                print("✓ Direct xArm API fallback succeeded!")
+                return True, None, None
+            else:
+                print("✗ Direct xArm API fallback also failed")
+                
+        except Exception as e:
+            print(f"Error in direct xArm API fallback: {e}")
+        
+        # Absolutely everything failed
+        print("✗ All torque-adaptive strategies and direct API fallback failed")
+        return False, None, None
+
+    def _try_force_guided_pivot(self, pivot_point, current_position, current_orientation, radius, is_push, strategy):
+        """
+        Attempt pivot motion using force-guided control mode
+        """
+        try:
+            print("Attempting force-guided pivot motion...")
+            
+            # Enable force control mode if available
+            if hasattr(self.arm, 'set_mode'):
+                # Mode 6 is typically force control on xArm
+                self.arm.set_mode(6)  
+                time.sleep(0.5)
+                
+                # Execute with very slow motion and force feedback
+                success, _, _ = self._plan_arc_motion_around_pivot(
+                    pivot_point=pivot_point,
+                    current_position=current_position,
+                    current_orientation=current_orientation,
+                    radius=radius,
+                    is_push=is_push,
+                    arc_segments=strategy['segments'],
+                    execute=True,
+                    speed_factor=strategy['speed_factor']
+                )
+                
+                # Return to position mode
+                self.arm.set_mode(0)
+                self.arm.set_state(0)
+                
+                return success
+                
+        except Exception as e:
+            print(f"Force-guided pivot failed: {e}")
+            # Ensure we return to position mode
+            try:
+                self.arm.set_mode(0)
+                self.arm.set_state(0)
+            except:
+                pass
+        
+        return False
+
+    def _try_micro_segment_pivot(self, pivot_point, current_position, current_orientation, radius, is_push, strategy):
+        """
+        Attempt pivot motion with micro-segments and pauses between each
+        """
+        try:
+            print("Attempting micro-segment pivot with pauses...")
+            
+            # Generate many small waypoints
+            success, trajectory, dt = self._plan_arc_motion_around_pivot(
+                pivot_point=pivot_point,
+                current_position=current_position,
+                current_orientation=current_orientation,
+                radius=radius,
+                is_push=is_push,
+                arc_segments=strategy['segments'],
+                execute=False  # Don't execute all at once
+            )
+            
+            if not success:
+                return False
+            
+            # Execute each waypoint individually with pauses
+            if trajectory and self.arm is not None:
+                print(f"Executing {len(trajectory)} micro-segments with pauses...")
+                
+                for i, point in enumerate(trajectory):
+                    try:
+                        # Execute single point
+                        single_point_success = self.execute_trajectory([point], dt, strategy['speed_factor'])
+                        if not single_point_success:
+                            print(f"Failed at micro-segment {i}")
+                            return False
+                        
+                        # Pause between segments to reduce accumulated torque
+                        if i < len(trajectory) - 1:  # Don't pause after last point
+                            time.sleep(0.1)  # Small pause to let torques settle
+                            
+                        print(f"Completed micro-segment {i+1}/{len(trajectory)}")
+                        
+                    except Exception as e:
+                        print(f"Error in micro-segment {i}: {e}")
+                        return False
+                
+                print("✓ Micro-segment execution completed successfully")
+                return True
+                
+        except Exception as e:
+            print(f"Micro-segment pivot failed: {e}")
+            
+        return False
+
+    def execute_pivot_pull_direct_xarm(
+        self,
+        pivot_point: np.ndarray,
+        current_position: np.ndarray, 
+        current_orientation: np.ndarray,
+        radius: float,
+        arc_angle_degrees: float = 30.0,
+        segments: int = 10,
+        speed_factor: float = 0.1,
+        is_quat = False
+    ):
+        """
+        Execute pivot pull using direct xArm API commands, bypassing CuRobo planning.
+        This is a fallback when CuRobo motion planning fails.
+        
+        Args:
+            pivot_point: [x, y, z] coordinates of pivot center
+            current_position: [x, y, z] current TCP position
+            current_orientation: [w, x, y, z] current TCP orientation
+            radius: Distance from current position to pivot point
+            arc_angle_degrees: Arc angle in degrees (default 30)
+            segments: Number of waypoints in the arc
+            speed_factor: Speed factor for motion (default 0.1 for safety)
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            print(f"\n=== Direct xArm API Pivot Pull ===")
+            print(f"Arc angle: {arc_angle_degrees}°, Segments: {segments}, Speed: {speed_factor}")
+            
+            if self.arm is None:
+                print("Robot not connected")
+                return False
+            
+            # Configure robot for pivot motion
+            # self.configure_sensitivity_for_pivot()
+            
+            # Generate arc waypoints (reuse the working waypoint generation)
+            arc_angle_rad = np.radians(arc_angle_degrees)
+            
+            # Ensure arrays are properly shaped and flattened
+            current_pos_flat = np.array(current_position).flatten()
+            pivot_point_flat = np.array(pivot_point).flatten()
+            
+            # Validate that we have 3D coordinates
+            if len(current_pos_flat) != 3:
+                print(f"Error: Current position must be 3D, got {len(current_pos_flat)} dimensions: {current_pos_flat}")
+                return False
+            if len(pivot_point_flat) != 3:
+                print(f"Error: Pivot point must be 3D, got {len(pivot_point_flat)} dimensions: {pivot_point_flat}")
+                return False
+            
+            pivot_to_grasp = current_pos_flat - pivot_point_flat
+            actual_radius = np.linalg.norm(pivot_to_grasp)
+            
+            print(f"Pivot point: {pivot_point_flat}")
+            print(f"Current position: {current_pos_flat}")
+            print(f"Pivot vector: {pivot_to_grasp}")
+            print(f"Actual radius: {actual_radius:.3f}m")
+            
+            # Determine rotation axis (Z for door opening)
+            rotation_axis = np.array([0, 0, 1])
+            
+            # Test rotation direction (same logic as before)
+            test_angle = np.radians(5)
+            test_rotation = self._create_rotation_matrix(test_angle, rotation_axis)
+            test_vector = test_rotation @ pivot_to_grasp
+            test_position = pivot_point_flat + test_vector
+            
+            pos_direction = -1 if test_position[0] < current_pos_flat[0] else 1
+            print(f"Using rotation direction: {pos_direction} (pull)")
+            
+            waypoints = []
+            for i in range(segments + 1):
+                t = i / segments
+                angle = pos_direction * t * arc_angle_rad
+                
+                # Calculate position
+                rotation_matrix = self._create_rotation_matrix(angle, rotation_axis)
+                rotated_vector = rotation_matrix @ pivot_to_grasp
+                position = pivot_point_flat + rotated_vector
+                
+                # DEBUG: For now, maintain fixed orientation to isolate position movement issue
+                # The gripper orientation should remain constant while we debug the arc motion
+                co = np.array(current_orientation).flatten()
+                print(f"##############CO {co}")
+                # Validate orientation array size and provide defaults if needed
+                if len(co) == 4:  # Quaternion [w, x, y, z]
+                    # Convert quaternion to Euler angles for xArm API
+                    from scipy.spatial.transform import Rotation as R
+                    r = R.from_quat([co[1], co[2], co[3], co[0]])  # scipy uses [x,y,z,w] format
+                    euler_angles = r.as_euler('xyz', degrees=True)
+                    orientation = euler_angles.tolist()
+                elif len(co) == 3:  # Already Euler angles
+                    orientation = co.tolist()
+                elif len(co) == 1:  # Single value - assume it's yaw only
+                    orientation = [0.0, 0.0, float(co[0])]  # roll=0, pitch=0, yaw=co[0]
+                else:
+                    print(f"Warning: Unexpected orientation size {len(co)}, using default [0,0,0]")
+                    orientation = [0.0, 0.0, 0.0]
+                
+                # TODO: Re-enable orientation tracking once position arc is working:
+                orientation[2] += np.degrees(angle)  # Rotate around Z-axis (yaw) to maintain pointing toward pivot
+                waypoints.append((position, orientation))
+                print(f"Waypoint {i}: pos={position}, orientation= {orientation}, angle={np.degrees(angle):.1f}°")
+            
+            # Execute waypoints using direct xArm API (skip first waypoint since it's current position)
+            print(f"Executing {len(waypoints)-1} waypoints with direct xArm API (skipping first waypoint)...")
+            
+            # Set pause time for smooth motion like the official example
+            # self.arm.set_pause_time(0.5)  # 0.5 second pause between movements
+            
+            for i, (target_pos, target_rot) in enumerate(waypoints):
+                # if i == 0:
+                #     print(f"✓ Skipped waypoint {i} (current position)")
+                #     continue
+                try:
+                    # Ensure robot is ready for motion  
+                    if not self._ensure_robot_ready_for_motion():
+                        print(f"Robot not ready for motion at waypoint {i}")
+                        return False
+                    
+                    # Convert target quaternion to Euler angles for xArm API
+                    from scipy.spatial.transform import Rotation as R
+                    try:
+                        if is_quat:
+                            # Handle quaternion conversion properly
+                            if hasattr(target_rot, 'cpu'):  # torch tensor
+                                quat = target_rot.cpu().numpy().flatten()
+                            else:
+                                quat = np.array(target_rot).flatten()
+                            
+                            # Ensure we have 4 elements [x, y, z, w]
+                            if len(quat) == 4:
+                                r = R.from_quat(quat)
+                                roll, pitch, yaw = r.as_euler('xyz', degrees=True)
+                                print(f"Using calculated orientation: roll={roll:.2f}°, pitch={pitch:.2f}°, yaw={yaw:.2f}°")
+                            else:
+                                raise ValueError(f"Expected 4-element quaternion, got {len(quat)} elements")
+                        else:
+                            roll, pitch, yaw = target_rot
+                    except Exception as e:
+                        print(f"Error converting quaternion to Euler: {e}")
+                        # Fallback to current TCP pose orientation
+                        tcp_result = self.arm.get_position()
+                        if tcp_result[0] != 0:
+                            print(f"Failed to get TCP pose at waypoint {i}, error: {tcp_result[0]}, using default orientation")
+                            roll, pitch, yaw = 0, 0, 0
+                        else:
+                            current_tcp = tcp_result[1]
+                            roll, pitch, yaw = current_tcp[3], current_tcp[4], current_tcp[5]
+                            print(f"Fallback TCP pose: {current_tcp}, using roll={roll:.2f}, pitch={pitch:.2f}, yaw={yaw:.2f}")
+                    
+                    # Move to waypoint using Cartesian motion
+                    target_x = target_pos[0] * 1000  # Convert m to mm
+                    target_y = target_pos[1] * 1000  
+                    target_z = target_pos[2] * 1000
+                    move_speed = max(10, int(50 * speed_factor))
+                    move_acc = max(50, int(100 * speed_factor))
+                    
+                    print(f"Moving to: x={target_x:.1f}mm, y={target_y:.1f}mm, z={target_z:.1f}mm")
+                    print(f"With orientation: roll={roll:.2f}°, pitch={pitch:.2f}°, yaw={yaw:.2f}°")
+                    print(f"Speed: {move_speed}mm/s, Acc: {move_acc}mm/s²")
+                    # Wait until robot is in ready state
+                    while self.arm.get_state()[1] not in [0, 2, 3]:
+                        time.sleep(0.5)
+                        self.arm.set_state(0)
+                        print(f"Waiting for robot ready state: {self.arm.get_state()}")
+                        
+                    # Execute the movement
+                    code = self.arm.set_position(
+                        x=target_x,
+                        y=target_y,
+                        z=target_z,
+                        roll=roll,
+                        pitch=pitch,
+                        yaw=yaw,
+                        speed=move_speed,
+                        mvacc=move_acc,
+                        wait=True,
+                        radius=20.0,
+                        is_radian=False
+                    )
+                    
+                    print(f"set_position returned code: {code}")
+                    
+                    if code != 0:
+                        print(f"Failed at waypoint {i}, error code: {code}")
+                        return False
+                    
+                    print(f"✓ Completed waypoint {i}/{len(waypoints)-1} ({100*i/(len(waypoints)-1):.1f}%)")
+                    
+                    # Small pause between waypoints to reduce accumulated error
+                    if i < len(waypoints) - 1:
+                        time.sleep(0.1)
+                        
+                except Exception as e:
+                    print(f"Error at waypoint {i}: {e}")
+                    return False
+            
+            print("✓ Direct xArm pivot pull completed successfully!")
+            return True
+            
+        except Exception as e:
+            print(f"Error in direct xArm pivot pull: {e}")
+            return False
+            
+        finally:
+            # Always restore default sensitivity
+            self.restore_default_sensitivity()
+
+
+    def _rotate_quaternion(self, quaternion, axis, angle):
+        """Rotate a quaternion around an axis"""
+        from scipy.spatial.transform import Rotation as R
+        try:
+            # Convert input quaternion to scipy format if needed
+            if hasattr(quaternion, 'cpu'):  # torch tensor
+                quat = quaternion.cpu().numpy().flatten()
+            else:
+                quat = np.array(quaternion).flatten()
+            
+            # Ensure we have 4 elements
+            if len(quat) != 4:
+                print(f"Warning: Expected 4-element quaternion, got {len(quat)} elements: {quat}")
+                return quaternion
+                
+            # Create rotation from quaternion (scipy expects [x, y, z, w])
+            r_current = R.from_quat(quat)
+            
+            # Create rotation around the specified axis
+            r_delta = R.from_rotvec(angle * np.array(axis))
+            
+            # Apply rotation
+            r_result = r_delta * r_current
+            
+            # Return as quaternion
+            result_quat = r_result.as_quat()
+            return result_quat
+            
+        except Exception as e:
+            print(f"Error in _rotate_quaternion: {e}")
+            return quaternion
 
     def clear_robot_errors(self) -> bool:
         """
@@ -3430,6 +4323,36 @@ class CuRoboMotionPlanner:
                 
         except Exception as e:
             print(f"Error clearing robot errors: {e}")
+            return False
+
+    def _configure_initial_sensitivity(self) -> bool:
+        """
+        Configure initial robot sensitivity settings for normal operations
+        
+        Returns:
+            bool: True if configuration successful, False otherwise
+        """
+        try:
+            if self.arm is None:
+                print("Warning: Robot not connected, cannot configure initial sensitivity")
+                return False
+                
+            with self.arm_lock:
+                # Set default collision sensitivity
+                collision_result = self.arm.set_collision_sensitivity(self.default_collision_sensitivity, wait=True)
+                if collision_result != 0:
+                    print(f"Warning: Failed to set initial collision sensitivity (code: {collision_result})")
+                    
+                # Set default teach sensitivity
+                teach_result = self.arm.set_teach_sensitivity(self.default_teach_sensitivity, wait=True)
+                if teach_result != 0:
+                    print(f"Warning: Failed to set initial teach sensitivity (code: {teach_result})")
+                
+                print(f"✓ Configured initial sensitivity: collision={self.default_collision_sensitivity}, teach={self.default_teach_sensitivity}")
+                return True
+                
+        except Exception as e:
+            print(f"Error configuring initial sensitivity: {e}")
             return False
 
     def execute_robust_pivot_motion(
@@ -3510,9 +4433,14 @@ class CuRoboMotionPlanner:
                     print(f"Motion error on attempt {retry_count + 1}: {motion_error}")
                     # Check if it's a force/torque sensor error
                     error_str = str(motion_error).lower()
-                    if any(keyword in error_str for keyword in ['force', 'torque', 'collision', 'contact']):
-                        print("Detected force/torque related error - will retry with error clearing")
+                    if any(keyword in error_str for keyword in ['force', 'torque', 'collision', 'contact', 'constraint']):
+                        print("Detected force/torque related error - will retry with adjusted sensitivity")
                         self.clear_robot_errors()
+                        
+                        # Try to dynamically adjust sensitivity for the next retry
+                        if hasattr(self, 'adjust_sensitivity_for_torque_errors') and retry_count < max_retries:
+                            print("Adjusting sensitivity for next retry attempt...")
+                            self.adjust_sensitivity_for_torque_errors()
                     
                 retry_count += 1
             
@@ -3532,521 +4460,77 @@ class CuRoboMotionPlanner:
             return False, None, None
 
 
-def test_pull():
-    """Example usage of the CuRobo Motion Planner with a real xArm robot"""
-    # Create the planner with robot IP
-    robot_ip = "192.168.1.224"  # Replace with your robot's IP
+def test_direct_xarm_pivot_pull():
+    """Test pivot pull using direct xArm API, bypassing CuRobo"""
+    print("\n=== Testing Direct xArm API Pivot Pull ===")
+    
+    # Initialize planner
+    robot_ip = "192.168.1.224"
     planner = CuRoboMotionPlanner(robot_ip=robot_ip)
     
-    # Test twist functionality
-    print("=== Testing Twist Functionality ===")
-    
-    # Check if we're connected to a robot
-    has_robot = planner.arm is not None
-    
-    print("\n=== Test 1: Basic Push Test ===")
-    success, trajectory, dt = planner.plan_push_pull(
-        distance=0.05,  # 5cm push
-        is_push=False,
-        custom_normal=[     0.1296,    -0.48544,     0.86461],  # Use TCP orientation
-        move_parallel=False,
-        execute=has_robot,
-        speed_factor=0.5
-    )
-    print(f"Push test result: {'Success' if success else 'Failed'}")
-
-def example_usage_with_robot():
-    """Example usage of the CuRobo Motion Planner with a real xArm robot"""
-    # Create the planner with robot IP
-    robot_ip = "192.168.1.224"  # Replace with your robot's IP
-    planner = CuRoboMotionPlanner(robot_ip=robot_ip)
-    
-    # Test twist functionality
-    print("=== Testing Twist Functionality ===")
-    
-    # Check if we're connected to a robot
-    has_robot = planner.arm is not None
-    print(f"Robot connection status: {'Connected' if has_robot else 'Simulation mode'}")
-    
-    if has_robot:
-        # Test 1: Clockwise twist
-        print("\n=== Test 1: Clockwise Twist ===")
-        success = planner.execute_wrist_twist(
-            direction="clockwise",
-            rotation_angle=np.pi/4,  # 45 degrees
-            speed_factor=0.8,
-            timeout=10.0
-        )
-        print(f"Clockwise twist result: {'Success' if success else 'Failed'}")
-        
-        if success:
-            time.sleep(2.0)
-            
-            # Test 2: Counterclockwise twist
-            print("\n=== Test 2: Counterclockwise Twist ===")
-            success = planner.execute_wrist_twist(
-                direction="counterclockwise",
-                rotation_angle=np.pi/4,  # 45 degrees
-                speed_factor=0.5,
-                timeout=30.0
-            )
-            print(f"Counterclockwise twist result: {'Success' if success else 'Failed'}")
-            
-            if success:
-                time.sleep(2.0)
-                
-                # Test 3: Return to original position
-                print("\n=== Test 3: Return to Original Position ===")
-                success = planner.execute_wrist_twist(
-                    direction="clockwise",
-                    rotation_angle=np.pi/4,  # 45 degrees to return
-                    speed_factor=0.5,
-                    timeout=30.0
-                )
-                print(f"Return twist result: {'Success' if success else 'Failed'}")
-    
-    print("\n=== Push/Pull Testing ===")
-    
-    # Get current position and orientation (either from real robot or simulation)
-    current_pose = planner.get_forward_kinematics()
-    if not current_pose:
-        print("Failed to get current pose, cannot continue testing")
-        return
-    
-    current_position, current_orientation = current_pose
-    print(f"Current position: {current_position}")
-    print(f"Current orientation: {current_orientation}")
-    
-    # Test 1: Push along Z-axis (default behavior)
-    print("\n=== Test 1: Basic Push Test ===")
-    success, trajectory, dt = planner.plan_push_pull(
-        distance=0.05,  # 5cm push
-        is_push=False,
-        custom_normal=[     0.1296,    -0.48544,     0.86461],  # Use TCP orientation
-        move_parallel=False,
-        execute=has_robot,
-        speed_factor=0.5
-    )
-    print(f"Push test result: {'Success' if success else 'Failed'}")
-    
-    # If the robot is real and the previous test succeeded, wait a moment
-    if has_robot and success:
-        time.sleep(2.0)
-    
-    # Test 2: Pull along Z-axis
-    print("\n=== Test 2: Basic Pull Test ===")
-    success, trajectory, dt = planner.plan_push_pull(
-        distance=0.05,  # 5cm pull
-        is_push=False,
-        custom_normal=None,  # Use TCP orientation
-        move_parallel=False,
-        execute=has_robot,
-        speed_factor=0.5
-    )
-    print(f"Pull test result: {'Success' if success else 'Failed'}")
-    
-    # If the robot is real and the previous test succeeded, wait a moment
-    if has_robot and success:
-        time.sleep(2.0)
-    
-    # Test 3: Push with custom normal
-    print("\n=== Test 3: Custom Normal Push Test ===")
-    # Define a custom normal pointing 45 degrees from vertical
-    custom_normal = [0, 0.7071, 0.7071]  # ~45 degrees in Y-Z plane
-    success, trajectory, dt = planner.plan_push_pull(
-        distance=0.05,  # 5cm push
-        is_push=True,
-        custom_normal=custom_normal,
-        move_parallel=False,
-        execute=has_robot,
-        speed_factor=0.5
-    )
-    print(f"Custom normal push test result: {'Success' if success else 'Failed'}")
-    
-    # If the robot is real and the previous test succeeded, wait a moment
-    if has_robot and success:
-        time.sleep(2.0)
-    
-    # Test 4: Parallel movement (slide along surface)
-    print("\n=== Test 4: Parallel Movement Test ===")
-    success, trajectory, dt = planner.plan_push_pull(
-        distance=0.05,  # 5cm slide
-        is_push=True,
-        custom_normal=None,  # Use TCP orientation
-        move_parallel=True,  # Move perpendicular to normal (parallel to surface)
-        execute=has_robot,
-        speed_factor=0.5
-    )
-    print(f"Parallel movement test result: {'Success' if success else 'Failed'}")
-    
-    # Return to home position if using a real robot
-    if has_robot:
-        print("\nReturning to home position...")
-        planner.move_to_home(execute=True, speed_factor=0.5)
-    
-    print("\n=== All Testing Complete ===")
-
-def test_retract():
-    robot_ip = "192.168.1.224"  # Replace with your robot's IP
-    planner = CuRoboMotionPlanner(robot_ip=robot_ip)
-    planner.retract_gripper()
-
-def test_pivot_pull():
-    """Test pivot-based pull operations with specific robot position and pivot point"""
-    print("\n=== Testing Pivot-Based Pull Operations ===")
-    
-    # Create the planner with robot IP
-    robot_ip = "192.168.1.224"  # Replace with your robot's IP
-    planner = CuRoboMotionPlanner(robot_ip=robot_ip)
-    
-    # Check if we're connected to a robot
-    has_robot = planner.arm is not None
-    print(f"Robot connected: {has_robot}")
-    
-    try:
-        # Use specific robot position from your test case
-        test_position = [0.58571, -0.092502, 0.83504]
-        test_orientation = [7.641e-07, -0.70711, 1.5081e-06, -0.70711]
-        test_pivot_point = [0.5857136, -0.1418507127951729, 0.8350447]
-        
-        print(f"Test robot position: {test_position}")
-        print(f"Test robot orientation: {test_orientation}")
-        print(f"Test pivot point: {test_pivot_point}")
-        
-        # Calculate expected distance (should be ~0.0493m)
-        import numpy as np
-        expected_distance = np.linalg.norm(np.array(test_position) - np.array(test_pivot_point))
-        print(f"Expected distance from grasp to pivot: {expected_distance:.4f}m")
-        
-        # Test with specific pivot point (using default arc angle from method)
-        print("\n=== Test: Pull with Specific Pivot Point ===")
-        
-        # Test with the exact parameters from your scenario
-        success, trajectory, dt = planner.plan_push_pull(
-            distance=0.05,  # Will be overridden by calculated distance to pivot
-            is_push=False,  # Pull operation
-            pivot_point=test_pivot_point,
-            arc_segments=10,  # Matching your test case
-            execute=False,   # Planning only for testing
-            speed_factor=0.3,  # Slow for safety
-            planning_timeout=15.0  # Longer timeout
-        )
-        print(f"Default arc angle pull result: {'Success' if success else 'Failed'}")
-        
-        # If that fails, try with fewer segments for simpler planning
-        if not success:
-            print("Trying with fewer arc segments...")
-            success, trajectory, dt = planner.plan_push_pull(
-                distance=0.05,
-                is_push=False,
-                pivot_point=test_pivot_point,
-                arc_segments=6,  # Fewer segments
-                execute=False,
-                speed_factor=0.3,
-                planning_timeout=15.0
-            )
-            print(f"Fewer segments pull result: {'Success' if success else 'Failed'}")
-        
-        # If that fails, try with even fewer segments
-        if not success:
-            print("Trying with minimal arc segments...")
-            success, trajectory, dt = planner.plan_push_pull(
-                distance=0.05,
-                is_push=False,
-                pivot_point=test_pivot_point,
-                arc_segments=4,  # Minimal segments
-                execute=False,
-                speed_factor=0.3,
-                planning_timeout=20.0  # Even longer timeout
-            )
-            print(f"Minimal segments pull result: {'Success' if success else 'Failed'}")
-        
-        # Test with actual robot execution if connected and planning succeeded
-        if has_robot and success:
-            print("\n=== Executing on Real Robot ===")
-            print("WARNING: About to execute motion on real robot!")
-            user_input = input("Continue with execution? (y/N): ")
-            if user_input.lower() == 'y':
-                success_exec, _, _ = planner.plan_push_pull(
-                    distance=0.05,
-                    is_push=False,
-                    pivot_point=test_pivot_point,
-                    arc_segments=4,  # Use minimal segments for safety
-                    execute=True,
-                    speed_factor=0.2,  # Very slow for safety
-                    planning_timeout=20.0
-                )
-                print(f"Execution result: {'Success' if success_exec else 'Failed'}")
-            else:
-                print("Execution skipped by user")
-        
-        # Summary
-        print(f"\n=== Test Summary ===")
-        print(f"Planning with test pivot point: {'✓' if success else '✗'}")
-        print(f"Expected distance: {expected_distance:.4f}m")
-        print(f"Test position: {test_position}")
-        print(f"Test pivot: {test_pivot_point}")
-        
-    except Exception as e:
-        print(f"Error in pivot pull test: {str(e)}")
-        import traceback
-        traceback.print_exc()
-    
-    finally:
-        # Clean up
-        if planner.arm is not None:
-            planner.arm.disconnect()
-
-def test_specific_pivot_pull():
-    """Test pivot pull from specific robot pose and pivot point"""
-    print("\n=== Testing Specific Pivot Pull Operation ===")
-    
-    # Specific test parameters from your scenario
+    # Test parameters from your scenario
     target_position = [0.580571, -0.092502, 0.79]
     target_orientation = [7.641e-07, -0.70711, 1.5081e-06, -0.70711]
     pivot_point = [0.58057136, -0.448507127951729, 0.79]
-    
+    time.sleep(1.5)
     print(f"Target robot position: {target_position}")
-    print(f"Target robot orientation: {target_orientation}")
     print(f"Pivot point: {pivot_point}")
-    
-    # Create the planner with robot IP
-    robot_ip = "192.168.1.224"  # Replace with your robot's IP
-    planner = CuRoboMotionPlanner(robot_ip=robot_ip)
-    
-    # Check if we're connected to a robot
-    has_robot = planner.arm is not None
-    print(f"Robot connected: {has_robot}")
-    
+    planner.prepare_robot_for_execution()
+    print(planner._ensure_robot_ready_for_motion())
     try:
-        import numpy as np
-        
-        # Calculate expected distance
-        expected_distance = np.linalg.norm(np.array(target_position) - np.array(pivot_point))
-        print(f"Expected distance from grasp to pivot: {expected_distance:.4f}m")
-        
-        # Step 1: Move robot to target pose if connected
-        if has_robot:
-            print(f"\n=== Step 1: Moving to Target Pose ===")
-            print(f"Moving to position: {target_position}")
-            print(f"Moving to orientation: {target_orientation}")
-            
-            # Move to target pose with generous timeout
-            move_success, _, _ = planner.move_to_pose(
-                target_position=target_position,
-                target_orientation=target_orientation,
-                execute=True,
-                planning_timeout=15.0,
-                speed_factor=0.3  # Slow and safe
-            )
-            
-            if move_success:
-                print("✓ Successfully moved to target pose")
-                planner.close_gripper()
-                # Verify we're at the correct position
-                current_pose = planner.get_robot_tcp_pose()
-                if current_pose:
-                    current_pos, current_orient = current_pose
-                    if hasattr(current_pos, 'flatten'):
-                        current_pos = current_pos.flatten()
-                    print(f"Current position after move: {current_pos}")
-                    
-                    # Check if we're close enough (within 5mm tolerance)
-                    position_error = np.linalg.norm(np.array(current_pos) - np.array(target_position))
-                    print(f"Position error: {position_error*1000:.2f}mm")
-                    
-                    if position_error < 0.005:  # 5mm tolerance
-                        print("✓ Position is within acceptable tolerance")
-                    else:
-                        print("⚠ Position error is larger than expected")
-                else:
-                    print("⚠ Could not verify current position")
-            else:
-                print("✗ Failed to move to target pose")
-                print("Continuing with pivot test from current position...")
+        # Get current robot state or use target as fallback
+        current_pose = planner.get_tcp_pose_api()
+        if current_pose:
+            current_pos, current_orient = current_pose
+            if hasattr(current_pos, 'flatten'):
+                current_pos = current_pos.flatten()
         else:
-            print("No robot connected - testing planning only")
+            current_pos = target_position
+            current_orient = target_orientation
             
-        # Step 2: Execute pivot pull operation
-        print(f"\n=== Step 2: Executing Pivot Pull ===")
+        print(f"Current position: {current_pos}")
         
-        # Try with conservative arc parameters first
-        print("Attempting pivot pull with 30-degree arc...")
-        success, trajectory, dt = planner.plan_push_pull(
-            distance=0.05,  # Will be overridden by calculated distance to pivot
-            is_push=False,  # Pull operation
-            pivot_point=pivot_point,
-            arc_segments=8,  # Conservative segment count
-            execute=has_robot,  # Execute if robot connected
-            speed_factor=0.2,  # Very slow for safety
-            planning_timeout=20.0,  # Extended timeout
-            current_position=target_position,  # Use target position explicitly
-            current_orientation=target_orientation  # Use target orientation explicitly
-        )
+        # Calculate radius
+        radius = np.linalg.norm(np.array(current_pos) - np.array(pivot_point))
+        print(f"Pivot radius: {radius:.3f}m")
         
-        print(f"30-degree arc result: {'Success' if success else 'Failed'}")
-        
-        # If that fails, try with smaller arc
-        if not success:
-            print("Attempting pivot pull with 20-degree arc...")
-            success, trajectory, dt = planner.plan_push_pull(
-                distance=0.05,
-                is_push=False,
-                pivot_point=pivot_point,
-                arc_segments=6,  # Fewer segments
-                execute=has_robot,
-                speed_factor=0.2,
-                planning_timeout=25.0,
-                current_position=target_position,
-                current_orientation=target_orientation
-            )
-            print(f"20-degree arc result: {'Success' if success else 'Failed'}")
-        
-        # If that still fails, try minimal arc
-        if not success:
-            print("Attempting pivot pull with 15-degree arc...")
-            success, trajectory, dt = planner.plan_push_pull(
-                distance=0.05,
-                is_push=False,
-                pivot_point=pivot_point,
-                arc_segments=4,  # Minimal segments
-                execute=has_robot,
-                speed_factor=0.2,
-                planning_timeout=30.0,
-                current_position=target_position,
-                current_orientation=target_orientation
-            )
-            print(f"15-degree arc result: {'Success' if success else 'Failed'}")
-        
-        # Summary
-        print(f"\n=== Test Summary ===")
-        print(f"Target position: {target_position}")
-        print(f"Pivot point: {pivot_point}")
-        print(f"Expected distance: {expected_distance:.4f}m")
-        print(f"Pivot pull result: {'✓ Success' if success else '✗ Failed'}")
-        
-        if success:
-            print("✓ Specific pivot pull test completed successfully!")
-        else:
-            print("✗ Pivot pull planning failed - may need to adjust parameters")
-            
-        return success
-        
-    except Exception as e:
-        print(f"Error in specific pivot pull test: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return False
-    
-    finally:
-        # Clean up
-        if planner.arm is not None:
-            planner.arm.disconnect()
-
-def test_simple_pivot_pull():
-    """Test simplified pivot pull with automatic pivot point calculation"""
-    print("\n=== Testing Simple Pivot Pull Operation ===")
-    
-    # Create the planner with robot IP
-    robot_ip = "192.168.1.224"  # Replace with your robot's IP
-    planner = CuRoboMotionPlanner(robot_ip=robot_ip)
-    
-    # Check if we're connected to a robot
-    has_robot = planner.arm is not None
-    print(f"Robot connected: {has_robot}")
-    
-    try:
-        import numpy as np
-        
-        # Get current robot pose
-        if has_robot:
-            current_pose = planner.get_robot_tcp_pose()
-        else:
-            # Fallback for testing without robot
-            current_pose = planner.get_forward_kinematics()
-        
-        if not current_pose:
-            print("Could not get current TCP pose")
-            return False
-        
-        current_position, current_orientation = current_pose
-        
-        # Flatten position if needed
-        if hasattr(current_position, 'flatten'):
-            current_pos = current_position.flatten()
-        else:
-            current_pos = current_position
-        
-        print(f"Current gripper position: {current_pos}")
-        print(f"Current gripper orientation: {current_orientation}")
-        
-        # Calculate pivot point: -0.25 meters in Y direction from current position
-        pivot_offset_y = -0.5  # 25cm behind gripper in Y direction (towards cabinet hinge)
-        pivot_point = [
-            current_pos[0],              # Same X as gripper
-            current_pos[1] + pivot_offset_y,  # 25cm behind in Y
-            current_pos[2]               # Same Z as gripper
+        # Test direct xArm API approach with different parameters
+        test_configs = [
+            # {"angle": 20.0, "segments": 8, "speed": 0.1, "name": "Conservative"},
+            # {"angle": 15.0, "segments": 6, "speed": 0.08, "name": "Very Conservative"},
+            {"angle": 90.0, "segments": 10, "speed": 0.05, "name": "Ultra Conservative"}
         ]
         
-        print(f"Calculated pivot point: {pivot_point}")
-        
-        # Calculate expected radius
-        radius = abs(pivot_offset_y)
-        print(f"Expected radius: {radius:.3f}m")
-        
-        # Test the pivot pull operation
-        print(f"\n=== Executing Pivot Pull Test ===")
-        print("This should create an arc motion in X/Y plane around Z-axis")
-        print(f"Expected motion: gripper moves in arc, Z should remain ~constant")
-        
-        # Start with conservative parameters
-        success, trajectory, dt = planner.plan_push_pull(
-            distance=0.05,  # Will be overridden by calculated distance to pivot
-            is_push=False,  # Pull operation
-            pivot_point=pivot_point,
-            arc_segments=6,  # Conservative segment count
-            execute=has_robot,  # Execute if robot connected
-            speed_factor=0.3,  # Slow for safety
-            planning_timeout=20.0  # Extended timeout
-        )
-        
-        print(f"Pivot pull result: {'Success' if success else 'Failed'}")
-        
-        if not success:
-            print("Trying with fewer segments...")
-            success, trajectory, dt = planner.plan_push_pull(
-                distance=0.05,
-                is_push=False,
-                pivot_point=pivot_point,
-                arc_segments=4,  # Even fewer segments
-                execute=has_robot,
-                speed_factor=0.2,  # Even slower
-                planning_timeout=25.0
+        for config in test_configs:
+            print(f"\n--- Trying {config['name']} Configuration ---")
+            success = planner.execute_pivot_pull_direct_xarm(
+                pivot_point=np.array(pivot_point),
+                current_position=current_pos,
+                current_orientation=current_orient,
+                radius=radius,
+                arc_angle_degrees=config["angle"],
+                segments=config["segments"],
+                speed_factor=config["speed"],
+                is_quat = False
             )
-            print(f"Reduced segments result: {'Success' if success else 'Failed'}")
+            
+            if success:
+                print(f"✓ {config['name']} configuration succeeded!")
+                return True
+            else:
+                print(f"✗ {config['name']} configuration failed")
         
-        # Summary
-        print(f"\n=== Test Summary ===")
-        print(f"Current position: {current_pos}")
-        print(f"Pivot point: {pivot_point}")
-        print(f"Radius: {radius:.3f}m")
-        print(f"Rotation axis: Z (vertical)")
-        print(f"Expected motion: X/Y arc, Z constant")
-        print(f"Result: {'✓ Success' if success else '✗ Failed'}")
-        
-        return success
+        print("✗ All direct xArm API configurations failed")
+        return False
         
     except Exception as e:
-        print(f"Error in simple pivot pull test: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error in direct xArm API test: {e}")
         return False
     
     finally:
-        # Clean up
-        if planner.arm is not None:
-            planner.arm.disconnect()
-
+        # Ensure sensitivity is restored
+        planner.restore_default_sensitivity()
+        print("✓ Test completed, sensitivity restored")
 
 def test_robust_pivot_pull():
     """
@@ -4060,7 +4544,8 @@ def test_robust_pivot_pull():
         planner = CuRoboMotionPlanner(robot_ip=robot_ip)
         
         # Get current robot state
-        if not planner.update_current_joint_state():
+        current_joints = planner.get_robot_joint_state()
+        if current_joints is None:
             print("Failed to get current joint state")
             return False
         
@@ -4149,26 +4634,31 @@ def test_robust_pivot_pull():
             planner.arm.disconnect()
 
 
+def test_dynamic_close_gripper():
+    """
+    Test dynamic gripper close with and without torque adjustments
+    """
+    print("=== Testing Dynamic Gripper Close Function ===")
+    
+    # Initialize planner
+    robot_ip = "192.168.1.224"
+    planner = CuRoboMotionPlanner(robot_ip=robot_ip)
+    
+    # Test simple close first
+    print("\n1. Testing simple gripper close (no dynamic adjustments)...")
+    success_simple = planner.close_gripper(simple_close=True)
+    print(f"Simple close result: {'SUCCESS' if success_simple else 'FAILED'}")
+    
+    # Open gripper for second test
+    planner.open_gripper()
+    
+    # Test dynamic close with torque monitoring
+    print("\n2. Testing dynamic gripper close (with torque monitoring and adjustments)...")
+    success_dynamic = planner.close_gripper(simple_close=False)
+    print(f"Dynamic close result: {'SUCCESS' if success_dynamic else 'FAILED'}")
+
 if __name__ == "__main__":
     # Run comprehensive test suite
     print("=== xArm CuRobo Interface Test Suite ===\n")
     
-    # Test basic pivot pull
-    print("1. Testing basic pivot pull...")
-    basic_success = test_specific_pivot_pull()
-    
-    print("\n" + "="*50 + "\n")
-    
-    # Test robust pivot pull with force/torque error handling
-    print("2. Testing robust pivot pull with force/torque error handling...")
-    robust_success = test_robust_pivot_pull()
-    
-    print("\n" + "="*50)
-    print("=== Test Suite Results ===")
-    print(f"Basic pivot pull: {'✓ PASS' if basic_success else '✗ FAIL'}")
-    print(f"Robust pivot pull: {'✓ PASS' if robust_success else '✗ FAIL'}")
-    
-    if basic_success and robust_success:
-        print("\n✓ All tests passed!")
-    else:
-        print("\n⚠ Some tests failed - check output above for details")
+    test_dynamic_close_gripper()

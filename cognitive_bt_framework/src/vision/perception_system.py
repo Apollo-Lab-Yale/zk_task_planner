@@ -338,7 +338,7 @@ class PerceptionSystem:
                 )
                 
                 # Continue with rest of processing...
-                obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=12, min_distance=40, apply_center_shift=True)
+                obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=12, min_distance=45, apply_center_shift=True)
                 print("Detected regions of interest")
                 # DEBUG: Validate points of interest coordinates
                 if obj_info.points and 'pixel_coords' in obj_info.points:

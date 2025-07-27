@@ -15,7 +15,7 @@ from cognitive_bt_framework.utils import BOOL_PREDS, RELATIONAL_PREDS
 
 
 class LLMInterfaceOpenAI:
-    def __init__(self, model_name="gpt-4o"):
+    def __init__(self, model_name="o4-mini-2025-04-16"):
         self.client = OpenAI(api_key=get_openai_key())
         self.async_client = AsyncOpenAI(api_key=get_openai_key())
         self.model_name = model_name
@@ -278,7 +278,7 @@ class LLMInterfaceOpenAI:
             response = await self.async_client.chat.completions.create(
                 model=self.model_name,
                 messages=prompt,
-                max_tokens=4096,
+                max_completion_tokens=4096,
                 temperature=0.5
             )
             self.conversation_history.append([{
@@ -299,8 +299,8 @@ class LLMInterfaceOpenAI:
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=prompt,
-                max_tokens=4096,
-                temperature=0.5
+                max_completion_tokens=4096,
+                # temperature=0.5
             )
             self.conversation_history.append([{
                 'role': 'llm',
