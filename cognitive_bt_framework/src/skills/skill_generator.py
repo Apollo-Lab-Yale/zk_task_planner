@@ -283,12 +283,11 @@ class SkillGenerator:
         return tuple(normal)
 
 
-     # Helper function to find optimal label position avoiding overlaps
+     # Helper function to find optimal label position touching the point
     def find_optimal_label_position(self, px, py, alpha_id, all_points, placed_labels, img_width, img_height, object_center=None):
         """
-        Find the best position for a label that doesn't overlap with points or other labels.
-        Prioritizes horizontal alignment from the point with comprehensive overlap avoidance.
-        Also considers object center to position labels on the appropriate side.
+        Find the best corner position for a label that touches the point and minimizes overlaps.
+        The label will be positioned so one of its corners touches the point.
         
         Args:
             px, py: Point coordinates
@@ -303,363 +302,167 @@ class SkillGenerator:
         label_bg_size = cv2.getTextSize(alpha_id, cv2.FONT_HERSHEY_COMPLEX, 0.7, 2)[0]
         label_width, label_height = label_bg_size[0] + 8, label_bg_size[1] + 6  # Extra width for letter spacing
         
-        # Define horizontal distances to try (prioritize closer horizontal positions)
-        horizontal_distances = [25, 35, 45, 60, 80, 100]  # Increasing distances
+        # Define 8 corner positions where the label can be placed relative to the point
+        # Each position is defined as (corner_name, label_x_calc, label_y_calc, offset_x, offset_y)
+        corner_positions = [
+            # Top-right corner of label touches point (label extends down and left from point)
+            ("top-right", px - label_width, py, -label_width, 0),
+            # Top-left corner of label touches point (label extends down and right from point)  
+            ("top-left", px, py, 0, 0),
+            # Bottom-right corner of label touches point (label extends up and left from point)
+            ("bottom-right", px - label_width, py - label_height, -label_width, -label_height),
+            # Bottom-left corner of label touches point (label extends up and right from point)
+            ("bottom-left", px, py - label_height, 0, -label_height),
+            # Center-right edge of label touches point (label extends left from point)
+            ("center-right", px - label_width, py - label_height // 2, -label_width, -label_height // 2),
+            # Center-left edge of label touches point (label extends right from point)
+            ("center-left", px, py - label_height // 2, 0, -label_height // 2),
+            # Center-top edge of label touches point (label extends down from point)
+            ("center-top", px - label_width // 2, py, -label_width // 2, 0),
+            # Center-bottom edge of label touches point (label extends up from point)
+            ("center-bottom", px - label_width // 2, py - label_height, -label_width // 2, -label_height),
+        ]
         
-        # Determine preferred side based on object center
-        if object_center is not None:
-            cx, cy = object_center
-            # If point is to the left of center, prefer left side labels
-            # If point is to the right of center, prefer right side labels
-            point_is_left_of_center = px < cx
-            preferred_side = 'left' if point_is_left_of_center else 'right'
-        else:
-            # Default to right side if no object center provided
-            preferred_side = 'right'
-        
-        # First, try strictly horizontal positions (preferred side first)
-        horizontal_candidates = []
-        
-        for distance in horizontal_distances:
-            if preferred_side == 'left':
-                # Left side (preferred when point is left of center)
-                label_x = px - distance - label_width
-                label_y = py - label_height // 2
-                horizontal_candidates.append((label_x, label_y, distance, 180, 'left'))
-                
-                # Right side (fallback)
-                label_x = px + distance
-                label_y = py - label_height // 2
-                horizontal_candidates.append((label_x, label_y, distance, 0, 'right'))
-            else:
-                # Right side (preferred when point is right of center or no center given)
-                label_x = px + distance
-                label_y = py - label_height // 2  # Center vertically with point
-                horizontal_candidates.append((label_x, label_y, distance, 0, 'right'))
-                
-                # Left side (fallback)
-                label_x = px - distance - label_width
-                label_y = py - label_height // 2
-                horizontal_candidates.append((label_x, label_y, distance, 180, 'left'))
-        
-        # Check horizontal candidates first
+        # Score each position based on overlap avoidance and image bounds
         best_position = None
         best_score = -1
         
-        for label_x, label_y, distance, _, direction in horizontal_candidates:
+        for corner_name, label_x, label_y, offset_x, offset_y in corner_positions:
             # Check if label is within image bounds with margin
-            margin = 10
+            margin = 5
             if (label_x < margin or label_y < margin or 
                 label_x + label_width > img_width - margin or 
                 label_y + label_height > img_height - margin):
                 continue
             
-            # Check for point overlaps with enhanced collision detection
-            point_overlap = False
-            min_point_distance = float('inf')
-            
+            # STRICT: Check for point overlaps first and skip this position if any overlap exists
+            has_point_overlap = False
             for other_px, other_py in all_points:
-                # Calculate distance from label rectangle to point using proper rectangle-circle collision
+                if abs(other_px - px) < 2 and abs(other_py - py) < 2:
+                    continue  # Skip the current point itself
+                
+                # Calculate minimum distance from point to label rectangle with buffer
                 closest_x = max(label_x, min(other_px, label_x + label_width))
                 closest_y = max(label_y, min(other_py, label_y + label_height))
+                distance = np.sqrt((closest_x - other_px)**2 + (closest_y - other_py)**2)
                 
-                distance_to_rect = np.sqrt((closest_x - other_px)**2 + (closest_y - other_py)**2)
-                min_point_distance = min(min_point_distance, distance_to_rect)
-                
-                # Enhanced clearance for better visual separation
-                point_radius = 10
-                required_clearance = 25  # Increased clearance for better separation
-                if distance_to_rect < point_radius + required_clearance:
-                    point_overlap = True
+                # Require minimum clearance from other points (increased from 15 to 25)
+                if distance < 25:
+                    has_point_overlap = True
                     break
             
-            if point_overlap:
-                continue
+            if has_point_overlap:
+                continue  # Skip this position entirely
             
-            # Check overlap with all placed labels with enhanced buffer
-            has_overlap = False
-            min_label_distance = float('inf')
-            
+            # STRICT: Check for label overlaps and skip this position if any overlap exists
+            has_label_overlap = False
             for placed_x, placed_y, placed_w, placed_h in placed_labels:
-                # Enhanced buffer for better visual separation
-                buffer = 8  # Increased minimum space between labels
+                # Add buffer zone around existing labels (increased buffer)
+                buffer = 15  # Increased from 8 to 15 for better separation
                 if not (label_x + label_width + buffer < placed_x or 
-                    placed_x + placed_w + buffer < label_x or
-                    label_y + label_height + buffer < placed_y or 
-                    placed_y + placed_h + buffer < label_y):
-                    has_overlap = True
+                        placed_x + placed_w + buffer < label_x or
+                        label_y + label_height + buffer < placed_y or 
+                        placed_y + placed_h + buffer < label_y):
+                    has_label_overlap = True
                     break
-                else:
-                    # Calculate minimum distance between label centers
-                    label_center_x = label_x + label_width // 2
-                    label_center_y = label_y + label_height // 2
-                    placed_center_x = placed_x + placed_w // 2
-                    placed_center_y = placed_y + placed_h // 2
-                    center_dist = np.sqrt((label_center_x - placed_center_x)**2 + 
-                                        (label_center_y - placed_center_y)**2)
-                    min_label_distance = min(min_label_distance, center_dist)
             
-            if has_overlap:
-                continue
+            if has_label_overlap:
+                continue  # Skip this position entirely
             
-            # Score this position (higher is better)
-            distance_score = min_point_distance
-            label_clearance_score = min_label_distance if min_label_distance != float('inf') else 100
+            # Calculate score for valid positions (higher is better)
+            score = 100
             
-            # Strong preference for horizontal alignment
-            horizontal_bonus = 50  # High bonus for horizontal positioning
+            # Preference bonus based on object center and corner position
+            if object_center is not None:
+                cx, cy = object_center
+                # Prefer positions that place labels away from object center
+                label_center_x = label_x + label_width // 2
+                label_center_y = label_y + label_height // 2
+                
+                # Distance from label center to object center
+                dist_from_center = np.sqrt((label_center_x - cx)**2 + (label_center_y - cy)**2)
+                score += min(dist_from_center / 10, 20)  # Bonus for being away from center
             
-            # Prefer the side that matches object center position
-            if direction == preferred_side:
-                direction_preference = 40  # High bonus for preferred side
-            else:
-                direction_preference = 15  # Lower bonus for non-preferred side
-            
-            # Prefer closer distances but not too close
-            distance_penalty = distance / 15
-            
-            score = distance_score + label_clearance_score + horizontal_bonus + direction_preference - distance_penalty
+            # Slight preference for certain corner positions (top-right, bottom-left, etc.)
+            preferred_corners = ["top-right", "bottom-left", "center-right", "center-left"]
+            if corner_name in preferred_corners:
+                score += 5
             
             if score > best_score:
                 best_score = score
-                offset_x = label_x - px
-                offset_y = label_y - py
                 best_position = (label_x, label_y, offset_x, offset_y)
         
-        # If no horizontal position works, try slightly angled positions
+        # If no good corner position found, do a systematic grid search for any valid position
         if best_position is None:
-            angled_candidates = []
+            search_radius = 100  # Increased search radius
+            step_size = 8  # Smaller steps for more thorough search
             
-            for distance in horizontal_distances:
-                # Try small angles from horizontal (±15°, ±30°)
-                for angle_deg in [-30, -15, 15, 30]:
-                    rad = np.radians(angle_deg)
+            for distance in range(30, search_radius, step_size):  # Start at minimum distance
+                for angle in range(0, 360, 15):  # Check every 15 degrees
+                    rad = np.radians(angle)
+                    test_x = int(px + distance * np.cos(rad))
+                    test_y = int(py + distance * np.sin(rad))
                     
-                    if preferred_side == 'left':
-                        # Left side with angle (preferred)
-                        offset_x = int(-distance * np.cos(rad))
-                        offset_y = int(distance * np.sin(rad))
-                        label_x = px + offset_x - label_width
-                        label_y = py + offset_y - label_height // 2
-                        angled_candidates.append((label_x, label_y, offset_x, offset_y, distance, angle_deg, 'left'))
-                        
-                        # Right side with angle (fallback)
-                        offset_x = int(distance * np.cos(rad))
-                        offset_y = int(distance * np.sin(rad))
-                        label_x = px + offset_x
-                        label_y = py + offset_y - label_height // 2
-                        angled_candidates.append((label_x, label_y, offset_x, offset_y, distance, angle_deg, 'right'))
-                    else:
-                        # Right side with angle (preferred)
-                        offset_x = int(distance * np.cos(rad))
-                        offset_y = int(distance * np.sin(rad))
-                        label_x = px + offset_x
-                        label_y = py + offset_y - label_height // 2
-                        angled_candidates.append((label_x, label_y, offset_x, offset_y, distance, angle_deg, 'right'))
-                        
-                        # Left side with angle (fallback)
-                        offset_x = int(-distance * np.cos(rad))
-                        offset_y = int(distance * np.sin(rad))
-                        label_x = px + offset_x - label_width
-                        label_y = py + offset_y - label_height // 2
-                        angled_candidates.append((label_x, label_y, offset_x, offset_y, distance, angle_deg, 'left'))
-            
-            # Check angled candidates
-            for label_x, label_y, offset_x, offset_y, distance, angle_deg, direction in angled_candidates:
-                margin = 10
-                if (label_x < margin or label_y < margin or 
-                    label_x + label_width > img_width - margin or 
-                    label_y + label_height > img_height - margin):
-                    continue
-                
-                # Check for point overlaps
-                point_overlap = False
-                min_point_distance = float('inf')
-                
-                for other_px, other_py in all_points:
-                    closest_x = max(label_x, min(other_px, label_x + label_width))
-                    closest_y = max(label_y, min(other_py, label_y + label_height))
-                    distance_to_rect = np.sqrt((closest_x - other_px)**2 + (closest_y - other_py)**2)
-                    min_point_distance = min(min_point_distance, distance_to_rect)
+                    # Check bounds
+                    if (test_x < 10 or test_y < 10 or 
+                        test_x + label_width > img_width - 10 or 
+                        test_y + label_height > img_height - 10):
+                        continue
                     
-                    point_radius = 10
-                    required_clearance = 25
-                    if distance_to_rect < point_radius + required_clearance:
-                        point_overlap = True
+                    # Check for point overlaps
+                    valid_position = True
+                    for other_px, other_py in all_points:
+                        if abs(other_px - px) < 2 and abs(other_py - py) < 2:
+                            continue  # Skip current point
+                        
+                        closest_x = max(test_x, min(other_px, test_x + label_width))
+                        closest_y = max(test_y, min(other_py, test_y + label_height))
+                        distance_to_point = np.sqrt((closest_x - other_px)**2 + (closest_y - other_py)**2)
+                        
+                        if distance_to_point < 25:  # Same clearance as before
+                            valid_position = False
+                            break
+                    
+                    if not valid_position:
+                        continue
+                    
+                    # Check for label overlaps
+                    for placed_x, placed_y, placed_w, placed_h in placed_labels:
+                        buffer = 15  # Same buffer as before
+                        if not (test_x + label_width + buffer < placed_x or 
+                                placed_x + placed_w + buffer < test_x or
+                                test_y + label_height + buffer < placed_y or 
+                                placed_y + placed_h + buffer < test_y):
+                            valid_position = False
+                            break
+                    
+                    if valid_position:
+                        offset_x = test_x - px
+                        offset_y = test_y - py
+                        best_position = (test_x, test_y, offset_x, offset_y)
                         break
                 
-                if point_overlap:
-                    continue
-                
-                # Check overlap with placed labels
-                has_overlap = False
-                min_label_distance = float('inf')
-                
-                for placed_x, placed_y, placed_w, placed_h in placed_labels:
-                    buffer = 8
-                    if not (label_x + label_width + buffer < placed_x or 
-                        placed_x + placed_w + buffer < label_x or
-                        label_y + label_height + buffer < placed_y or 
-                        placed_y + placed_h + buffer < label_y):
-                        has_overlap = True
-                        break
-                    else:
-                        label_center_x = label_x + label_width // 2
-                        label_center_y = label_y + label_height // 2
-                        placed_center_x = placed_x + placed_w // 2
-                        placed_center_y = placed_y + placed_h // 2
-                        center_dist = np.sqrt((label_center_x - placed_center_x)**2 + 
-                                            (label_center_y - placed_center_y)**2)
-                        min_label_distance = min(min_label_distance, center_dist)
-                
-                if has_overlap:
-                    continue
-                
-                # Score angled positions (lower than horizontal but still good)
-                distance_score = min_point_distance
-                label_clearance_score = min_label_distance if min_label_distance != float('inf') else 100
-                
-                # Bonus for being close to horizontal
-                angle_penalty = abs(angle_deg) / 5  # Penalty increases with angle
-                near_horizontal_bonus = 35  # Good bonus for near-horizontal
-                
-                # Prefer the side that matches object center position
-                if direction == preferred_side:
-                    direction_preference = 30  # High bonus for preferred side
+                if best_position is not None:
+                    break
+            
+            # Final fallback: if still no position found, place in image corner (may overlap)
+            if best_position is None:
+                if px < img_width // 2:
+                    fallback_x = img_width - label_width - 10
                 else:
-                    direction_preference = 10  # Lower bonus for non-preferred side
-                distance_penalty = distance / 15
-                
-                score = distance_score + label_clearance_score + near_horizontal_bonus + direction_preference - angle_penalty - distance_penalty
-                
-                if score > best_score:
-                    best_score = score
-                    best_position = (label_x, label_y, offset_x, offset_y)
-        
-        # If still no good position found, try the grid search fallback
-        if best_position is None:
-            best_position = self._grid_search_label_position(
-                px, py, label_width, label_height, placed_labels, img_width, img_height, all_points
-            )
-        
-        # Final fallback: place on preferred side with vertical offset to minimize overlap
-        if best_position is None:
-            best_y_offset = 0
-            min_overlap_count = float('inf')
-            
-            # Use preferred side for final fallback
-            fallback_distance = 30
-            if preferred_side == 'left':
-                fallback_x = px - fallback_distance - label_width
-            else:
-                fallback_x = px + fallback_distance
-            
-            for y_offset in range(-50, 51, 5):  # Smaller steps for finer positioning
-                label_x = fallback_x
-                label_y = py + y_offset - label_height // 2
-                
-                if label_y < 0 or label_y + label_height > img_height:
-                    continue
-                
-                # Check for point overlaps
-                point_overlap = False
-                for other_px, other_py in all_points:
-                    closest_x = max(label_x, min(other_px, label_x + label_width))
-                    closest_y = max(label_y, min(other_py, label_y + label_height))
-                    distance_to_rect = np.sqrt((closest_x - other_px)**2 + (closest_y - other_py)**2)
+                    fallback_x = 10
                     
-                    point_radius = 10
-                    required_clearance = 25
-                    if distance_to_rect < point_radius + required_clearance:
-                        point_overlap = True
-                        break
+                if py < img_height // 2:
+                    fallback_y = img_height - label_height - 10
+                else:
+                    fallback_y = 10
                 
-                if point_overlap:
-                    continue
-                    
-                overlap_count = 0
-                for placed_x, placed_y, placed_w, placed_h in placed_labels:
-                    buffer = 8
-                    if not (label_x + label_width + buffer < placed_x or 
-                        placed_x + placed_w + buffer < label_x or
-                        label_y + label_height + buffer < placed_y or 
-                        placed_y + placed_h + buffer < label_y):
-                        overlap_count += 1
-                
-                if overlap_count < min_overlap_count:
-                    min_overlap_count = overlap_count
-                    best_y_offset = y_offset
-            
-            final_offset_x = fallback_x - px
-            final_offset_y = best_y_offset - label_height // 2
-            best_position = (fallback_x, py + best_y_offset - label_height // 2, final_offset_x, final_offset_y)
+                offset_x = fallback_x - px
+                offset_y = fallback_y - py
+                best_position = (fallback_x, fallback_y, offset_x, offset_y)
         
         return best_position
 
-    def _grid_search_label_position(self, px, py, label_width, label_height, placed_labels, img_width, img_height, all_points=None):
-        """
-        Systematic grid search for label placement when other methods fail.
-        """
-        search_radius = 80
-        step_size = 10
-        
-        best_position = None
-        min_overlaps = float('inf')
-        
-        for dx in range(-search_radius, search_radius + 1, step_size):
-            for dy in range(-search_radius, search_radius + 1, step_size):
-                label_x = px + dx
-                label_y = py + dy
-                
-                # Check bounds
-                if (label_x < 0 or label_y < 0 or 
-                    label_x + label_width > img_width or 
-                    label_y + label_height > img_height):
-                    continue
-                
-                # Check for point overlaps first
-                point_overlap = False
-                if all_points:
-                    for other_px, other_py in all_points:
-                        # Calculate distance from label rectangle to point using proper rectangle-circle collision
-                        closest_x = max(label_x, min(other_px, label_x + label_width))
-                        closest_y = max(label_y, min(other_py, label_y + label_height))
-                        distance_to_rect = np.sqrt((closest_x - other_px)**2 + (closest_y - other_py)**2)
-                        
-                        # Check if rectangle overlaps with circle (point has radius 10, need clearance)
-                        point_radius = 10
-                        required_clearance = 20
-                        if distance_to_rect < point_radius + required_clearance:
-                            point_overlap = True
-                            break
-                
-                if point_overlap:
-                    continue
-                
-                # Count overlaps with placed labels
-                overlap_count = 0
-                for placed_x, placed_y, placed_w, placed_h in placed_labels:
-                    if not (label_x + label_width < placed_x or 
-                        placed_x + placed_w < label_x or
-                        label_y + label_height < placed_y or 
-                        placed_y + placed_h < label_y):
-                        overlap_count += 1
-                
-                # Prefer positions with fewer overlaps, and closer to original point
-                distance = np.sqrt(dx**2 + dy**2)
-                score = -overlap_count * 1000 - distance  # Heavily penalize overlaps
-                
-                if overlap_count < min_overlaps or (overlap_count == min_overlaps and distance < 50):
-                    min_overlaps = overlap_count
-                    best_position = (label_x, label_y, dx, dy)
-                    
-                    if overlap_count == 0:  # Found non-overlapping position
-                        break
-            
-            if min_overlaps == 0:  # Found non-overlapping position
-                break
-        
-        return best_position
 
     def _visualize_points_of_interest(
             self, 
@@ -840,9 +643,99 @@ class SkillGenerator:
             1
         )
         
-        # Create the second image: Points of interest
+        # Create the second image: Points of interest with object segmentation mask
         points_img = image.copy()
-
+        # Add edge labels with arrows to the points image to indicate hinge locations
+        if obj_info.mask is not None:
+            # Get object bounding box from mask
+            mask_coords = np.where(obj_info.mask > 0)
+            if len(mask_coords[0]) > 0:
+                min_y, max_y = np.min(mask_coords[0]), np.max(mask_coords[0])
+                min_x, max_x = np.min(mask_coords[1]), np.max(mask_coords[1])
+                
+                # Calculate edge positions
+                center_x = (min_x + max_x) // 2
+                center_y = (min_y + max_y) // 2
+                
+                # Arrow and label properties
+                arrow_length = 30
+                arrow_color = (255, 255, 255)  # White arrows
+                label_color = (255, 255, 255)  # White text
+                outline_color = (0, 0, 0)     # Black outline
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 0.6
+                thickness = 2
+                outline_thickness = 4
+                
+                # Top edge
+                top_arrow_start = (center_x, min_y - arrow_length - 10)
+                top_arrow_end = (center_x, min_y - 5)
+                cv2.arrowedLine(points_img, top_arrow_start, top_arrow_end, arrow_color, thickness)
+                
+                # Top label
+                top_text = "top"
+                text_size = cv2.getTextSize(top_text, font, font_scale, thickness)[0]
+                top_text_pos = (center_x - text_size[0] // 2, min_y - arrow_length - 15)
+                cv2.putText(points_img, top_text, top_text_pos, font, font_scale, outline_color, outline_thickness)
+                cv2.putText(points_img, top_text, top_text_pos, font, font_scale, label_color, thickness)
+                
+                # Bottom edge
+                bottom_arrow_start = (center_x, max_y + arrow_length + 10)
+                bottom_arrow_end = (center_x, max_y + 5)
+                cv2.arrowedLine(points_img, bottom_arrow_start, bottom_arrow_end, arrow_color, thickness)
+                
+                # Bottom label
+                bottom_text = "bottom"
+                text_size = cv2.getTextSize(bottom_text, font, font_scale, thickness)[0]
+                bottom_text_pos = (center_x - text_size[0] // 2, max_y + arrow_length + 25)
+                cv2.putText(points_img, bottom_text, bottom_text_pos, font, font_scale, outline_color, outline_thickness)
+                cv2.putText(points_img, bottom_text, bottom_text_pos, font, font_scale, label_color, thickness)
+                
+                # Left edge
+                left_arrow_start = (min_x - arrow_length - 10, center_y)
+                left_arrow_end = (min_x - 5, center_y)
+                cv2.arrowedLine(points_img, left_arrow_start, left_arrow_end, arrow_color, thickness)
+                
+                # Left label
+                left_text = "left"
+                text_size = cv2.getTextSize(left_text, font, font_scale, thickness)[0]
+                left_text_pos = (min_x - arrow_length - 10 - text_size[0], center_y + text_size[1] // 2)
+                cv2.putText(points_img, left_text, left_text_pos, font, font_scale, outline_color, outline_thickness)
+                cv2.putText(points_img, left_text, left_text_pos, font, font_scale, label_color, thickness)
+                
+                # Right edge
+                right_arrow_start = (max_x + arrow_length + 10, center_y)
+                right_arrow_end = (max_x + 5, center_y)
+                cv2.arrowedLine(points_img, right_arrow_start, right_arrow_end, arrow_color, thickness)
+                
+                # Right label
+                right_text = "right"
+                text_size = cv2.getTextSize(right_text, font, font_scale, thickness)[0]
+                right_text_pos = (max_x + arrow_length + 15, center_y + text_size[1] // 2)
+                cv2.putText(points_img, right_text, right_text_pos, font, font_scale, outline_color, outline_thickness)
+                cv2.putText(points_img, right_text, right_text_pos, font, font_scale, label_color, thickness)
+                
+                # Add center label for spatial reference
+                center_text = "center"
+                center_font_scale = 0.5
+                center_thickness = 2
+                center_outline_thickness = 3
+                text_size = cv2.getTextSize(center_text, font, center_font_scale, center_thickness)[0]
+                center_text_pos = (center_x - text_size[0] // 2, center_y + text_size[1] // 2)
+                cv2.putText(points_img, center_text, center_text_pos, font, center_font_scale, outline_color, center_outline_thickness)
+                cv2.putText(points_img, center_text, center_text_pos, font, center_font_scale, label_color, center_thickness)
+        # Add object segmentation mask outline if available
+        if obj_info.mask is not None:
+            # Add object mask outline for better visibility
+            mask_contours, _ = cv2.findContours(
+                obj_info.mask.astype(np.uint8), 
+                cv2.RETR_EXTERNAL, 
+                cv2.CHAIN_APPROX_SIMPLE
+            )
+            cv2.drawContours(points_img, mask_contours, -1, (0, 255, 255), 3)  # Yellow outline, slightly thicker
+        
+        cv2.putText(points_img, "Points of Interest + Object Segmentation", (10, 30),
+                cv2.FONT_HERSHEY_DUPLEX, 0.7, (255, 255, 255), 2)
         if points is not None and len(points) > 0:
             # Calculate object center for label positioning
             object_center = None
@@ -876,7 +769,8 @@ class SkillGenerator:
                 # Collect all point coordinates
                 all_point_coords = [(pixel_coords[i][0], pixel_coords[i][1]) for i in sorted_indices]
                 
-                # Draw each point with improved positioning
+                # STEP 1: Draw all points first (underneath labels)
+                point_data = []  # Store data for later label drawing
                 for idx, i in enumerate(sorted_indices):
                     px, py = pixel_coords[i]
                     _ = scores[i]
@@ -891,12 +785,21 @@ class SkillGenerator:
                     else:
                         alpha_id = point_id
                     
-                    # Draw circle for point with colored outline (slightly larger for better visibility)
-                    cv2.circle(points_img, (px, py), radius=10, color=color, thickness=3)
-                    # Draw white center for better visibility
-                    cv2.circle(points_img, (px, py), radius=6, color=(255, 255, 255), thickness=-1)
-                    # Add a small colored center dot
-                    cv2.circle(points_img, (px, py), radius=3, color=color, thickness=-1)
+                    # Draw small colored circle as the interaction point with black and white outlines
+                    cv2.circle(points_img, (px, py), radius=8, color=(0, 0, 0), thickness=-1)  # Black outer outline
+                    cv2.circle(points_img, (px, py), radius=6, color=(255, 255, 255), thickness=-1)  # White outline
+                    cv2.circle(points_img, (px, py), radius=4, color=color, thickness=-1)  # Colored center
+                    
+                    # Store data for label drawing (but don't draw labels yet)
+                    point_data.append({
+                        'px': px, 'py': py, 'color': color, 'alpha_id': alpha_id, 'idx': idx
+                    })
+                
+                # STEP 2: Now draw all labels on top of points (labels have priority)
+                for data in point_data:
+                    px, py = data['px'], data['py']
+                    color = data['color']
+                    alpha_id = data['alpha_id']
                     
                     # Find optimal label position using improved algorithm
                     label_x, label_y, offset_x, offset_y = self.find_optimal_label_position(
@@ -909,13 +812,11 @@ class SkillGenerator:
                     
                     # Draw connecting line if label is far from point
                     if abs(offset_x) > 20 or abs(offset_y) > 20:
-                        # Draw a thin line from point edge to label
-                        line_start_x = px + (8 if offset_x > 0 else -8)
-                        line_start_y = py + (8 if offset_y > 0 else -8)
+                        # Draw a thin line from center of small circle to label
                         line_end_x = label_x + label_width // 2
                         line_end_y = label_y + label_height // 2
                         
-                        cv2.line(points_img, (line_start_x, line_start_y), 
+                        cv2.line(points_img, (px, py), 
                                 (line_end_x, line_end_y), color, 2)
                     
                     # Draw label background rectangle with matching color and slight transparency effect
@@ -959,7 +860,8 @@ class SkillGenerator:
                         px, py = int(point[0]), int(point[1])
                     all_point_coords.append((px, py))
                 
-                # Draw each point with improved positioning  
+                # STEP 1: Draw all points first (underneath labels)
+                dict_point_data = []  # Store data for later label drawing
                 for i, (label, point) in enumerate(point_items):
                     if hasattr(point, 'position'):
                         # Handle PointOfInterest objects
@@ -980,12 +882,21 @@ class SkillGenerator:
                     else:
                         alpha_id = label
                     
-                    # Draw circle for point with colored outline (slightly larger for better visibility)
-                    cv2.circle(points_img, (px, py), radius=10, color=color, thickness=3)
-                    # Draw white center for better visibility
-                    cv2.circle(points_img, (px, py), radius=6, color=(255, 255, 255), thickness=-1)
-                    # Add a small colored center dot
-                    cv2.circle(points_img, (px, py), radius=3, color=color, thickness=-1)
+                    # Draw small colored circle as the interaction point with black and white outlines
+                    cv2.circle(points_img, (px, py), radius=8, color=(0, 0, 0), thickness=-1)  # Black outer outline
+                    cv2.circle(points_img, (px, py), radius=6, color=(255, 255, 255), thickness=-1)  # White outline
+                    cv2.circle(points_img, (px, py), radius=4, color=color, thickness=-1)  # Colored center
+                    
+                    # Store data for label drawing (but don't draw labels yet)
+                    dict_point_data.append({
+                        'px': px, 'py': py, 'color': color, 'alpha_id': alpha_id, 'label': label
+                    })
+                
+                # STEP 2: Now draw all labels on top of points (labels have priority)
+                for data in dict_point_data:
+                    px, py = data['px'], data['py']
+                    color = data['color']
+                    alpha_id = data['alpha_id']
                     
                     # Find optimal label position using improved algorithm
                     label_x, label_y, offset_x, offset_y = self.find_optimal_label_position(
@@ -998,13 +909,11 @@ class SkillGenerator:
                     
                     # Draw connecting line if label is far from point
                     if abs(offset_x) > 20 or abs(offset_y) > 20:
-                        # Draw a thin line from point edge to label
-                        line_start_x = px + (8 if offset_x > 0 else -8)
-                        line_start_y = py + (8 if offset_y > 0 else -8)
+                        # Draw a thin line from center of small circle to label
                         line_end_x = label_x + label_width // 2
                         line_end_y = label_y + label_height // 2
                         
-                        cv2.line(points_img, (line_start_x, line_start_y), 
+                        cv2.line(points_img, (px, py), 
                                 (line_end_x, line_end_y), color, 2)
                     
                     # Draw label background rectangle with matching color and slight transparency effect
@@ -1034,8 +943,7 @@ class SkillGenerator:
                                         label_width + 6, label_height + 6))
 
         # Add title to the points image
-        cv2.putText(points_img, "Points of Interest", (10, 30),
-                cv2.FONT_HERSHEY_DUPLEX, 0.7, (255, 255, 255), 2)
+        
         
         # Create the third image: Depth visualization with RealSense-quality processing
         depth_img = None
@@ -1156,6 +1064,8 @@ class SkillGenerator:
         # Save the depth image
         self._save_image(depth_img, f"depth_image_{image_id}")
         
+        
+        
         return surface_img, points_img
     
     def _categorize_points_from_point_objects(self,
@@ -1273,12 +1183,33 @@ class SkillGenerator:
             if hasattr(point, 'description') and point.description:
                 desc = f"Point {label}: {point.description}, position: {position_desc}"
             else:
-                desc = f"Point {label}: Located at normalized coordinates ({norm_x:.2f}, {norm_y:.2f}), position: {position_desc}"
+                desc = f"Point {label}, position: {position_desc}"
             
             point_descriptions.append(desc)
         
         return point_descriptions
 
+    def _format_executed_skills_context(self, executed_skills: List) -> str:
+        """Format executed skills list into context string for the LLM"""
+        if not executed_skills:
+            return "No skills have been executed yet. This is the first skill in the sequence."
+        
+        context_lines = [
+            f"Previously executed skills in this sequence ({len(executed_skills)} skills):"
+        ]
+        
+        for i, skill in enumerate(executed_skills, 1):
+            skill_command = skill.get('skill_command', f"{skill.get('skill_name', 'unknown')} {skill.get('parameters', '')}")
+            target_obj = skill.get('target_object', 'unknown')
+            context_lines.append(f"  {i}. {skill_command} (target: {target_obj})")
+        
+        context_lines.append("")
+        context_lines.append("Consider this execution history when planning the current skill:")
+        context_lines.append("- Avoid interfering with objects that have already been manipulated")
+        context_lines.append("- Build upon the current state established by previous skills")
+        context_lines.append("- Ensure compatibility with the sequence of actions performed")
+        
+        return "\n".join(context_lines)
 
     def generate_skill(self, 
                     image: np.ndarray,
@@ -1286,6 +1217,7 @@ class SkillGenerator:
                     abstract_action: str,
                     target_object: str,
                     object_info: Optional[ObjectInfo] = None,
+                    executed_skills: List = None,
                     ) -> Optional[Skill]:
         """
         Generate a new skill using the LLM interface based on image input with labeled points and surfaces
@@ -1296,6 +1228,7 @@ class SkillGenerator:
             abstract_action: The abstract action to perform
             target_object: The object to perform the action on
             object_info: ObjectInfo containing additional object data including surface_masks
+            executed_skills: List of previously executed skills for context
         
         Returns:
             Generated skill if successful, None otherwise
@@ -1351,6 +1284,66 @@ class SkillGenerator:
         # Create descriptions for prompt
         point_descriptions = []
         surface_descriptions = []
+        object_segmentation_info = ""
+
+        # Generate object segmentation description if mask is available
+        if object_info is not None and object_info.mask is not None:
+            mask_area = np.sum(object_info.mask)
+            total_area = image.shape[0] * image.shape[1]
+            coverage_percent = (mask_area / total_area) * 100
+            
+            # Find bounding box of the mask
+            mask_contours, _ = cv2.findContours(
+                object_info.mask.astype(np.uint8), 
+                cv2.RETR_EXTERNAL, 
+                cv2.CHAIN_APPROX_SIMPLE
+            )
+            
+            if mask_contours:
+                # Get bounding rect of the largest contour
+                largest_contour = max(mask_contours, key=cv2.contourArea)
+                x, y, w, h = cv2.boundingRect(largest_contour)
+                
+                object_segmentation_info = f"""
+--- TARGET OBJECT SEGMENTATION ---
+The target object "{target_object}" has been precisely segmented and is outlined with a YELLOW BOUNDARY in the points image.
+
+Object Segmentation Details:
+• Coverage: {coverage_percent:.1f}% of the image
+• Bounding box: x={x}, y={y}, width={w}, height={h}
+• Mask area: {mask_area} pixels
+
+EDGE LABELS FOR HINGE LOCATION:
+The points image includes WHITE ARROWS and LABELS pointing to each edge of the target object:
+• "top" - points to the top edge of the object
+• "bottom" - points to the bottom edge of the object  
+• "left" - points to the left edge of the object
+• "right" - points to the right edge of the object
+
+These labels indicate where hinges would be located for rotational motion. When selecting a hinge_location, 
+you MUST identify these labels in the image and reference them in your justification.
+
+IMPORTANT: Only select interaction points that fall WITHIN the yellow outlined region. 
+Any points outside this segmented area are NOT part of the target object and should be rejected.
+The segmentation provides precise boundaries of the target object to avoid confusion with adjacent objects.
+"""
+            else:
+                object_segmentation_info = f"""
+--- TARGET OBJECT SEGMENTATION ---
+The target object "{target_object}" has been segmented covering {coverage_percent:.1f}% of the image.
+
+EDGE LABELS FOR HINGE LOCATION:
+The points image includes WHITE ARROWS and LABELS pointing to each edge of the target object:
+• "top" - points to the top edge of the object
+• "bottom" - points to the bottom edge of the object  
+• "left" - points to the left edge of the object
+• "right" - points to the right edge of the object
+
+These labels indicate where hinges would be located for rotational motion. When selecting a hinge_location, 
+you MUST identify these labels in the image and reference them in your justification.
+
+Only select interaction points within the segmented region.
+"""
 
         # Handle points
         # Original format with PointOfInterest objects
@@ -1406,245 +1399,408 @@ class SkillGenerator:
 
                 CONTEXT: This is for robotic task automation to assist with everyday objects and activities.
 
-                Your task is to generate a complete, structured skill definition for performing **{abstract_action}** on a **{target_object}**, using only the provided visual inputs. You must generate BOTH the current skill format AND additional semantic-geometric information for robust skill reuse.
+                Your task is to generate a complete, structured skill definition for performing **{abstract_action}** on a **{target_object}**, using only the provided visual inputs.
+                
+                --- EXECUTED SKILLS CONTEXT ---
+                {self._format_executed_skills_context(executed_skills or [])}
 
-                --- VISUAL INPUT FORMAT ---
-                You are provided with two images:
-                1. **FIRST IMAGE** – Surface segments (labeled aaa, aab, aac...) with **normal vectors** shown as arrows.
-                2. **SECOND IMAGE** – Points of interest (labeled aaa, aab, aac...) indicated with colored circles.
+                --- VISUAL INPUT UNDERSTANDING ---
+                You will receive TWO images:
+                
+                IMAGE 1 - SURFACE SEGMENTS:
+                • Shows labeled surfaces (aaa, aab, aac...)
+                • Each surface has a NORMAL VECTOR shown as an arrow
+                • Normal vectors point OUTWARD from the surface
+                • Use these for determining push/pull directions
+                
+                IMAGE 2 - INTERACTION POINTS:
+                • Shows COLORED CIRCLES marking exact interaction locations
+                • Each circle has a label (aaa, aab, aac...)
+                • Labels are connected to circles by colored lines
+                • CRITICAL: The colored CIRCLES are the actual points - NOT where lines intersect objects OR the label locations
+                • Lines are ONLY for matching labels to circles
+                • Labels are ONLY for identifying circles 
 
-                SURFACE LABELS → FIRST IMAGE ONLY  
-                POINT LABELS → SECOND IMAGE ONLY  
+                --- POINT SELECTION METHODOLOGY ---
+                
+                STEP 1: Identify the Target Object
+                • Look for the object matching: {target_object}
+                • Use visual cues: shape, color, texture, hardware
+                • The target object is outlined with a YELLOW BOUNDARY in the points image
+                • CRITICAL: Only consider points within the yellow outlined region
+                • Distinguish from similar adjacent objects using the segmentation boundaries
+                
+                STEP 2: Validate Points
+                For each potential point:
+                • Follow the colored line from label to find the COLORED CIRCLE
+                • Check if the CIRCLE (not line) is on the target object
+                • Verify the circle is on a functional component (handle, button, etc.)
+                • Reject circles on adjacent objects or decorative features
+                
+                STEP 3: Select Optimal Points
+                • Choose circles that PHYSICALLY OVERLAP functional features
+                • For handles: ONLY select circles where the circle COVERS part of the handle
+                • For buttons: ONLY select circles that OVERLAP the pushable surface
+                • REJECT circles that are merely "near", "aligned with", or "offset from" features
+                • The colored circle must INTERSECT with the actual functional hardware
+                • For hinged objects: identify which edge the hinge is on (top/bottom/left/right)
+                • CONSIDER ROBOT REACH: Select points that are within the robot's comfortable working range
+                • AVOID points that would require overextension or create collision risks with the robot's body
+                • EDGE GRASPING: If no accessible functional features are available, edges are usually good grasp points - choose points along edges that maximize the available grip for the robot gripper
 
+                {point_descriptions}
+                
                 {surface_descriptions}
+                
+                {object_segmentation_info}
+                
+                --- ACTION PRIMITIVES ---
+                Available primitives and their parameters:
+                
+                • move_gripper_to_pose('point_label', is_top_down_grasp, is_side_grasp)
+                - point_label: Use labels from IMAGE 2 colored circles only
+                - is_top_down_grasp: True for vertical movements (lifting, pressing down)
+                - is_side_grasp: True for horizontal movements (drawers, sliding)
+                
+                • push('surface_label', 'force_direction', is_button, has_pivot, 'hinge_location')
+                • pull('surface_label', 'force_direction', is_button, has_pivot, 'hinge_location')
+                - surface_label: Use labels from IMAGE 1 only
+                - force_direction: 'perpendicular' (along normal) or 'parallel' (along surface)
+                - is_button: True for short activation pushes, False for sustained contact
+                - has_pivot: True for rotational motion, False for linear motion
+                - hinge_location: 'top', 'bottom', 'left', or 'right' indicating which edge the hinge is on, '' if no hinge
+                  CRITICAL: You MUST identify the white edge labels and center label in the image and reference them when selecting hinge_location
+                
+                • close_gripper() / open_gripper() - Control gripper state
+                • retract_gripper() - Move gripper away
+                • twist('direction') - 'clockwise' or 'counterclockwise'
+                
+                --- TWIST ROTATION MECHANICS ---
+                CRITICAL: Twist rotation is ALWAYS about the gripper's Z-axis (finger-to-finger axis).
+                
+                GRASP ORIENTATION DETERMINES GLOBAL ROTATION AXIS:
+                
+                TOP-DOWN GRASP (is_top_down_grasp=True):
+                • Gripper Z-axis aligns with GLOBAL Z-axis (vertical)
+                • twist('clockwise') → Rotates about GLOBAL Z-axis (vertical rotation)
+                • Used for: turning bottle caps, knobs, lids, handles viewed from above
+                • Example: Opening a jar lid requires top-down grasp + clockwise twist
+                
+                SIDE GRASP (is_side_grasp=True):
+                • Gripper Z-axis aligns with GLOBAL X-axis (horizontal, left-right)
+                • twist('clockwise') → Rotates about GLOBAL X-axis (roll rotation)
+                • Used for: turning door handles, levers, switches on vertical surfaces
+                • Example: Door handle requires side grasp + twist to rotate handle about its shaft
+                
+                GRASP PLANNING FOR TWIST OPERATIONS:
+                • IDENTIFY the intended rotation axis of the object (what axis should it spin around?)
+                • CHOOSE the grasp type that aligns the gripper Z-axis with that rotation axis:
+                  - Object rotates vertically (like bottle cap) → use TOP-DOWN grasp
+                  - Object rotates horizontally (like door handle) → use SIDE grasp
+                • ENSURE the twist direction matches the desired object motion
+                • CONSIDER the object's physical constraints and threading direction
 
-                --- TASK ---
-                1. Determine the **appropriate subtype** of `{abstract_action}` based on object geometry.
-                2. Select a **sequence of action primitives** to achieve it.
-                3. Set **precise parameters** based only on the visible surfaces, normals, and geometry.
-                4. Generate semantic point labels and geometric relationships for skill reuse.
-                5. Return a **single valid raw JSON** with no text or formatting outside of it.
+                --- OPENING MECHANISMS ---
+                
+                BUTTON-BASED OPENING:
+                • Some objects may open via button press rather than traditional handles
+                • For objects like microwaves, coffee makers, printers, electronic devices
+                • Look for buttons, touch panels, or pressure-sensitive areas
+                • Use push() with is_button=True for button activation
+                • Common button locations: front panel, side panel, top panel
+                • After button press, object may automatically open or unlock for manual opening
+                
+                OPENING STRATEGY SELECTION:
+                • Physical handles/knobs: Use traditional pull/twist mechanisms
+                • Electronic devices: Look for buttons, displays, or touch areas first
+                • Combination devices: May require button press followed by manual opening
+                • Assess the object type and choose appropriate opening method
 
-                --- AVAILABLE PRIMITIVES ---
-                - move_gripper_to_pose('point_label', is_top_down_grasp, is_side_grasp)
-                - push('surface_label', 'force_direction', is_button, has_pivot, 'pivot_point_label')
-                - pull('surface_label', 'force_direction', is_button, has_pivot, 'pivot_point_label')
-                - close_gripper()
-                - open_gripper()
-                - retract_gripper()
-                - twist('direction') // 'clockwise' or 'counterclockwise'
+                --- CRITICAL RULES (IN ORDER OF IMPORTANCE) ---
+                
+                ⚠️ CRITICAL MISTAKES TO AVOID:
+                ✗ Circles "near" or "aligned with" handles (must PHYSICALLY OVERLAP)
+                ✗ Using line intersections or label locations instead of colored circles
+                ✗ Selecting points on adjacent objects instead of target object
+                ✗ Choosing same edge as handle for hinge location (should be opposite)
 
-                --- PUSH / PULL PARAMETER GUIDE ---
+                1. POINT SELECTION REQUIREMENTS:
+                ✓ Use ONLY colored circles with black/white outlines as interaction points
+                ✓ Circle must DIRECTLY COVER part of the handle/button/feature
+                ✓ If no circle overlaps the functional feature, reject all circles for that feature
+                ✓ Follow colored lines to match labels to circles (same color = same point)
+                
+                2. TARGET OBJECT FOCUS:
+                ✓ Select points ONLY on the specified target object
+                ✗ NEVER select points on adjacent objects
+                ✗ NEVER select points separated by vizual markers of the end of an object like cracks gaps or color changes
+                
+                3. FUNCTIONAL FEATURES:
+                ✓ Choose handles, buttons, knobs with clear function
+                ✗ AVOID decorative circles or mounting hardware
 
-                **1. force_direction ('perpendicular' | 'parallel')**
-                - Use `'perpendicular'` if the force should be applied **along the surface normal** (into or out of the surface) — e.g., pushing a button straight in, pulling a latch directly outward from the surface.
-                - Use `'parallel'` if the force should be applied **parallel to the surface but perpendicular to the surface normal** (sliding or dragging motion along the surface) — e.g., sliding a door laterally, rotating a lid around its axis.
-                - **NORMAL VECTOR REFERENCE**: The surface normal vectors are shown as arrows in the FIRST IMAGE - use these to determine the correct force direction relative to each surface.
+                4. SPATIAL RELATIONSHIPS:
+                ✓ Pivot points must be opposite from grasp points
+                ✓ Verify mechanical feasibility of selected points
 
-                **2. is_button (true | false)**
-                - Use `true` when the push/pull is:
-                - **Short distance**
-                - Requires **low force**
-                - Used to **activate or toggle** a mechanism (e.g., press a button, release a spring)
-                - Use `false` when the action involves sustained contact or continuous movement (e.g., sliding, opening).
+                5. ROBOT CONSTRAINTS:
+                ✓ Select points within comfortable reach (avoid overextension/collision)
+                ✓ Prefer natural, ergonomic robot poses
+                ✓ Top-down grasp for vertical movements, side grasp for horizontal movements
 
-                **3. has_pivot (true | false)**
-                - Use `true` when the action requires **rotating around a fixed point** on the object (e.g., opening a hinged door, hinged lid, rotating a handle).
-                - Use `false` when the force applies evenly across the surface with **linear motion** (e.g., sliding drawers, linear pulls, no clear rotation axis).
-                - **OBJECT GUIDELINES:** Doors and lids typically use `has_pivot=true`, drawers typically use `has_pivot=false`.
+                7. LID/CAP REMOVAL COMPLETION:
+                ✓ When opening containers with lids or caps, the skill must fully remove the lid/cap
+                ✓ Use retract_gripper() to move the lid/cap completely away from the container opening
+                ✓ Ensure the container opening is fully accessible after lid/cap removal
+                ✓ For twist-off lids/caps, combine twist() and retract_gripper() actions
+                ✓ The removal should be complete, not just partial loosening
 
-                **4. pivot_point_label ('a', 'b', ..., or '')**
-                - Provide a **point label from the SECOND IMAGE** if `has_pivot = true`, representing the center or hinge of rotation.
-                - Use `''` (empty string) if `has_pivot = false`.
 
-                --- EXAMPLES ---
-                - push('a', 'perpendicular', true, false, '') → Push a surface along its normal vector (straight into the surface) like a button
-                - pull('b', 'parallel', false, true, 'd') → Pull/slide a surface parallel to the surface (perpendicular to normal) around pivot point 'd'
-                - push('c', 'parallel', false, false, '') → Push a surface parallel to itself (sliding motion along the surface)
-                - pull('d', 'perpendicular', false, false, '') → Pull a surface along its normal vector (straight out from the surface)
+                !!! CRITICAL POINT AND PIVOT POINT LOCATION RULE !!!
+                ====================================
 
-                --- OUTPUT FORMAT ---
+                COLORED CIRCLES WITH BLACK AND WHITE OUTLINES = EXACT INTERACTION POINTS
+                ✓ Look for colored circles with black outer ring and white inner ring - these are the ONLY interaction points
+                ✓ ONLY the pixel location of the COLORED CIRCLE matters
+                ✓ The CIRCLE itself is the EXACT interaction point
+                ✓ IGNORE labels, connecting lines, and edge arrows when determining spatial location
 
-                <start_json>
+                COLOR-MATCHING SYSTEM FOR POINT IDENTIFICATION:
+                🎨 CRITICAL: Points, labels, and connecting lines share the SAME COLOR to show association
+                ✓ RED circle → connected to RED label text → via RED connecting line (if present)
+                ✓ BLUE circle → connected to BLUE label text → via BLUE connecting line (if present)
+                ✓ GREEN circle → connected to GREEN label text → via GREEN connecting line (if present)
+                ✓ Use color matching to identify which label belongs to which interaction point
+
+                LABELS, LINES, AND ARROWS = IDENTIFICATION ONLY, NOT INTERACTION POINTS
+                ✗ Labels (text like "jxh", "mbb") are ONLY for naming points - use COLOR to match them to circles
+                ✗ Lines connecting labels to circles are ONLY for visual association - same COLOR as both
+                ✗ Edge arrows (labeled "top", "bottom", "left", "right") are WHITE and for hinge identification only
+                ✗ The spatial position of labels has NO MEANING for task planning
+                ✗ The path or direction of connecting lines has NO MEANING for task planning
+                ✗ Edge arrows are NOT interaction points - they just indicate hinge locations
+
+                STEP-BY-STEP POINT PROCESSING:
+                1. For each point label in the image:
+                a. Identify the COLOR of the label text (e.g., red, blue, green)
+                b. Find the COLORED CIRCLE that matches that exact same color
+                c. Follow the connecting line (if present) to verify - it should be the same color
+                d. Record the EXACT PIXEL COORDINATES of that matching colored circle
+                e. Determine if that specific pixel location is on the target object
+                f. ONLY consider the circle's location, NEVER the label's or line's location
+
+                EXAMPLES:
+                - RED label "abc" → RED line → RED CIRCLE: Use circle's pixel location as interaction point
+                - BLUE CIRCLE on handle + BLUE label "xyz": Circle location is the interaction point  
+                - White arrows ("left", "right", "top", "bottom"): Hinge indicators ONLY, NOT interaction points
+
+                VALIDATION TEST:
+                For each point you select, explicitly state:
+                "Point [LABEL] is located at the [COLOR] CIRCLE which is positioned at [OBJECT FEATURE]"
+
+                --- HINGE LOCATION IDENTIFICATION FOR HINGED OBJECTS ---
+
+                CRITICAL HINGE IDENTIFICATION RULES:
+                1. VISUAL HINGE INDICATORS:
+                ✓ Look for actual visible hinges (metallic, cylindrical hardware)
+                ✓ Identify the edge where the object rotates (stationary edge)
+                ✓ Hinges are typically at 'left', 'right', 'top', or 'bottom' edges
+                
+                2. GEOMETRIC REASONING:
+                ✓ For cabinet doors: hinges usually on left or right edge
+                ✓ For drawers: typically no hinges (linear motion)
+                ✓ For lids/covers: hinges usually on back/top edge
+                ✓ For flip-up panels: hinges usually on bottom edge
+
+                3. HINGE LOCATION DETERMINATION:
+                • Examine the target object boundaries
+                • Identify which edge remains stationary during operation (THE HINGE EDGE)
+                • Specify hinge location as: 'left', 'right', 'top', 'bottom'
+                • Use '' (empty) for non-hinged objects (drawers, sliding doors)
+                
+                ⚠️ CRITICAL MISTAKE PREVENTION:
+                • The hinge is the STATIONARY edge that does NOT move
+                • The hinge is typically OPPOSITE from the handle/interaction point
+                • If handle is on RIGHT side → hinge is likely on LEFT side
+                • If handle is on LEFT side → hinge is likely on RIGHT side
+                • DO NOT select the edge closest to the handle as the hinge location
+
+                EXAMPLE ANALYSIS:
+                "For cabinet door with handle:
+                - SPATIAL ANALYSIS: Handle is between the CENTER and RIGHT labels on the object (INTERACTION POINT)
+                - The handle is closest to the RIGHT edge marked by 'right' label and farthest from the LEFT edge marked by 'left' label
+                - HINGE REASONING: Since interaction point is on RIGHT side → hinge should be on LEFT side
+                - I can see a vertical gap on the LEFT edge of the door (opposite from handle)
+                - This LEFT edge has metallic hinge hardware visible (STATIONARY EDGE)
+                - I can see the white 'left' label with arrow pointing to this edge in the image
+                - Therefore: hinge_location='left' (spatially OPPOSITE from center-right handle position, matching the edge label shown)"
+                
+                --- EXPLANATION REQUIREMENTS ---
+
+                    Your decision_rationale MUST include:
+
+                    1. TARGET OBJECT IDENTIFICATION:
+                    • What visual features confirmed this is the target object?
+                    • What boundaries separate it from other objects?
+                    • How confident are you in this identification?
+
+                    2. POINT SELECTION ANALYSIS:
+                    • List EVERY colored circle you can see and where it is, considering only the circle location
+                    • For EACH circle, state whether it OVERLAPS or is just "near/aligned with" features
+                    • For EACH rejected point, explain WHY (wrong object? decorative? poor position? no overlap?)
+                    • For EACH selected point, confirm it PHYSICALLY OVERLAPS the functional feature
+                    • Explicitly verify visual continuity between selected points
+                    • CRITICAL: Distinguish between "overlapping" vs "near" or "aligned with"
+                    
+                    3. PIVOT SELECTION ANALYSIS (if applicable)
+                    • List EVERY colored circle you can see and where it is, considering only the circle location
+                    • For EACH rejected point, explain WHY (wrong object? wrong distance? poor position?)
+                    • For THE selected point, explain WHY it's optimal
+                    • Explicitly verify visual continuity between selected points
+
+                    3. PRIMITIVE SEQUENCE REASONING:
+                    For EACH action in your sequence, explain:
+                    • WHY this specific point/surface was chosen
+                    • WHY each parameter has its value
+                    • WHAT alternatives you considered and rejected
+                    • HOW robot reach constraints influenced your selection
+                    • WHY the selected points are within comfortable working range
+
+                    4. HINGE LOCATION IDENTIFICATION (for rotational objects):
+                    • Explicitly identify and list the white edge labels and center label visible in the image
+                    • SPATIAL ANALYSIS: Describe the interaction point location RELATIVE TO THE OBJECT BOUNDARIES:
+                      ⚠️ CRITICAL: Analyze position relative to the OBJECT'S edges, NOT relative to other points
+                      ⚠️ USE THE SPATIAL LABELS: Reference the visible "top", "bottom", "left", "right", "center" labels
+                      - Where on the object is the handle/interaction point? (e.g., "near the LEFT label", "between CENTER and RIGHT labels")
+                      - Which object edge(s) is it closest to? (e.g., "closest to the LEFT edge where I see the 'left' label")
+                      - Which object edge(s) is it farthest from? (e.g., "farthest from the RIGHT edge marked by 'right' label")
+                    • HINGE REASONING: Based on the interaction point location, explain which edge should be the hinge:
+                      ⚠️ CRITICAL: The hinge is ALWAYS on the OPPOSITE side from where you grasp
+                      - If interaction point is on LEFT side → hinge should be 'right' (OPPOSITE side)
+                      - If interaction point is on RIGHT side → hinge should be 'left' (OPPOSITE side)  
+                      - If interaction point is on TOP area → hinge should be 'bottom' (OPPOSITE edge)
+                      - If interaction point is on BOTTOM area → hinge should be 'top' (OPPOSITE edge)
+                      - If interaction point is in CORNER (e.g., lower-left) → hinge could be 'top' OR 'right' (opposite edges)
+                      
+                    EXAMPLES OF SPATIAL REASONING (RELATIVE TO OBJECT BOUNDARIES):
+                    • "Handle is near the BOTTOM and LEFT labels → closest to bottom-left of object → farthest from TOP and RIGHT edges → hinge could be 'top' or 'right'"
+                    • "Handle is between CENTER and RIGHT labels → on the right side of object → farthest from LEFT edge marked by 'left' label → hinge should be 'left'"  
+                    • "Handle is near TOP and CENTER labels → on upper area of object → farthest from BOTTOM edge marked by 'bottom' label → hinge should be 'bottom'"
+                    • State your chosen hinge_location and confirm it's spatially opposite from interaction point
+                    • Reference the visual arrow pointing to this edge in your justification
+                    • DOUBLE-CHECK VERIFICATION:
+                      "My interaction point is on the [LEFT/RIGHT/TOP/BOTTOM] side"
+                      "Therefore my hinge_location should be '[OPPOSITE_SIDE]'"
+                      "I can see the '[OPPOSITE_SIDE]' label pointing to this edge"
+                      "CONFIRMED: hinge_location='[OPPOSITE_SIDE]' is correct"
+
+                    5. MECHANISM UNDERSTANDING:
+                    • What type of mechanism is this?
+                    • How does it move?
+                    • Why did you choose this opening strategy?
+                    • How confident are you?
+
+                    COMPREHENSIVE EXAMPLE:
+                    "For point selection: I see 5 colored circles total. Circle aaa OVERLAPS the target cabinet door handle (silver, rectangular) - this circle physically covers part of the handle. Circle aab is near the handle but does not overlap it - rejected for poor overlap. Circle aac is beyond a vertical gap on the adjacent cabinet - rejected for wrong object. Circle aad is on a decorative round element that lacks grip features - rejected for being non-functional. Circle aae is at the left edge where I can see metallic hinge hardware. 
+                    
+                    SPATIAL ANALYSIS: The handle (interaction point) is located between the CENTER and RIGHT labels on the object, closest to the RIGHT edge marked by 'right' label and farthest from the LEFT edge marked by 'left' label. 
+                    
+                    HINGE REASONING: Since the interaction point is on the RIGHT side → the hinge should be on the LEFT side (opposite edge). I can see the white 'left' label pointing to this edge. 
+                    
+                    I selected aaa for grasping (physically overlaps functional handle) with hinge_location='left' (spatially opposite from center-right handle position, matches edge label)."
+                
+                --- FORCED SPATIAL ANALYSIS (REQUIRED) ---
+
+                STEP 1: Draw a complete mental map of the scene:
+                • Label each distinct object in the scene (Cabinet 1, Cabinet 2, Wall, etc.)
+                • Mark visible boundaries between objects (seams, color changes)
+                • Identify which labeled points belong to which objects
+
+                STEP 2: For hinged objects, explicitly:
+                • Measure approximate distance between points (in pixels or relative terms)
+                • Calculate whether this distance matches expected door width
+                • Identify which edge of the door remains fixed during opening
+                • Select points only if they satisfy basic physical constraints
+                
+                --- PARAMETER QUICK REFERENCE ---
+                
+                FORCE DIRECTION:
+                • 'perpendicular': Force along surface normal (into/out of surface)
+                • 'parallel': Force parallel to surface (sliding motion)
+                
+                PIVOT RULES:
+                • Doors/lids typically need has_pivot=True
+                • Drawers typically need has_pivot=False
+                • Pivot point should be on opposite side from grasp point
+
+                --- BEFORE FINALIZING YOUR SELECTION ---
+                Complete this checklist:
+
+                □ I identified the colored circles (not line intersections)
+                □ I verified each circle PHYSICALLY OVERLAPS (not just "near") functional features
+                □ I confirmed each circle is on the target object (not adjacent objects)
+                □ I confirmed the features are functional (not decorative)
+                □ I described the precise spatial location of the interaction point (e.g., "lower-left", "center-right")
+                □ For rotation: hinge location is OPPOSITE from handle based on spatial analysis
+                □ I referenced the white edge labels ('top', 'bottom', 'left', 'right') and center label visible in the image
+                □ The selected points create mechanically sound motion
+                □ I considered robot reach constraints and selected points within comfortable working range
+                □ I avoided points that would cause robot overextension or collision risks
+                □ For lids/caps: I included retract_gripper() to fully remove the lid/cap from the container
+
+                !!! CRITICAL OUTPUT REQUIREMENT !!!
+                ==================================
+
+                YOUR RESPONSE MUST BE VALID JSON ONLY - NO EXPLANATORY TEXT
+                ANY NON-JSON OUTPUT WILL BE REJECTED BY THE SYSTEM
+
+                RESPONSE FORMAT:
                 {{
-                "skill_name": "action_targetobject_mechanism",
-                "primitive_sequence": [
-                    "move_gripper_to_pose('a', true, false)",
-                    "push('b', 'perpendicular', true, false, '')",
-                    "pull('c', 'parallel', false, true, 'd')",
-                    ...
-                ],
-                "parameters": {{
-                    "force_threshold": "low" | "medium" | "high",
-                    "precision_required": "low" | "medium" | "high",
-                    "speed_requirement": "slow" | "medium" | "high"
-                }},
-                "prerequisites": ["list of preconditions"],
-                "constraints": ["list of safety or collision limits"],
-                "explanations": ["detailed explaination for why you chose each primitive and each parameter chosen"],
+                    "name": "open_cabinet_hinged",
+                    "abstract_action": "open cabinet",
+                    "target_object": "cabinet",
+                    "primitive_sequence": [
+                        "move_gripper_to_pose('point_label', false, true)",
+                        "close_gripper()",
+                        "pull('surface_label', 'perpendicular', false, true, 'right')",
+                        "retract_gripper()"
+                    ],
+                    "parameters": {{
+                        "force_threshold": "medium",
+                        "precision_required": "medium",
+                        "speed_requirement": "slow"
+                    }},
+                    "prerequisites": [
+                        "cabinet is closed",
+                        "handle is free of obstructions"
+                    ],
+                    "constraints": [
+                        "avoid collision with nearby objects",
+                        "limit applied force to prevent damage"
+                    ],
+                    "explanations": [
+                        "Detailed explanation for point selection and mechanism understanding",
+                        "Explanation for primitive sequence choice",
+                        "Explanation for parameter values"
+                    ]
                 }}
-                <end_json>
 
-                --- CRITICAL RULES ---
-                - DO NOT invent new functions or primitives.
-                - ONLY use surface labels for push/pull, point labels for move_gripper_to_pose.
-                - **CRITICAL POINT SELECTION RULE**: ONLY consider the actual COLORED CIRCLE positions for manipulation. NEVER select points based on where connecting lines intersect objects - the line is for identification only, not manipulation positioning.
-                - **CRITICAL FEATURE IDENTIFICATION RULE**: Always prioritize the clearest, most obviously functional interaction points. When handles and other circular features coexist, choose handles over potentially decorative circles. Verify that selected features are truly functional rather than structural or decorative elements.
-                - All parameters must match physical and geometric properties shown in the images.
-                - close/open gripper are the only methods that affect the gripper they must be called individually no other method will close/open the gripper
-                - NEVER include markdown, explanation outside of the JSON block, or invalid syntax.
-                - Keep in mind you may need to close the gripper before pushing/pulling to interact with an object at the tcp
-                - GRIPPER ORIENTATION RULE:
-                    - For HORIZONTAL movements (drawers, pushing/pulling along surfaces, sliding): USE SIDE GRASP
-                    - For VERTICAL movements (lifting, pressing down): USE TOP-DOWN GRASP
-                    - Always orient the gripper's z-axis to maximize force transmission in the intended direction
-                - ensure your explainations cover all parameter and action selections in detail verify your understanding of parameters before selection
-                - when opening an object ensure its cover/lid is completely removed or opened - removable components should be detached using "pull" or "retract_gripper" actions
-
-                --- VISION SYSTEM NOISE HANDLING ---
-                **IMPORTANT: The vision system may contain errors and noise. Points and surfaces may be incorrectly detected or belong to adjacent objects rather than the target object.**
-                
-                **NOISE SOURCES TO CONSIDER:**
-                - Points may be detected on adjacent objects (neighboring cabinets, drawers, doors) instead of the target object
-                - Surface segmentation might include parts of multiple objects in the same mask
-                - Detection boundaries may be imprecise due to lighting, shadows, or occlusion
-                - Similar visual features (handles, edges, seams, textures) across multiple objects can cause misidentification
-                - Perspective distortion and depth ambiguity can affect point positioning accuracy
-                
-                **VERIFICATION STEPS BEFORE PARAMETER SELECTION:**
-                1. **TARGET OBJECT IDENTIFICATION**: Carefully examine the target object's distinct visual features (color, texture, shape, markings, hardware)
-                2. **POINT VALIDATION**: For each point you consider using, verify the POINT LOCATION (not label location) belongs to the TARGET OBJECT by:
-                   - **CRITICAL**: Labels may be offset for visibility but focus on where the colored circle/point actually lies
-                   - Checking if the actual point position overlaps with target object's visual boundaries and functional components
-                   - Confirming the point is positioned on the correct object component (interaction surface, edge, mechanism) for the intended action
-                   - Rejecting points whose actual position appears to be on adjacent or background objects, even if the label suggests otherwise
-                3. **SPATIAL CONSISTENCY**: Ensure interaction and pivot points make geometric sense for the target object's size and mechanism
-                4. **VISUAL MARKER CONFIRMATION**: Use distinct visual cues (seams, edges, hardware, color changes) to confirm object boundaries and validate point positions
-                
-                **ROBUST SELECTION CRITERIA:**
-                - **PRIORITIZE CLEAREST INTERACTION POINTS**: Always choose the most obviously functional feature available
-                    • Handles over circular features that might be decorative
-                    • Clear buttons over circular markings or mounting hardware
-                    • Obvious grip points over ambiguous protrusions
-                    • Well-defined knobs over round structural elements
-                - **FEATURE VERIFICATION**: Before selecting, verify the feature is truly functional:
-                    • Does it have ergonomic design indicating human interaction?
-                    • Is it positioned logically for the intended operation?
-                    • Does it show wear patterns or design features suggesting use?
-                    • Is it clearly distinct from decorative or structural elements?
-                - Prioritize points with clear visual connection to target object functional features (handles, knobs, buttons, levers, operational surfaces)
-                - Avoid points near object boundaries where they might belong to adjacent cabinets, drawers, or background structures
-                - Use multiple visual cues (color, texture, depth, geometry) to confirm point relevance to target object
-                - When in doubt between similar points, choose the one with clearest visual association to target object's operational components
-                - Prefer points that are well-centered on functional elements rather than at edges or transitions between objects
-                - **POINT SELECTION AND VALIDATION:**
-                    - **CRITICAL: POINT vs LABEL vs LINE DISTINCTION**: 
-                        • Points are COLORED CIRCLES that mark exact interaction locations
-                        • Labels are TEXT positioned for visibility (may be offset from points)
-                        • Lines connect labels to points for identification ONLY
-                        • **NEVER select based on where the line intersects the object - ONLY use the actual colored circle position**
-                        • The line path is irrelevant for manipulation - only the endpoint (colored circle) matters
-                    - Follow the colored line from label to the ENDPOINT (colored circle) to identify which point corresponds to each label. The correct label may not be the spatially closest to the point.
-                    - **CRITICAL ERROR TO AVOID**: Do not select points based on line intersections with object features - only consider the actual colored circle positions.
-                    - **CRITICAL POINT POSITION VALIDATION:** Before using any point, verify the ACTUAL POINT POSITION belongs to the target object by examining:
-                        • Point location relative to target object boundaries and functional components
-                        • Visual consistency with target object's interaction surfaces, mechanisms, or structural elements
-                        • Functional relevance to the target object's operation (interaction points, pivot locations, surfaces)
-                        • Rejection of points whose actual position lies on adjacent or background objects
-                    - **PRECISE INTERACTION POINT SELECTION:** For optimal manipulation success:
-                        • **PRIORITIZE OBVIOUS FUNCTIONAL FEATURES**: Choose handles over decorative elements, buttons over circular markings, pull tabs over structural features
-                        • **FEATURE IDENTIFICATION VERIFICATION**: Confirm that circular/round features are actually knobs/buttons and not decorative elements, mounting hardware, or structural components
-                        • **FUNCTIONAL vs DECORATIVE DISTINCTION**: 
-                            - Handles typically protrude and have ergonomic shapes for gripping
-                            - Actual knobs/buttons are designed for rotation/pressing and often have tactile features
-                            - Decorative circles, mounting points, or structural elements should be avoided
-                            - When multiple potential interaction points exist, choose the most clearly functional one
-                        • Choose points that are PRECISELY positioned on verified functional components (centers of handles, confirmed knobs/buttons, optimal grip points)
-                        • Avoid points that are offset from or adjacent to key interaction areas
-                        • Prioritize points that maximize contact effectiveness and force transmission
-                        • For doors/lids: select points on actual handles or confirmed grip areas that provide optimal leverage
-                        • For buttons/switches: center points precisely on confirmed activatable surfaces (not decorative circles)
-                        • For drawers: choose points on actual handles or pull areas for effective linear motion
-                    - **EXPLANATION REQUIREMENTS:** In your explanation include:
-                        • Why you selected a particular point and the exact visual criteria used to determine the label-point association
-                        • Color matching between label and connecting line to verify correct point identification
-                        • **CRITICAL**: Confirm you are describing the COLORED CIRCLE position, not any line intersection points
-                        • **FEATURE IDENTIFICATION JUSTIFICATION**: Explicitly describe what makes the selected feature functional rather than decorative:
-                            - For handles: describe ergonomic shape, protrusion, grip design
-                            - For knobs: describe rotation mechanisms, tactile features, operational design
-                            - For buttons: describe activation surface, clickable design, functional purpose
-                            - Explain why you rejected nearby decorative or structural elements
-                        • Why the specific COLORED CIRCLE position is optimal for the intended action and target object component
-                        • Explicitly state that you ignored line path and focused only on the endpoint circle
-                        • Target object component details (color, shape, markings, hardware) that confirm point relevance and functionality
-                        • How you distinguished target object features from similar features on adjacent objects
-                        • **COMPARATIVE ANALYSIS**: If multiple potential interaction points exist, explain why you chose one over others
-                    - **POSITIONING ACCURACY:** The gripper will move to the exact COLORED CIRCLE position, so ensure points are:
-                        • **CRITICAL**: Selected based on COLORED CIRCLE location, not line intersections with objects
-                        • Precisely centered on interaction components (handle centers, button centers, optimal grip points)
-                        • Not offset from functional areas which would cause action failure
-                        • Positioned to maximize manipulation effectiveness for the specific action
-                        • **VERIFY**: The COLORED CIRCLE itself is optimally positioned, regardless of line path
-                    - **GEOMETRIC CONSISTENCY:** Ensure all selected points make spatial sense relative to each other and the target object's mechanism and constraints
-                - **FORCE DIRECTION CLARIFICATION**: 
-                    • 'perpendicular' = force applied along the surface normal (into/out of surface)
-                    • 'parallel' = force applied parallel to surface (perpendicular to surface normal)
-                    • Opening actions typically use 'perpendicular' force (along surface normal) for direct engagement
-                - **PIVOT POINT GEOMETRY RULES FOR ROTATIONAL MECHANISMS (doors, lids, hinged objects, rotating components):**
-                    - Selected pivot points must always be different from the interaction point. The pivot point indicates the rotation center for arc-based movements.
-                    - **TARGET OBJECT VALIDATION FIRST:** Before selecting any pivot point, verify the actual point position belongs to the target object:
-                        • Confirm the point position is within the target object's visual boundaries and functional components
-                        • Check that the point aligns with target object's mounting features, edges, or structural elements
-                        • Reject points positioned on neighboring objects even if they seem geometrically appropriate
-                        • Use visual distinctions (color, texture, depth, hardware) to confirm point belongs to target object
-                    - **GEOMETRIC POSITIONING PRINCIPLES:** The pivot point should be located to create optimal rotational mechanics:
-                        • Position pivot point opposite the interaction point across the object's rotation axis
-                        • For doors/lids with visible hinges: place pivot at or near the hinge mechanism location
-                        • For drawers and sliding objects: use linear motion (has_pivot=false) instead of rotational
-                        • For objects without visible hinges: infer rotation axis from object geometry and place pivot accordingly
-                        • Ensure pivot placement allows natural opening motion without collision or interference
-                    - **VISUAL CUES FOR PIVOT LOCATION IDENTIFICATION:**
-                        • Look for visible hinges, mounting hardware, or rotation mechanisms - these indicate actual rotation axes
-                        • Identify stationary edges or attachment points - these typically don't move during operation
-                        • Observe object geometry to infer natural rotation patterns and constraints
-                        • Consider mechanism type: edge-mounted hinges (doors), center-mounted rotations (lids), sliding mechanisms (drawers)
-                        • For cabinet doors: pivot is typically at the vertical edge with visible hinges
-                        • For container lids: pivot is often at the back edge or along visible hinge lines
-                        • Use depth and visual continuity to distinguish target object features from background elements
-                    - **GEOMETRIC VALIDATION:** Ensure pivot point selection creates mechanically sound movement:
-                        • Verify pivot-to-interaction distance matches object dimensions and rotation requirements
-                        • Confirm the rotation would produce natural opening motion for the specific mechanism type
-                        • Check that selected pivot allows full range of motion without geometric interference
-                When in doubt, choose the best grounded option based on visible contact affordances and robot camera constraints (e.g., collision with the wrist camera).
-
-                Carefully verify label references and syntax. Output must be complete and syntactically valid.
-                """
-                    },
+                DO NOT INCLUDE ANY TEXT BEFORE OR AFTER THE JSON OBJECT
+                DO NOT USE MARKDOWN CODE BLOCKS OR FORMATTING
+                RETURN RAW JSON ONLY"""
+            },
+            {
+                "role": "user",
+                "content": [
                     {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": f"""
-                Abstract Action: {abstract_action}
-                Target Object: {target_object}
+                        "type": "text",
+                        "text": f"""Task: {abstract_action} on {target_object}
 
-                **CRITICAL: FOCUS ONLY ON THE TARGET OBJECT ({target_object})**
-                The images may contain multiple similar objects. You must identify and focus exclusively on the target object specified above. 
-                Verify that all selected points and surfaces belong to the target object, not adjacent or background objects.
-                Use visual cues like distinct colors, textures, shapes, and hardware to distinguish the target object from similar nearby objects.
-
-                Please analyze the two visualizations:
-                - FIRST IMAGE: Surface segments with normal vectors (for push/pull)
-                - SECOND IMAGE: Points of interest (for grasping/manipulation)
-
-                Generate:
-                1. Skill parameterization for the current setup (primitive_sequence, parameters, prerequisites, constraints, explanations)
-                2. Semantic reuse criteria for future scenarios (semantic_reuse_data with point labels, geometric relationships, and reuse matching)
-
-                Use only the predefined action primitives.
-                Output must be a raw JSON object between '{{' and '}}' with both sections. No extra text or formatting.
-                """
+                        Remember: Use ONLY colored circles as points, NOT line intersections!
+                        
+                        The images below show:
+                        - FIRST IMAGE: Surface segments with normal vectors (for push/pull directions)
+                        - SECOND IMAGE: Points of interest marked as colored circles (for grasping/manipulation)"""
                     },
                     {
                         "type": "image_url",

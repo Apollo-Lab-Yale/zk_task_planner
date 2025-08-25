@@ -20,6 +20,7 @@ class ExecutableAction:
     parameters: Dict[str, Any]  # Additional parameters like force magnitude, speed, etc.
     is_top_down_grasp: bool
     is_side_grasp: bool
+    object_info: Optional[Any] = None  # ObjectInfo containing mask and other object data
     
 @dataclass
 class InstantiatedSkill:
@@ -36,22 +37,16 @@ class SyncSkillHandler:
     def __init__(self, skill_generator, perception_system):
         self.skill_handler = SkillHandler(skill_generator, perception_system)
         
-    def instantiate_skill(self, skill_command, target_object, color_image=None, depth_image=None):
+    def instantiate_skill(self, skill_command, target_object, color_image=None, depth_image=None, object_info=None, executed_skills=None):
         """Synchronous wrapper for instantiate_skill"""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            skill = loop.run_until_complete(
-                self.skill_handler.instantiate_skill(
-                    skill_command,
-                    target_object,
-                    color_image,
-                    depth_image
-                )
-            )
-            return skill
-        finally:
-            loop.close()
+        return self.skill_handler.instantiate_skill(
+            skill_command,
+            target_object,
+            color_image,
+            depth_image,
+            object_info,
+            executed_skills
+        )
 
 class SkillHandler:
     def __init__(self, skill_generator: SkillGenerator, perception_system: PerceptionSystem):
@@ -88,7 +83,8 @@ class SkillHandler:
         target_object: str,
         image: np.ndarray,
         depth_image: Optional[np.ndarray] = None,
-        object_info: ObjectInfo = None
+        object_info: ObjectInfo = None,
+        executed_skills: List = None
     ) -> Optional[InstantiatedSkill]:
         """
         Generate and instantiate a skill for the given action and object
@@ -98,6 +94,8 @@ class SkillHandler:
             target_object: Name of the target object
             image: RGB image of the scene
             depth_image: Optional depth image for better pose estimation
+            object_info: Pre-detected object information
+            executed_skills: List of previously executed skills for context
             
         Returns:
             Instantiated skill if successful, None otherwise
@@ -154,7 +152,8 @@ class SkillHandler:
                 points_of_interest=points_of_interest,
                 abstract_action=abstract_action,
                 target_object=target_object,
-                object_info=object_info
+                object_info=object_info,
+                executed_skills=executed_skills or []
             )
             
         # DEBUG: Show points returned from skill generator
@@ -190,9 +189,6 @@ class SkillHandler:
         
         h, w = object_info.image.shape[:2]
         
-        print(f"DEBUG - Skill Handler Point Processing:")
-        print(f"  Object image shape: {h}x{w}")
-        print(f"  Number of points of interest: {len(skill.points_of_interest)}")
         
         for label, point in skill.points_of_interest.items():
             # Get normalized coordinates
@@ -205,9 +201,6 @@ class SkillHandler:
             # Store pixel coordinates
             points_pixel[label] = (pixel_x, pixel_y)
             
-            print(f"  Point {label}:")
-            print(f"    Normalized coords: ({norm_x:.4f}, {norm_y:.4f})")
-            print(f"    Pixel coords: ({pixel_x}, {pixel_y})")
             
             # Convert to 3D coordinates if depth image is available
             if hasattr(object_info, 'depth_image') and object_info.depth_image is not None:
@@ -217,14 +210,10 @@ class SkillHandler:
                         max(0, pixel_y-2):min(object_info.depth_image.shape[0], pixel_y+3),
                         max(0, pixel_x-2):min(object_info.depth_image.shape[1], pixel_x+3)
                     ]
-                    print(f"    Depth ROI shape: {depth_roi.shape}")
-                    print(f"    Depth ROI values: {depth_roi}")
                     
                     # Filter out zero/invalid depths
                     points_3d[label], confidence = self.perception_system._estimate_point_pose(points_pixel[label],
                                                                                    object_info.depth_image, label=label)
-                    print(f"    3D position (camera frame): {points_3d[label]}")
-                    print(f"    Confidence: {confidence:.3f}")
                     
                     # DEBUG: Show robot transform if available
                     if hasattr(self, 'motion_planner') and self.motion_planner:
@@ -307,10 +296,18 @@ class SkillHandler:
         points_3d_ci = {k.upper(): v for k, v in points_3d.items()}
         points_pixel_ci = {k.upper(): v for k, v in points_pixel.items()}
         
-        # Handle push/pull actions that now use surface labels
+        # Handle push/pull actions that can use either point labels or surface keywords
         if action_type in ['push', 'pull']:
-            # Get target surface with case-insensitive lookup
-            surface_label = parameters.get('point_label', '')
+            # Get target surface - check for both point_label (point-based) and surface_keywords (surface-based)
+            surface_label = ''
+            if 'point_label' in parameters:
+                surface_label = parameters.get('point_label', '')
+            elif 'surface_keywords' in parameters:
+                # For surface-based patterns, use first keyword as the surface label
+                surface_keywords = parameters.get('surface_keywords', [])
+                if surface_keywords:
+                    surface_label = surface_keywords[0]  # Use first keyword as primary surface label
+            
             surface_label_upper = surface_label.upper()
             
             # Calculate surface normal if object_info is available
@@ -374,16 +371,26 @@ class SkillHandler:
                 else:
                     return None
             
-            # Get pivot point if specified
+            # Get pivot point if specified (support both new hinge_location and old pivot_point_label)
             pivot_position = None
-            if parameters.get('has_pivot', False) and 'pivot_point_label' in parameters:
-                pivot_label = parameters['pivot_point_label']
-                if pivot_label:
-                    pivot_label_upper = pivot_label.upper()
-                    if pivot_label_upper in points_3d_ci:
-                        pivot_position = points_3d_ci[pivot_label_upper]
-                    else:
-                        print(f"Pivot point label '{pivot_label}' not found in points_3d")
+            pivot_label = None
+            if parameters.get('has_pivot', False):
+                # Check for new hinge_location parameter first
+                if 'hinge_location' in parameters and parameters['hinge_location']:
+                    # For hinge_location, we'll need to calculate the pivot position based on the hinge edge
+                    # This is a placeholder - actual implementation would depend on object geometry
+                    print(f"Hinge location specified: {parameters['hinge_location']}")
+                    # For now, we'll treat hinge_location as informational
+                    pivot_label = f"hinge_{parameters['hinge_location']}"
+                # Fall back to old pivot_point_label for backward compatibility
+                elif 'pivot_point_label' in parameters:
+                    pivot_label = parameters['pivot_point_label']
+                    if pivot_label:
+                        pivot_label_upper = pivot_label.upper()
+                        if pivot_label_upper in points_3d_ci:
+                            pivot_position = points_3d_ci[pivot_label_upper]
+                        else:
+                            print(f"Pivot point label '{pivot_label}' not found in points_3d")
             
             # Create parameters dictionary
             action_params = {
@@ -397,10 +404,24 @@ class SkillHandler:
                 'surface_normal': surface_normal  # Add the calculated normal to parameters
             }
             
-            # Add pivot position if available
+            # Add surface_keywords if they exist (for surface-based patterns)
+            if 'surface_keywords' in parameters:
+                action_params['surface_keywords'] = parameters['surface_keywords']
+            
+            # Add pivot position and label if available
             if pivot_position is not None:
                 action_params['pivot_position'] = pivot_position
-                action_params['pivot_label'] = parameters.get('pivot_point_label')
+                action_params['pivot_label'] = pivot_label
+            elif pivot_label is not None:
+                # Even if we don't have a position, pass the label for hinge_location
+                action_params['pivot_label'] = pivot_label
+                # Add hinge_location to action_params for reference
+                if 'hinge_location' in parameters:
+                    action_params['hinge_location'] = parameters['hinge_location']
+                    
+            # Add object bounding box information for proper pivot point calculation
+            if object_info and object_info.bbox is not None:
+                action_params['object_bbox'] = object_info.bbox  # [x, y, w, h] format
             
             # Determine approach direction and orientation based on surface normal and parameters
             orientation = self._calculate_orientation_from_normal(
@@ -417,7 +438,8 @@ class SkillHandler:
                 pixel_position=surface_centroid_pixel,
                 parameters=action_params,
                 is_top_down_grasp=False,
-                is_side_grasp=False
+                is_side_grasp=False,
+                object_info=object_info
             )
         
         # Handle move_gripper_to_pose (which still uses point labels)
@@ -471,7 +493,8 @@ class SkillHandler:
                 pixel_position=target_pixel,
                 parameters=action_params,
                 is_top_down_grasp=is_top_down_grasp,
-                is_side_grasp=is_side_grasp
+                is_side_grasp=is_side_grasp,
+                object_info=object_info
             )
         
         # Handle twist action
@@ -495,7 +518,8 @@ class SkillHandler:
                 pixel_position=object_pixel_pose,
                 parameters=action_params,
                 is_top_down_grasp=False,
-                is_side_grasp=False
+                is_side_grasp=False,
+                object_info=object_info
             )
         
         # Handle simple actions without points
@@ -504,6 +528,7 @@ class SkillHandler:
                 action_type=action_type,
                 position=None,
                 orientation=None,
+                object_info=object_info,
                 pixel_position=None,
                 parameters={},
                 is_top_down_grasp=False,

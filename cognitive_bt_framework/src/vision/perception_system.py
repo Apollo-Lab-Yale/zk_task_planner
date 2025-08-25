@@ -13,7 +13,7 @@ import traceback
 from cognitive_bt_framework.src.vision.sam.fast_sam import FastSAMMaskGenerator, FastSAMConfig
 from cognitive_bt_framework.src.vision.contour_shape_detector import ContourShapeDetector, ContourInfo
 from cognitive_bt_framework.utils.time_profiler import IterationTimeProfiler
-from cognitive_bt_framework.src.vision.interaction_point_detector import RobustInteractionDetector
+from cognitive_bt_framework.src.vision.interaction_point_detector_v2 import RobustInteractionDetector
 from ultralytics import YOLOWorld, YOLOE
 
 
@@ -130,7 +130,8 @@ class PerceptionSystem:
     
     def detect_objects(self, image: np.ndarray, classes: Optional[List[str]] = None,
                     conf: Optional[float] = 0.01, segment: bool = True,
-                    depth_image: Optional[np.ndarray] = None) -> List[ObjectInfo]:
+                    depth_image: Optional[np.ndarray] = None, 
+                    roi_highest_confidence_only: bool = False) -> List[ObjectInfo]:
         
         if self.debug:
             self.profiler.start_iteration()
@@ -240,7 +241,17 @@ class PerceptionSystem:
                 self.profiler.start("process_detections")
             
             # Process each detection with coordinate transformation
-            for i, detection in enumerate(results[0]):
+            detections_with_confidence = [(i, detection) for i, detection in enumerate(results[0])]
+            
+            # Find highest confidence detection if roi_highest_confidence_only is True
+            highest_confidence_idx = None
+            if roi_highest_confidence_only and detections_with_confidence:
+                highest_confidence_idx = max(detections_with_confidence, 
+                                           key=lambda x: x[1].boxes.conf.cpu().numpy()[0])[0]
+                if self.debug:
+                    print(f"ROI processing limited to highest confidence detection (index {highest_confidence_idx})")
+            
+            for i, detection in detections_with_confidence:
                 # Extract bounding box and transform coordinates
                 xyxy = detection.boxes.xyxy.cpu().numpy()[0]
                 x1_yolo, y1_yolo, x2_yolo, y2_yolo = xyxy
@@ -338,8 +349,25 @@ class PerceptionSystem:
                 )
                 
                 # Continue with rest of processing...
-                obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=12, min_distance=45, apply_center_shift=True)
-                print("Detected regions of interest")
+                # Only compute regions of interest for highest confidence detection if toggle is enabled
+                if not roi_highest_confidence_only or i == highest_confidence_idx:
+                    obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=100, min_distance=25, apply_center_shift=True)
+                    print("Detected regions of interest")
+                else:
+                    # Set empty points for non-highest confidence detections when toggle is enabled
+                    obj_info.points = {
+                        'keypoints': [],
+                        'descriptors': None,
+                        'pixel_coords': [],
+                        'scores': [],
+                        'object_name': obj_info.name,
+                        'method': "skipped",
+                        'mask_area': np.sum(obj_info.mask) if obj_info.mask is not None else 0,
+                        'ids': [],
+                        'point_types': [],
+                        'interaction_points': []
+                    }
+                    print(f"Skipped regions of interest for detection {i} (not highest confidence)")
                 # DEBUG: Validate points of interest coordinates
                 if obj_info.points and 'pixel_coords' in obj_info.points:
                     print(f"DEBUG - Points of interest for detection {i} ({class_name}):")
@@ -443,7 +471,8 @@ class PerceptionSystem:
                 classes=[target_object],
                 conf=conf,
                 segment=segment,
-                depth_image=depth_image
+                depth_image=depth_image,
+                roi_highest_confidence_only=True  # Only compute ROI for highest confidence detection
             )
             
             # Return highest confidence detection or None
@@ -484,7 +513,14 @@ class PerceptionSystem:
             min_distance: int = 50,
             visualize: bool = False,
             orb_params: Dict[str, Any] = None,  # Now used for contour parameters
-            apply_center_shift: bool = False  # Control center-shift behavior
+            apply_center_shift: bool = True,  # Control center-shift behavior
+            depth_plane_only: bool = False,  # NEW: Use only depth plane detection method
+            apply_distance_filter: bool = False,  # NEW: Apply distance-based filtering
+            distance_filter_params: Dict[str, float] = {
+                'min_distance': 0.0,    # 20cm minimum
+                'max_distance': 0.7,    # 1.5m maximum  
+                'distance_threshold': 1.0  # 1m threshold
+            }  # NEW: Distance filter parameters
         ) -> Dict[str, Any]:
             """
             Detect points of interest within a specific object mask.
@@ -503,6 +539,13 @@ class PerceptionSystem:
                     - perimeter_points_ratio: Ratio of perimeter to determine number of points (default: 100)
                     - max_perimeter_points: Maximum perimeter points per contour (default: 8)
                     - contour_approximation: Epsilon factor for contour approximation (default: 0.02)
+                apply_center_shift: Whether to shift edge points toward center
+                depth_plane_only: If True, use only depth plane detection method (requires depth data for robust method)
+                apply_distance_filter: If True, filter regions by 3D distance from camera/robot before generating points
+                distance_filter_params: Optional dictionary of distance filter parameters:
+                    - min_distance: Minimum allowed distance in meters (default: 0.1)
+                    - max_distance: Maximum allowed distance in meters (default: 2.0)
+                    - distance_threshold: Distance threshold in meters (default: 1.0, currently unused)
                 
             Returns:
                 Dictionary containing:
@@ -512,6 +555,7 @@ class PerceptionSystem:
                     - 'scores': Confidence scores for each point
                     - 'interaction_points': List of InteractionPoint objects (if robust method)
                     - 'visualization': Visualization image (if visualize=True)
+                    - 'filter_stats': Statistics from distance filtering (if applied)
             """
             if self.debug:
                 self.profiler.start_iteration()
@@ -530,6 +574,65 @@ class PerceptionSystem:
                 else:
                     mask = obj_info.mask
                 
+                # Apply distance masking before generating interaction points if requested
+                if apply_distance_filter:
+                    if self.debug:
+                        self.profiler.start("distance_mask_generation")
+                        print(f"Creating distance mask before interaction point generation")
+                    
+                    # Set default distance filter parameters
+                    if distance_filter_params is None:
+                        distance_filter_params = {
+                            'min_distance': 0.1,      # 10cm minimum
+                            'max_distance': 2.0,      # 2m maximum
+                            'distance_threshold': 1.0  # 1m threshold
+                        }
+                    
+                    # Get depth image from obj_info
+                    depth_img = None
+                    if hasattr(obj_info, 'depth_image') and obj_info.depth_image is not None:
+                        depth_img = obj_info.depth_image
+                    
+                    if depth_img is not None:
+                        # Create distance-filtered mask
+                        distance_mask = self.create_distance_mask(
+                            depth_img,
+                            mask,
+                            min_distance=distance_filter_params.get('min_distance', 0.1),
+                            max_distance=distance_filter_params.get('max_distance', 2.0),
+                            dilate_mask=True,
+                            dilation_size=3
+                        )
+                        
+                        # Update the mask to only include regions within distance range
+                        mask = distance_mask
+                        
+                        if self.debug:
+                            print(f"Applied distance mask: {np.sum(mask)} pixels remain within distance range")
+                            
+                            # Create debug visualization of the masked image
+                            masked_image = image.copy()
+                            # Darken regions outside the distance mask
+                            masked_image[~mask] = masked_image[~mask] * 0.3  # Make filtered regions darker
+                            
+                            # Add colored overlay to show valid regions
+                            overlay = np.zeros_like(image)
+                            overlay[mask] = [0, 255, 0]  # Green overlay for valid regions
+                            masked_image = cv2.addWeighted(masked_image, 0.8, overlay, 0.2, 0)
+                            
+                            # Store debug visualization in obj_info for external access
+                            if not hasattr(obj_info, 'debug_visualizations'):
+                                obj_info.debug_visualizations = {}
+                            obj_info.debug_visualizations['distance_filtered_mask'] = masked_image
+                            
+                            print("Debug: Distance-filtered mask visualization stored in obj_info.debug_visualizations['distance_filtered_mask']")
+                    else:
+                        if self.debug:
+                            print("Warning: Distance filtering requested but no depth image available")
+                    
+                    if self.debug:
+                        self.profiler.stop("distance_mask_generation")
+                
                 # Convert boolean mask to uint8 for OpenCV operations
                 mask_uint8 = mask.astype(np.uint8) * 255
                 
@@ -539,14 +642,20 @@ class PerceptionSystem:
                         self.profiler.start("robust_detection")
                     
                     # Get depth data if available
-                    depth_data = obj_info.depth_image if hasattr(obj_info, 'depth_image') else None
-                    
-                    # Skip depth data processing if not available to save time
                     depth_data = None
                     if hasattr(obj_info, 'depth_image') and obj_info.depth_image is not None:
                         depth_data = obj_info.depth_image
                     
                     # Detect interaction points using the robust method with optimizations
+                    if self.debug:
+                        mask_area = np.sum(mask)
+                        has_depth = depth_data is not None
+                        print(f"[DEBUG] PERCEPTION: Starting interaction point detection")
+                        print(f"[DEBUG] PERCEPTION: Object mask area: {mask_area} pixels")
+                        print(f"[DEBUG] PERCEPTION: Has depth data: {has_depth}")
+                        print(f"[DEBUG] PERCEPTION: Max points: {max_points}, Min distance: {min_distance}")
+                        print(f"[DEBUG] PERCEPTION: Depth plane only: {depth_plane_only}")
+                    
                     interaction_points = self.interaction_detector.detect_interaction_points(
                         image=image,
                         mask=mask,
@@ -555,20 +664,26 @@ class PerceptionSystem:
                         max_points=max_points,
                         depth_data=depth_data,
                         apply_center_shift=apply_center_shift,
-                        edge_threshold=15.0,
-                        shift_factor=0.4,
-                        fast_mode=True  # Enable fast mode for better performance
+                        edge_threshold=10.0,
+                        shift_factor=0.25,
+                        fast_mode=True,  # Enable fast mode for better performance
+                        depth_plane_only=depth_plane_only  # NEW: Use only depth plane detection method
                     )
                     
                     if self.debug:
                         self.profiler.stop("robust_detection")
-                        print(f"Detected {len(interaction_points)} interaction points using robust method")
+                        print(f"[DEBUG] PERCEPTION: FINAL RESULT: {len(interaction_points)} interaction points detected")
+                        if len(interaction_points) == 0:
+                            print(f"[DEBUG] PERCEPTION: WARNING - No interaction points detected! Check filtering parameters.")
                     
                     # Convert InteractionPoint objects to cv2.KeyPoint format for backward compatibility
                     final_keypoints = []
                     pixel_coords = []
                     scores = []
                     point_types = []
+                    
+                    if self.debug and len(interaction_points) > 0:
+                        print(f"[DEBUG] PERCEPTION: Converting {len(interaction_points)} points to cv2.KeyPoint format")
                     
                     for point in interaction_points:
                         # Create cv2.KeyPoint object
@@ -765,6 +880,21 @@ class PerceptionSystem:
                 else:
                     raise ValueError(f"Unknown detection method: {method}. Available methods: 'robust', 'contour', 'legacy'")
                 
+                # Distance filtering is now applied at the mask level before point generation
+                # Add filter stats to results if distance filtering was applied
+                if apply_distance_filter:
+                    results['filter_stats'] = {
+                        'filter_type': 'distance_mask',
+                        'applied_before_generation': True,
+                        'min_distance': distance_filter_params.get('min_distance', 0.1) if distance_filter_params else 0.1,
+                        'max_distance': distance_filter_params.get('max_distance', 2.0) if distance_filter_params else 2.0,
+                        'mask_pixels': np.sum(mask)
+                    }
+                    
+                    # Add debug visualization to results if available
+                    if hasattr(obj_info, 'debug_visualizations') and 'distance_filtered_mask' in obj_info.debug_visualizations:
+                        results['debug_distance_mask'] = obj_info.debug_visualizations['distance_filtered_mask']
+                
                 # Create visualization if requested
                 if visualize:
                     if self.debug:
@@ -803,6 +933,294 @@ class PerceptionSystem:
                 if self.debug:
                     self.profiler.stop("detect_regions_of_interest")
                     self.profiler.end_iteration(preserve_current=True)
+    
+    def filter_interaction_points_by_distance(
+        self,
+        points_dict: Dict[str, Any],
+        depth_image: Optional[np.ndarray] = None,
+        distance_threshold: float = 1.0,
+        min_distance: float = 0.1,
+        max_distance: float = 2.0
+    ) -> Dict[str, Any]:
+        """
+        Filter interaction points based on their 3D distance from the robot/camera.
+        
+        Args:
+            points_dict: Dictionary containing interaction points data (from detect_regions_of_interest)
+            depth_image: Depth image aligned with RGB (optional, uses obj_info depth if available)
+            distance_threshold: Distance threshold in meters for filtering
+            min_distance: Minimum allowed distance in meters
+            max_distance: Maximum allowed distance in meters
+            
+        Returns:
+            Filtered points dictionary with the same structure as input
+        """
+        if self.debug:
+            self.profiler.start("filter_interaction_points_by_distance")
+        
+        try:
+            # Check if we have valid points data
+            if not points_dict or 'pixel_coords' not in points_dict:
+                if self.debug:
+                    print("No valid points data to filter")
+                return points_dict
+            
+            pixel_coords = points_dict['pixel_coords']
+            if not pixel_coords:
+                if self.debug:
+                    print("No pixel coordinates to filter")
+                return points_dict
+            
+            # Use provided depth image or try to get from points_dict
+            if depth_image is None:
+                if self.debug:
+                    print("No depth image provided for distance filtering")
+                return points_dict
+            
+            filtered_indices = []
+            distances_3d = []
+            
+            for i, (px, py) in enumerate(pixel_coords):
+                try:
+                    # Convert pixel to 3D position
+                    position_3d, confidence = self._estimate_point_pose(
+                        (px, py), 
+                        depth_image,
+                        region_size=2,  # Small region for better accuracy
+                        label=f"filter_point_{i}"
+                    )
+                    
+                    if confidence > 0.1:  # Only consider points with reasonable confidence
+                        # Calculate distance from camera origin (0, 0, 0)
+                        distance = np.linalg.norm(position_3d)
+                        distances_3d.append(distance)
+                        
+                        # Check if point is within distance thresholds
+                        if min_distance <= distance <= max_distance:
+                            filtered_indices.append(i)
+                            if self.debug and len(filtered_indices) <= 5:  # Log first few points
+                                print(f"Point {i} at ({px}, {py}) -> 3D: {position_3d} -> distance: {distance:.3f}m (KEPT)")
+                        else:
+                            if self.debug and len(distances_3d) <= 5:  # Log first few filtered points
+                                print(f"Point {i} at ({px}, {py}) -> 3D: {position_3d} -> distance: {distance:.3f}m (FILTERED)")
+                    else:
+                        if self.debug:
+                            print(f"Point {i} at ({px}, {py}) has low confidence ({confidence:.2f}) - skipping")
+                
+                except Exception as e:
+                    if self.debug:
+                        print(f"Error processing point {i} at ({px}, {py}): {str(e)}")
+                    continue
+            
+            if self.debug:
+                print(f"Distance filtering: {len(filtered_indices)}/{len(pixel_coords)} points kept")
+                if distances_3d:
+                    print(f"Distance range: {min(distances_3d):.3f}m to {max(distances_3d):.3f}m")
+            
+            # Create filtered results
+            filtered_results = {
+                'keypoints': [points_dict['keypoints'][i] for i in filtered_indices] if 'keypoints' in points_dict else [],
+                'descriptors': points_dict.get('descriptors'),  # Keep descriptors as-is (may be None)
+                'pixel_coords': [pixel_coords[i] for i in filtered_indices],
+                'scores': [points_dict['scores'][i] for i in filtered_indices] if 'scores' in points_dict else [],
+                'object_name': points_dict.get('object_name', ''),
+                'method': points_dict.get('method', '') + "_distance_filtered",
+                'mask_area': points_dict.get('mask_area', 0),
+                'ids': [points_dict['ids'][i] for i in filtered_indices] if 'ids' in points_dict else [],
+                'point_types': [points_dict['point_types'][i] for i in filtered_indices] if 'point_types' in points_dict else [],
+                'filter_stats': {
+                    'original_count': len(pixel_coords),
+                    'filtered_count': len(filtered_indices),
+                    'min_distance': min_distance,
+                    'max_distance': max_distance,
+                    'distance_threshold': distance_threshold,
+                    'distances': distances_3d[:10] if distances_3d else []  # Store first 10 distances for debugging
+                }
+            }
+            
+            # Filter interaction_points if available
+            if 'interaction_points' in points_dict and points_dict['interaction_points']:
+                filtered_results['interaction_points'] = [
+                    points_dict['interaction_points'][i] for i in filtered_indices
+                ]
+            
+            return filtered_results
+            
+        except Exception as e:
+            if self.debug:
+                print(f"Error in filter_interaction_points_by_distance: {str(e)}")
+                traceback.print_exc()
+            return points_dict  # Return original data on error
+            
+        finally:
+            if self.debug:
+                self.profiler.stop("filter_interaction_points_by_distance")
+    
+    def create_distance_mask(
+        self,
+        depth_image: np.ndarray,
+        object_mask: np.ndarray,
+        min_distance: float = 0.1,
+        max_distance: float = 2.0,
+        dilate_mask: bool = True,
+        dilation_size: int = 3
+    ) -> np.ndarray:
+        """
+        Create a mask of regions within the specified distance range from the camera.
+        
+        Args:
+            depth_image: Depth image in meters
+            object_mask: Binary mask of the object
+            min_distance: Minimum allowed distance in meters
+            max_distance: Maximum allowed distance in meters
+            dilate_mask: Whether to dilate the resulting mask for smoother boundaries
+            dilation_size: Size of dilation kernel
+            
+        Returns:
+            Boolean mask where True indicates points within distance range
+        """
+        if self.debug:
+            self.profiler.start("create_distance_mask")
+        
+        try:
+            # Ensure depth image and object mask have same dimensions
+            if depth_image.shape != object_mask.shape:
+                object_mask = cv2.resize(
+                    object_mask.astype(np.uint8),
+                    (depth_image.shape[1], depth_image.shape[0]),
+                    interpolation=cv2.INTER_NEAREST
+                ).astype(bool)
+            
+            # Apply depth scale if needed (convert to meters)
+            depth_meters = depth_image * self.depth_scale
+            
+            # Create distance mask: pixels within the distance range
+            distance_mask = (depth_meters >= min_distance) & (depth_meters <= max_distance)
+            
+            # Combine with object mask - only consider points inside the object
+            combined_mask = distance_mask & object_mask
+            
+            # Apply morphological operations to smooth the mask
+            if dilate_mask and np.any(combined_mask):
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilation_size, dilation_size))
+                # First erode to remove noise, then dilate to fill gaps
+                combined_mask_uint8 = combined_mask.astype(np.uint8) * 255
+                eroded = cv2.erode(combined_mask_uint8, kernel, iterations=1)
+                dilated = cv2.dilate(eroded, kernel, iterations=2)
+                combined_mask = (dilated > 0)
+                
+                # Ensure we stay within original object bounds
+                combined_mask = combined_mask & object_mask
+            
+            if self.debug:
+                total_object_pixels = np.sum(object_mask)
+                valid_distance_pixels = np.sum(combined_mask)
+                if total_object_pixels > 0:
+                    percentage = (valid_distance_pixels / total_object_pixels) * 100
+                    print(f"Distance mask: {valid_distance_pixels}/{total_object_pixels} pixels ({percentage:.1f}%) within range [{min_distance:.2f}, {max_distance:.2f}]m")
+                    
+                    # DEBUG: Check handle region specifically
+                    h, w = object_mask.shape
+                    handle_y = int(h * 0.7)  # Bottom 30%
+                    handle_x = int(w * 0.6)  # Right 40%
+                    
+                    orig_handle_mask = object_mask[handle_y:, handle_x:]
+                    distance_handle_mask = combined_mask[handle_y:, handle_x:]
+                    handle_depth_region = depth_meters[handle_y:, handle_x:]
+                    
+                    orig_handle_pixels = np.sum(orig_handle_mask)
+                    filtered_handle_pixels = np.sum(distance_handle_mask)
+                    
+                    print(f"DEBUG: Handle region distance filtering:")
+                    print(f"  Original handle pixels: {orig_handle_pixels}")
+                    print(f"  Filtered handle pixels: {filtered_handle_pixels}")
+                    
+                    if orig_handle_pixels > 0:
+                        # Check depth values in handle region
+                        handle_depths = handle_depth_region[orig_handle_mask]
+                        if len(handle_depths) > 0:
+                            print(f"  Handle depth range: {np.min(handle_depths):.3f} to {np.max(handle_depths):.3f}m")
+                            print(f"  Filter range: [{min_distance:.3f}, {max_distance:.3f}]m")
+                            
+                            # Check what percentage of handle depths are in range
+                            in_range = (handle_depths >= min_distance) & (handle_depths <= max_distance)
+                            in_range_count = np.sum(in_range)
+                            print(f"  Handle depths in range: {in_range_count}/{len(handle_depths)} ({in_range_count/len(handle_depths)*100:.1f}%)")
+                            
+                            if in_range_count == 0:
+                                print("❌ ALL handle depths outside filter range!")
+                            elif filtered_handle_pixels == 0:
+                                print("❌ Handle depths in range but still filtered out - check depth_meters calculation")
+                        else:
+                            print("  No valid handle depths found")
+                    else:
+                        print("  No handle pixels in original mask")
+                else:
+                    print("Distance mask: No object pixels found")
+            
+            return combined_mask
+            
+        except Exception as e:
+            if self.debug:
+                print(f"Error in create_distance_mask: {str(e)}")
+                traceback.print_exc()
+            return object_mask  # Return original mask on error
+            
+        finally:
+            if self.debug:
+                self.profiler.stop("create_distance_mask")
+    
+    def save_debug_visualizations(
+        self, 
+        obj_info: ObjectInfo, 
+        output_dir: str = "./debug_viz",
+        prefix: str = "debug"
+    ) -> None:
+        """
+        Save debug visualizations to disk for inspection.
+        
+        Args:
+            obj_info: ObjectInfo containing debug visualizations
+            output_dir: Directory to save visualizations
+            prefix: Prefix for saved files
+        """
+        import os
+        
+        if not hasattr(obj_info, 'debug_visualizations'):
+            if self.debug:
+                print("No debug visualizations available to save")
+            return
+        
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+        
+        for viz_name, viz_image in obj_info.debug_visualizations.items():
+            filename = f"{prefix}_{obj_info.alpha_id}_{viz_name}.png"
+            filepath = os.path.join(output_dir, filename)
+            cv2.imwrite(filepath, viz_image)
+            if self.debug:
+                print(f"Saved debug visualization: {filepath}")
+    
+    def get_debug_visualization(
+        self, 
+        obj_info: ObjectInfo, 
+        viz_name: str = 'distance_filtered_mask'
+    ) -> Optional[np.ndarray]:
+        """
+        Get a specific debug visualization from obj_info.
+        
+        Args:
+            obj_info: ObjectInfo containing debug visualizations
+            viz_name: Name of the visualization to retrieve
+            
+        Returns:
+            Visualization image or None if not found
+        """
+        if not hasattr(obj_info, 'debug_visualizations'):
+            return None
+        
+        return obj_info.debug_visualizations.get(viz_name)
+    
             
     def _generate_segmentation(
         self,

@@ -1,5 +1,3 @@
-import openai
-from openai import OpenAI
 import anthropic
 import numpy as np
 from typing import List, Dict, Optional, Tuple, Union
@@ -7,16 +5,18 @@ import cv2
 from PIL import Image
 from io import BytesIO
 import base64
+import json
+import uuid
+import asyncio
 
-
-from cognitive_bt_framework.utils import setup_openai, get_openai_key, parse_llm_response, get_claude_key
+from cognitive_bt_framework.utils import parse_llm_response, parse_llm_response_ordered, get_claude_key
 from cognitive_bt_framework.utils.bt_utils import DOMAIN_DEF
 from ratelimit import limits, sleep_and_retry
 from cognitive_bt_framework.src.sim.ai2_thor.utils import AI2THOR_PREDICATES_ANNOTATED
 from cognitive_bt_framework.utils import BOOL_PREDS, RELATIONAL_PREDS
 
 class LLMInterfaceClaude:
-    def __init__(self, model_name="claude-3-5-sonnet-20240620"):
+    def __init__(self, model_name="claude-sonnet-4-20250514"):
         """
         Initialize the interface with your OpenAI API key and model choice.
         :param api_key: Your OpenAI API key.
@@ -352,7 +352,7 @@ class LLMInterfaceClaude:
             For relational predicates, include both the value (1/0) and the related object/room information."""
         return prompt
 
-    def get_object_states(self, image: np.ndarray, mask_generator) -> Tuple[Dict, np.ndarray, Dict]:
+    async def get_object_states(self, image: np.ndarray, mask_generator) -> Tuple[Dict, np.ndarray, Dict]:
         """
         Main method to get object states from an image
         
@@ -364,6 +364,8 @@ class LLMInterfaceClaude:
         """
         # Get segmentation masks using FastSAM
         masks, metadata = mask_generator.generate_masks(image)
+        labeled_image = mask_generator.visualize_masks(image, masks, metadata)
+        cv2.imwrite('labeled_image.png', labeled_image)
         
         if not np.any(masks):
             return {}, masks, metadata
@@ -381,7 +383,7 @@ class LLMInterfaceClaude:
                             "source": {
                                 "type": "base64",
                                 "media_type": "image/png",
-                                "data": self._encode_image(image)
+                                "data": self._encode_image(labeled_image)
                             }
                         },
                         {
@@ -390,56 +392,172 @@ class LLMInterfaceClaude:
                         }
                     ]
                 }]
-            response_text = self.query_llm(messages)
-            
-            import json
-
-            # Extract JSON from response
+            response_text = await self.query_llm(messages)
             print(response_text)
-            start_idx = response_text.find('[')
-            end_idx = response_text.rfind(']') + 1
-            if start_idx >= 0 and end_idx > start_idx:
-                json_str = response_text[start_idx:end_idx]
-                try:
-                    object_states = json.loads(json_str)
-                except json.JSONDecodeError as e:
-                    print(f"Error parsing JSON response: {e}")
-                    print(f"Response text: {response_text}")
-                    object_states = {}
-            else:
-                object_states = {}
+            return self._process_object_states(response_text, masks, metadata, image)
                 
         except Exception as e:
             print(f"Error querying Claude: {e}")
             return {}, masks, metadata
+
+    def _convert_openai_to_claude_format(self, messages):
+        """
+        Convert OpenAI format messages to Claude format
+        Handles image_url to Claude's image format conversion and extracts system messages
         
-        # Add mask data to object states
-        for state_info in object_states:
-            print(state_info.keys())
-            region_id = state_info['region_id'].split('_')[1]
-            if region_id in metadata:
-                mask_id = region_id
-                state_info['mask'] = masks == mask_id
-                state_info['bbox'] = metadata[mask_id]['bbox']
-                state_info['image'] = image
+        Returns:
+            tuple: (system_message, claude_messages)
+        """
+        claude_messages = []
+        system_message = None
         
-        return object_states, masks, metadata
+        for message in messages:
+            if message["role"] == "system":
+                # Extract system message content
+                if isinstance(message["content"], str):
+                    system_message = message["content"]
+                else:
+                    # If system message has complex content, extract text parts
+                    text_parts = []
+                    for content_item in message["content"]:
+                        if content_item["type"] == "text":
+                            text_parts.append(content_item["text"])
+                    system_message = "\n".join(text_parts)
+                continue
+                
+            claude_message = {"role": message["role"], "content": []}
+            
+            if isinstance(message["content"], str):
+                # Simple text message
+                claude_message["content"].append({
+                    "type": "text",
+                    "text": message["content"]
+                })
+            elif isinstance(message["content"], list):
+                # Multi-modal message with text and images
+                for content_item in message["content"]:
+                    if content_item["type"] == "text":
+                        claude_message["content"].append({
+                            "type": "text", 
+                            "text": content_item["text"]
+                        })
+                    elif content_item["type"] == "image_url":
+                        # Convert OpenAI image_url format to Claude format
+                        image_url = content_item["image_url"]["url"]
+                        if image_url.startswith("data:image/"):
+                            # Extract base64 data and media type
+                            media_type = image_url.split(";")[0].split(":")[1]
+                            base64_data = image_url.split(",")[1]
+                            claude_message["content"].append({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": base64_data
+                                }
+                            })
+            
+            claude_messages.append(claude_message)
+        
+        return system_message, claude_messages
 
     @sleep_and_retry
-    @limits(calls=100, period=60)  # Example: Max 10 calls per minute
-    def query_llm(self, prompt):
+    @limits(calls=100, period=60)
+    def query_llm_sync(self, prompt):
         """
-        Query the GPT model with the generated prompt.
+        Synchronous query method for Claude (like OpenAI's query_llm_sync)
+        Converts OpenAI format messages to Claude format automatically
+        """
+        try:
+            system_message = None
+            claude_messages = prompt
+            
+            # Convert OpenAI format to Claude format if needed
+            if isinstance(prompt, list) and len(prompt) > 0:
+                # Check if this looks like OpenAI format (has system role or image_url)
+                needs_conversion = False
+                for message in prompt:
+                    if message.get("role") == "system":
+                        needs_conversion = True
+                        break
+                    if isinstance(message.get("content"), list):
+                        for content_item in message["content"]:
+                            if content_item.get("type") == "image_url":
+                                needs_conversion = True
+                                break
+                
+                if needs_conversion:
+                    system_message, claude_messages = self._convert_openai_to_claude_format(prompt)
+            
+            self.conversation_history.append(prompt)
+            
+            # Prepare API call parameters
+            api_params = {
+                "model": self.model_name,
+                "messages": claude_messages,
+                "max_tokens": 4096,
+                "temperature": 0.5
+            }
+            
+            # Add system message if present
+            if system_message:
+                api_params["system"] = system_message
+            
+            response = self.client.messages.create(**api_params)
+            
+            self.conversation_history.append([{
+                'role': 'assistant',
+                'content': response.content[0].text
+            }])
+            print(response)
+            return response.content[0].text
+        except Exception as e:
+            print(f"Error querying LLM sync: {e}")
+            return None
+
+    @sleep_and_retry
+    @limits(calls=100, period=60)
+    async def query_llm(self, prompt):
+        """
+        Query the Claude model with the generated prompt.
         :param prompt: The prompt for task decomposition.
         :return: The model's response as a task decomposition.
         """
         try:
-            response = self.client.messages.create(
-                model=self.model_name,
-                messages=prompt,
-                max_tokens=4096,
-                temperature=1
-            )
+            system_message = None
+            claude_messages = prompt
+            
+            # Convert OpenAI format to Claude format if needed
+            if isinstance(prompt, list) and len(prompt) > 0:
+                # Check if this looks like OpenAI format (has system role or image_url)
+                needs_conversion = False
+                for message in prompt:
+                    if message.get("role") == "system":
+                        needs_conversion = True
+                        break
+                    if isinstance(message.get("content"), list):
+                        for content_item in message["content"]:
+                            if content_item.get("type") == "image_url":
+                                needs_conversion = True
+                                break
+                
+                if needs_conversion:
+                    system_message, claude_messages = self._convert_openai_to_claude_format(prompt)
+            
+            # Prepare API call parameters
+            api_params = {
+                "model": self.model_name,
+                "messages": claude_messages,
+                "max_tokens": 4096,
+                "temperature": 1
+            }
+            
+            # Add system message if present
+            if system_message:
+                api_params["system"] = system_message
+            
+            response = self.client.messages.create(**api_params)
+            
         except Exception as e:
             print(f"Error querying LLM: {e}")
             return None  # Or handle appropriately
@@ -463,25 +581,30 @@ class LLMInterfaceClaude:
             return None  # Or handle appropriately
         return response.choices[0].message.content
 
-    def get_task_decomposition(self, task, known_objects, context):
+    async def get_task_decomposition(self, task, known_objects, context):
         """
         Get the task decomposition from the GPT model.
         :param task: The task description.
         :return: A list or string of decomposed tasks.
         """
         prompt = self.generate_prompt_htn(task, known_objects, context)
-        decomposition = self.query_llm(prompt)
+        decomposition = await self.query_llm(prompt)
         return parse_llm_response(decomposition)
+    
+    async def get_task_decomposition_ordered(self, task, known_objects, context):
+        prompt = self.generate_prompt_htn(task, known_objects, context)
+        decomposition = await self.query_llm(prompt)
+        return parse_llm_response_ordered(decomposition)
 
-    def get_task_id(self, task, context, states):
+    async def get_task_id(self, task, context, states):
         prompt = self.generate_prompt_task_id(task, context, states)
-        ret = self.query_llm(prompt)
+        ret = await self.query_llm(prompt)
         print(ret)
         context_object = ret.split('\n')[1]
         task_id = ret.split('\n')[0]
         return task_id, context_object
 
-    def get_behavior_tree(self, big_task, task, actions, conditions, example, known_objects, completed_subtasks,
+    async def get_behavior_tree(self, big_task, task, actions, conditions, example, known_objects, completed_subtasks,
                           context, complete_condition):
         """
         Get the behavior tree from the GPT model for a given task.
@@ -489,19 +612,10 @@ class LLMInterfaceClaude:
         prompt = self.generate_behavior_tree_prompt(big_task, task, actions, conditions, example, known_objects,
                                                     completed_subtasks, context, complete_condition)
 
-        behavior_tree_xml = self.query_llm(prompt)
-        for i in range(len(behavior_tree_xml)):
-            if behavior_tree_xml[i] == '<':
-                behavior_tree_xml = behavior_tree_xml[i:]
-                break
-        for i in range(len(behavior_tree_xml)):
-            if behavior_tree_xml[len(behavior_tree_xml) - i - 1] == '>':
-                behavior_tree_xml = behavior_tree_xml[:len(behavior_tree_xml) - i ]
-                break
-        behavior_tree_xml = behavior_tree_xml.replace('```', '')
-        return behavior_tree_xml
+        behavior_tree_xml = await self.query_llm(prompt)
+        return self._clean_behavior_tree(behavior_tree_xml)
 
-    def refine_behavior_tree(self, big_task, task, actions, conditions, original_bt_xml, user_feedback, known_objects,
+    async def refine_behavior_tree(self, big_task, task, actions, conditions, original_bt_xml, user_feedback, known_objects,
                              completed_subtasks, example, context, complete_condition, image_context):
         """
         Refine a behavior tree based on user feedback.
@@ -509,23 +623,53 @@ class LLMInterfaceClaude:
         prompt = self.generate_behavior_tree_refinement_prompt(big_task, task, actions, conditions, original_bt_xml,
                                                                user_feedback, known_objects, completed_subtasks,
                                                                example, context, complete_condition, image_context)
-        refined_behavior_tree_xml = self.query_llm(prompt)
+        refined_behavior_tree_xml = await self.query_llm(prompt)
         print(f"Refined Behavior Tree: {refined_behavior_tree_xml}")
-        for i in range(len(refined_behavior_tree_xml)):
-            if refined_behavior_tree_xml[i] == '<':
-                refined_behavior_tree_xml = refined_behavior_tree_xml[i:]
-                break
-        refined_behavior_tree_xml = refined_behavior_tree_xml.replace('```', '')
-        return refined_behavior_tree_xml
+        return self._clean_behavior_tree(refined_behavior_tree_xml)
+
+    def _clean_behavior_tree(self, behavior_tree_xml):
+        """Clean up behavior tree XML response"""
+        behavior_tree_xml = behavior_tree_xml.replace('```', '')
+        start_idx = behavior_tree_xml.find('<')
+        end_idx = behavior_tree_xml.rfind('>') + 1
+        if start_idx >= 0 and end_idx > 0:
+            return behavior_tree_xml[start_idx:end_idx]
+        return behavior_tree_xml
+
+    def _process_object_states(self, response_text, masks, metadata, image):
+        """Process object states response from Claude"""
+        start_idx = response_text.find('[')
+        end_idx = response_text.rfind(']') + 1
+        object_states = {}
+        image_id = uuid.uuid4()
+        object_states['images'] = {image_id: image}
+        
+        if start_idx >= 0 and end_idx > start_idx:
+            try:
+                object_states = json.loads(response_text[start_idx:end_idx])
+                for state_info in object_states:
+                    region_id = state_info['region_id']
+                    region_id = int(region_id.split('r')[-1]) if 'r' in region_id else int(region_id.split('_')[-1])
+                    print(region_id)
+                    if region_id in metadata:
+                        mask_id = region_id
+                        state_info['mask'] = masks == mask_id
+                        state_info['bbox'] = metadata[mask_id]['bbox']
+                        state_info['image_id'] = image_id
+            except json.JSONDecodeError as e:
+                print(f"Error parsing JSON response: {e}")
+                print(f"Response text: {response_text}")
+        
+        return object_states, masks, metadata
 
 if __name__ == "__main__":
     from cognitive_bt_framework.src.sim.ai2_thor.utils import AI2THOR_ACTIONS
     # Example usage
-    llm_interface = LLMInterface()
+    llm_interface = LLMInterfaceClaude()
     task = "get a glass of water"
-    bt_xml = llm_interface.get_behavior_tree(task, AI2THOR_ACTIONS)
-    print(bt_xml)
-    # Assuming some feedback was received
-    feedback = "The robot fails to find the sink."
-    refined_bt_xml = llm_interface.refine_behavior_tree(task, bt_xml, feedback)
-    print(refined_bt_xml)
+    # bt_xml = llm_interface.get_behavior_tree(task, AI2THOR_ACTIONS)
+    # print(bt_xml)
+    # # Assuming some feedback was received
+    # feedback = "The robot fails to find the sink."
+    # refined_bt_xml = llm_interface.refine_behavior_tree(task, bt_xml, feedback)
+    # print(refined_bt_xml)

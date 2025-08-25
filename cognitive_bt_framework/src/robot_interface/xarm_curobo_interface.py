@@ -121,7 +121,7 @@ class CuRoboMotionPlanner:
         
         # Initialize cuRobo motion generator
         self.motion_gen = self.init_curobo()
-        
+        _, self.initial_position = self.arm.get_servo_angle(is_radian=True)
         # Initialize IK solver only if motion generator succeeded
         if self.motion_gen is not None:
             self.ik_solver = self.init_ik_solver()
@@ -403,7 +403,6 @@ class CuRoboMotionPlanner:
                 config = config.cuda("cuda")
                 config = config.to(torch.float32)
                 state = self.motion_gen.kinematics.get_state(config)
-                print(f"ROBOT TCP STATE: {state}\n for config: {config}")
                 pose = state.ee_position.cpu().numpy()
                 quat = state.ee_quaternion.cpu().numpy()
                 print(f"RObiot pose: {pose} quat: {quat}")
@@ -433,7 +432,6 @@ class CuRoboMotionPlanner:
             config = config.to(torch.float32)
             
             state = self.motion_gen.kinematics.get_state(config)
-            print(state)
             # Extract camera pose and quaternion with better debugging
             camera_pose = state.links_position.cpu().numpy()[0][1]  # [x, y, z]
             camera_quat_raw = state.links_quaternion.cpu().numpy()[0][1]
@@ -478,7 +476,7 @@ class CuRoboMotionPlanner:
             camera_rotation = Rotation.from_quat(camera_quat)
             return camera_pose, camera_rotation
         
-    def convert_cam_pose_to_base(self, position, orientation, do_translation=True):
+    def convert_cam_pose_to_base(self, position, orientation, do_translation=True, debug=True):
         """
         Convert camera pose to base frame using either static camera transform or 
         current robot end-effector transform.
@@ -494,21 +492,24 @@ class CuRoboMotionPlanner:
         try:
             # Use static camera transform if available
             if self.static_camera_tf is not None:
-                print("Using static camera transform for pose conversion")
+                if debug:
+                    print("Using static camera transform for pose conversion")
                 camera_pose = self.static_camera_position
                 camera_rotation = self.static_camera_rotation
             else:
                 print("Using dynamic camera transform for pose conversion")
                 camera_pose, camera_rotation = self.get_camera_transform()
             camera_pose[1] += 0.03
-            print(f"Pose before conversion pose: {position}, {orientation}")
+            if debug:
+                print(f"Pose before conversion pose: {position}, {orientation}")
             # Convert input position to homogeneous coordinates
             if isinstance(position, (list, tuple)):
                 position = np.array(position)
             
             # Transform position to base frame
             transformed_position = camera_rotation.apply(position)
-            print(f"Rotated pose: {transformed_position}")
+            if debug:
+                    print(f"Rotated pose: {transformed_position}")
             
             # Apply translation
             if self.static_camera_tf is not None and do_translation:
@@ -518,7 +519,8 @@ class CuRoboMotionPlanner:
                 # For dynamic camera, respect the do_translation flag
                 if do_translation:
                     transformed_position += camera_pose
-            print(f"Fully transformed pose: {transformed_position}")
+            if debug:
+                    print(f"Fully transformed pose: {transformed_position}")
             
             # Handle orientation transformation
             if isinstance(orientation, np.ndarray) and orientation.shape == (4,):
@@ -1618,7 +1620,13 @@ class CuRoboMotionPlanner:
             planning_timeout=5.0,   # Reduced from 10.0 seconds
             execute=False,
             speed_factor=1.0,
-            is_camera_frame=True
+            is_camera_frame=True,
+            is_place = False,
+            depth_image=None,
+            object_mask=None,
+            adjust_tcp_for_surface=True,
+            tcp_standoff_m=0.02,
+            search_radius_m=0.05
         ):
             """Plan movement to a target pose with improved robot preparation"""
             
@@ -1646,6 +1654,25 @@ class CuRoboMotionPlanner:
                 target_orientation = converted_orientation
                 print(f"Converted position: {target_position}, orientation: {target_orientation}")
             
+            # Apply surface-based TCP adjustment in robot frame if requested
+            print(f"Surface adjustment conditions: adjust_tcp_for_surface={adjust_tcp_for_surface}, "
+                  f"depth_image_available={depth_image is not None}, is_camera_frame={is_camera_frame}")
+            if adjust_tcp_for_surface and depth_image is not None and is_camera_frame:
+                print("Applying surface-based TCP adjustment in robot frame...")
+                adjusted_position = target_position#self._adjust_tcp_for_surface_robot_frame(
+                #     target_position, depth_image, object_mask, tcp_standoff_m, search_radius_m
+                # )
+                if adjusted_position is not None:
+                    target_position = adjusted_position
+                    print(f"TCP adjusted position: {target_position}")
+                else:
+                    print("Surface adjustment returned None - using original position")
+            else:
+                print("Surface adjustment skipped - conditions not met")
+            
+            if is_place:
+                target_position[2] += 0.2
+                
             if type(target_orientation) is not tuple and type(target_orientation[0]) is not float:
                 for i in range(len(target_orientation[0])):
                     print(target_orientation)
@@ -2200,8 +2227,13 @@ class CuRoboMotionPlanner:
         pose = self.arm.get_position(is_radian=True)
         print(pose)
         x, y, z, r, p, w = pose[1]
-        return self.arm.set_position(x, y, z + distance * 1000, r, p, w, is_radian=True, wait=True, timeout=10.0) == 0
-    
+        success = self.arm.set_position(x, y, z + distance * 1000, r, p, w, is_radian=True, wait=True, timeout=10.0) == 0
+        
+        if success:
+            success = self.arm.set_servo_angle(servo_id=None, angle=self.initial_position, is_radian=True, wait=True) == 0
+
+        return success
+        
     def move_to_home(self, speed=0.3, execute=False, speed_factor=1.0):
         """Plan movement to the home position and optionally execute on the robot
         
@@ -2782,8 +2814,9 @@ class CuRoboMotionPlanner:
         current_orientation=None,
         execute=False,
         speed_factor=1.0,
-        pivot_point=None,       # New: [x, y, z] coordinates of pivot point
-        arc_segments=10         # New: Number of segments for arc motion
+        pivot_point=None,       # Legacy: [x, y, z] coordinates of pivot point
+        arc_segments=10,        # Number of segments for arc motion
+        hinge_location=None     # New: hinge location ('top', 'bottom', 'left', 'right')
     ):
         """Plan a push or pull movement along a direction vector
         
@@ -2797,8 +2830,9 @@ class CuRoboMotionPlanner:
             current_orientation: Optional current orientation [w, x, y, z], if None use forward kinematics
             execute: Whether to execute the planned trajectory on the physical robot
             speed_factor: Speed factor for execution (>1 is faster)
-            pivot_point: Optional [x, y, z] coordinates for pivot-based arc motion
+            pivot_point: Optional [x, y, z] coordinates for legacy pivot-based arc motion
             arc_segments: Number of segments to discretize arc motion (default: 10)
+            hinge_location: Optional hinge location ('top', 'bottom', 'left', 'right') for hinge-based motion
             
         Returns:
             tuple: (success, trajectory, dt)
@@ -2855,23 +2889,47 @@ class CuRoboMotionPlanner:
                         print("Failed to get current pose")
                         return False, None, None
             
-            # Handle pivot point motion
-            if pivot_point is not None:
-                print(f"Pivot point provided: {pivot_point}")
-                # Calculate distance from grasp location to pivot point
+            # Handle pivot point motion (legacy) or hinge location motion (new)
+            if pivot_point is not None or hinge_location is not None:
                 grasp_pos = np.array(current_position)
-                pivot_pos = np.array(pivot_point)
-                calculated_distance = np.linalg.norm(grasp_pos - pivot_pos)
-                print(f"Calculated distance from grasp to pivot: {calculated_distance:.4f}m")
+                
+                if hinge_location and hinge_location in ['top', 'bottom', 'left', 'right']:
+                    print(f"Hinge location provided: {hinge_location}")
+                    # Calculate hinge edge position based on hinge location and interaction point
+                    # This uses the same simplified approach as in skill_executor
+                    offset_distance = 0.1  # 10cm offset for hinge location
+                    if hinge_location == 'left':
+                        hinge_pos = np.array([grasp_pos[0], grasp_pos[1] - offset_distance, grasp_pos[2]])
+                    elif hinge_location == 'right':
+                        hinge_pos = np.array([grasp_pos[0], grasp_pos[1] + offset_distance, grasp_pos[2]])
+                    elif hinge_location == 'top':
+                        hinge_pos = np.array([grasp_pos[0] - offset_distance, grasp_pos[1], grasp_pos[2]])
+                    elif hinge_location == 'bottom':
+                        hinge_pos = np.array([grasp_pos[0] + offset_distance, grasp_pos[1], grasp_pos[2]])
+                    
+                    # Calculate the radius as straight line distance from interaction point to hinge edge
+                    calculated_distance = np.linalg.norm(grasp_pos - hinge_pos)
+                    print(f"Hinge-based calculation: interaction_point={grasp_pos}, hinge_edge={hinge_pos}")
+                    print(f"Calculated radius from interaction point to hinge edge: {calculated_distance:.4f}m")
+                    
+                elif pivot_point is not None:
+                    print(f"Legacy pivot point provided: {pivot_point}")
+                    # Legacy calculation for backward compatibility
+                    pivot_pos = np.array(pivot_point)
+                    hinge_pos = pivot_pos  # Use pivot point as hinge position for legacy support
+                    calculated_distance = np.linalg.norm(grasp_pos - pivot_pos)
+                    print(f"Legacy pivot calculation: grasp_pos={grasp_pos}, pivot_pos={pivot_pos}")
+                    print(f"Calculated distance from grasp to pivot: {calculated_distance:.4f}m")
                 
                 # Override the provided distance with calculated distance
                 distance = calculated_distance
                 
-                # Use execute_pivot_pull_direct_xarm for pull operations with pivot
+                # Use execute_pivot_pull_direct_xarm for pull operations with pivot/hinge
                 if not is_push:  # This is a pull operation
-                    print("Using execute_pivot_pull_direct_xarm for pivot pull operation")
+                    motion_type = "hinge-based" if hinge_location else "legacy pivot"
+                    print(f"Using execute_pivot_pull_direct_xarm for {motion_type} pull operation")
                     success = self.execute_pivot_pull_direct_xarm(
-                        pivot_point=pivot_pos,
+                        pivot_point=hinge_pos,
                         current_position=grasp_pos,
                         current_orientation=current_orientation,
                         radius=calculated_distance,
@@ -2992,7 +3050,6 @@ class CuRoboMotionPlanner:
                 enable_graph=False,          # Disabled for goal type changes
                 enable_finetune=True
             )
-            print(f"Start state: {start_state}")
             print(f"start pose: {self.get_robot_tcp_pose()}")
             print(f"goal pose: {goal_pose}")
             # Plan the motion
@@ -3711,10 +3768,10 @@ class CuRoboMotionPlanner:
                 
             with self.arm_lock:
                 # Set less sensitive collision detection for pivot operations
-                collision_result = self.arm.set_collision_sensitivity(self.pivot_collision_sensitivity, wait=True)
-                if collision_result != 0:
-                    print(f"Warning: Failed to set collision sensitivity (code: {collision_result})")
-                    return False
+                # collision_result = self.arm.set_collision_sensitivity(self.pivot_collision_sensitivity, wait=True)
+                # if collision_result != 0:
+                #     print(f"Warning: Failed to set collision sensitivity (code: {collision_result})")
+                #     return False
                     
                 # Set less sensitive teach sensitivity for pivot operations  
                 teach_result = self.arm.set_teach_sensitivity(self.pivot_teach_sensitivity, wait=True)
@@ -3743,10 +3800,10 @@ class CuRoboMotionPlanner:
                 
             with self.arm_lock:
                 # Restore default collision sensitivity
-                collision_result = self.arm.set_collision_sensitivity(self.default_collision_sensitivity, wait=True)
-                if collision_result != 0:
-                    print(f"Warning: Failed to restore collision sensitivity (code: {collision_result})")
-                    return False
+                # collision_result = self.arm.set_collision_sensitivity(self.default_collision_sensitivity, wait=True)
+                # if collision_result != 0:
+                #     print(f"Warning: Failed to restore collision sensitivity (code: {collision_result})")
+                #     return False
                     
                 # Restore default teach sensitivity
                 teach_result = self.arm.set_teach_sensitivity(self.default_teach_sensitivity, wait=True)
@@ -3789,10 +3846,10 @@ class CuRoboMotionPlanner:
             
             with self.arm_lock:
                 # Apply the adjusted sensitivities
-                collision_result = self.arm.set_collision_sensitivity(self.current_pivot_collision_sensitivity, wait=True)
-                if collision_result != 0:
-                    print(f"Warning: Failed to adjust collision sensitivity (code: {collision_result})")
-                    return False
+                # collision_result = self.arm.set_collision_sensitivity(self.current_pivot_collision_sensitivity, wait=True)
+                # if collision_result != 0:
+                #     print(f"Warning: Failed to adjust collision sensitivity (code: {collision_result})")
+                #     return False
                     
                 teach_result = self.arm.set_teach_sensitivity(self.current_pivot_teach_sensitivity, wait=True) 
                 if teach_result != 0:
@@ -4053,27 +4110,33 @@ class CuRoboMotionPlanner:
         arc_angle_degrees: float = 30.0,
         segments: int = 10,
         speed_factor: float = 0.1,
-        is_quat = False
+        is_quat = False,
+        hinge_location: str = None,
+        is_push: bool = False
     ):
         """
         Execute pivot pull using direct xArm API commands, bypassing CuRobo planning.
         This is a fallback when CuRobo motion planning fails.
         
         Args:
-            pivot_point: [x, y, z] coordinates of pivot center
-            current_position: [x, y, z] current TCP position
+            pivot_point: [x, y, z] coordinates of pivot center (hinge edge for hinge-based motion)
+            current_position: [x, y, z] current TCP position (interaction point)
             current_orientation: [w, x, y, z] current TCP orientation
-            radius: Distance from current position to pivot point
+            radius: Distance from interaction point to hinge edge (for hinge-based motion)
             arc_angle_degrees: Arc angle in degrees (default 30)
             segments: Number of waypoints in the arc
             speed_factor: Speed factor for motion (default 0.1 for safety)
+            hinge_location: Optional hinge location ('top', 'bottom', 'left', 'right') for logging
             
         Returns:
             bool: True if successful, False otherwise
         """
         try:
-            print(f"\n=== Direct xArm API Pivot Pull ===")
+            motion_type = f"hinge-based ({hinge_location})" if hinge_location else "legacy pivot"
+            print(f"\n=== Direct xArm API Pivot Pull ({motion_type}) ===")
             print(f"Arc angle: {arc_angle_degrees}°, Segments: {segments}, Speed: {speed_factor}")
+            if hinge_location:
+                print(f"Hinge location: {hinge_location}, radius represents interaction point to hinge edge distance")
             
             if self.arm is None:
                 print("Robot not connected")
@@ -4104,6 +4167,8 @@ class CuRoboMotionPlanner:
             print(f"Current position: {current_pos_flat}")
             print(f"Pivot vector: {pivot_to_grasp}")
             print(f"Actual radius: {actual_radius:.3f}m")
+            print(f"Action type: {'push' if is_push else 'pull'}")
+            print(f"Hinge location: {hinge_location}")
             
             # Determine rotation axis (Z for door opening)
             rotation_axis = np.array([0, 0, 1])
@@ -4114,8 +4179,34 @@ class CuRoboMotionPlanner:
             test_vector = test_rotation @ pivot_to_grasp
             test_position = pivot_point_flat + test_vector
             
-            pos_direction = -1 if test_position[0] < current_pos_flat[0] else 1
-            print(f"Using rotation direction: {pos_direction} (pull)")
+            print(f"Test rotation: test_position={test_position}, current_pos={current_pos_flat}")
+            print(f"X comparison: test_position[0]={test_position[0]:.3f}, current_pos[0]={current_pos_flat[0]:.3f}")
+            
+            # Base direction from test rotation
+            base_direction = -1 if test_position[0] < current_pos_flat[0] else 1
+            print(f"Base direction from test rotation: {base_direction}")
+            
+            # Override based on hinge location and action type
+            if hinge_location == 'right':
+                # For right hinge pull: need positive rotation to get negative X and negative Y movement
+                pos_direction = 1 if not is_push else -1  # pull = 1, push = -1
+            elif hinge_location == 'left':
+                # For left hinge pull: negative X, positive Y movement (per user requirement)  
+                pos_direction = -1 if not is_push else 1  # pull = -1, push = 1
+            elif hinge_location == 'top':
+                # For top hinge: pull = move down (negative Y), push = move up (positive Y)
+                pos_direction = -1 if not is_push else 1  # pull = -1, push = 1
+            elif hinge_location == 'bottom':
+                # For bottom hinge: pull = move up (positive Y), push = move down (negative Y)
+                pos_direction = 1 if not is_push else -1  # pull = 1, push = -1
+            else:
+                # Fallback to base direction
+                pos_direction = base_direction
+            # (Similar logic for top/bottom if needed)
+            action_type = "push" if is_push else "pull"
+            print(f"Using rotation direction: {pos_direction} ({action_type})")
+            print(f"Direction logic: hinge={hinge_location}, is_push={is_push}, base_direction={base_direction}, final_direction={pos_direction}")
+            print(f"Expected motion: {'backward' if pos_direction == -1 else 'forward'} for {action_type}")
             
             waypoints = []
             for i in range(segments + 1):
@@ -4214,19 +4305,10 @@ class CuRoboMotionPlanner:
                         self.arm.set_state(0)
                         print(f"Waiting for robot ready state: {self.arm.get_state()}")
                         
-                    # Execute the movement
-                    code = self.arm.set_position(
-                        x=target_x,
-                        y=target_y,
-                        z=target_z,
-                        roll=roll,
-                        pitch=pitch,
-                        yaw=yaw,
-                        speed=move_speed,
-                        mvacc=move_acc,
-                        wait=True,
-                        radius=20.0,
-                        is_radian=False
+                    # Execute the movement without torque monitoring for better performance
+                    code = self._execute_standard_waypoint(
+                        target_x, target_y, target_z, roll, pitch, yaw,
+                        move_speed, move_acc
                     )
                     
                     print(f"set_position returned code: {code}")
@@ -4339,9 +4421,9 @@ class CuRoboMotionPlanner:
                 
             with self.arm_lock:
                 # Set default collision sensitivity
-                collision_result = self.arm.set_collision_sensitivity(self.default_collision_sensitivity, wait=True)
-                if collision_result != 0:
-                    print(f"Warning: Failed to set initial collision sensitivity (code: {collision_result})")
+                # collision_result = self.arm.set_collision_sensitivity(self.default_collision_sensitivity, wait=True)
+                # if collision_result != 0:
+                #     print(f"Warning: Failed to set initial collision sensitivity (code: {collision_result})")
                     
                 # Set default teach sensitivity
                 teach_result = self.arm.set_teach_sensitivity(self.default_teach_sensitivity, wait=True)
@@ -4459,6 +4541,347 @@ class CuRoboMotionPlanner:
             self.restore_default_sensitivity()
             return False, None, None
 
+
+    
+    def _execute_standard_waypoint(self, target_x, target_y, target_z, roll, pitch, yaw, 
+                                 move_speed, move_acc):
+        """Execute waypoint without torque monitoring (fallback method)."""
+        return self.arm.set_position(
+            x=target_x,
+            y=target_y,
+            z=target_z,
+            roll=roll,
+            pitch=pitch,
+            yaw=yaw,
+            speed=move_speed,
+            mvacc=move_acc,
+            wait=True,
+            radius=20.0,
+            is_radian=False
+        )
+    
+    def _adjust_tcp_for_surface_robot_frame(self, target_position_robot, depth_image, object_mask=None, tcp_standoff_m=0.02, search_radius_m=0.05):
+        """
+        Adjust TCP position for top-down grasps by finding surface center in robot frame.
+        This ensures proper vertical positioning by working in robot coordinates.
+        
+        Args:
+            target_position_robot: Target position already converted to robot frame [x, y, z]
+            depth_image: Depth image from camera
+            object_mask: Binary mask of object region
+            tcp_standoff_m: Standoff distance above surface in meters
+            search_radius_m: Search radius in meters to constrain surface search area
+            
+        Returns:
+            Adjusted position in robot frame with proper vertical TCP offset
+        """
+        try:
+            # For search radius, we need to convert target position back to camera/pixel coordinates
+            # This is a simplified approach - convert the robot frame target to camera frame using inverse transform
+            if hasattr(self, 'static_camera_tf') and self.static_camera_tf is not None:
+                # Use static transform (inverse)
+                camera_pose = self.static_camera_position
+                camera_rotation = self.static_camera_rotation
+                # Inverse transform: subtract translation first, then apply inverse rotation
+                relative_pos = np.array(target_position_robot) - camera_pose
+                camera_position = camera_rotation.inv().apply(relative_pos)
+            else:
+                # For dynamic transform, use a simple approximation
+                # This is not perfect but should work for the search radius constraint
+                camera_pose, camera_rotation = self.get_camera_transform()
+                # camera_pose[1] += 0.03  # Match the offset in convert_cam_pose_to_base
+                relative_pos = np.array(target_position_robot) - camera_pose
+                camera_position = camera_rotation.inv().apply(relative_pos)
+            
+            # Get camera intrinsics
+            if hasattr(self, 'latest_depth_image') and hasattr(self, 'main_camera'):
+                fx = self.main_camera.intrinsics.fx if hasattr(self.main_camera, 'intrinsics') else 525.0
+                fy = self.main_camera.intrinsics.fy if hasattr(self.main_camera, 'intrinsics') else 525.0
+                ppx = self.main_camera.intrinsics.ppx if hasattr(self.main_camera, 'intrinsics') else depth_image.shape[1] // 2
+                ppy = self.main_camera.intrinsics.ppy if hasattr(self.main_camera, 'intrinsics') else depth_image.shape[0] // 2
+            else:
+                fx = fy = 525.0  # Default values
+                ppx, ppy = depth_image.shape[1] // 2, depth_image.shape[0] // 2
+                
+            h, w = depth_image.shape
+            
+            # Convert camera position to pixel coordinates for search radius constraint
+            if camera_position[2] > 0:
+                target_pixel_x = int(fx * camera_position[0] / camera_position[2] + ppx)
+                target_pixel_y = int(fy * camera_position[1] / camera_position[2] + ppy)
+                # Ensure pixel coordinates are within bounds
+                target_pixel_x = max(0, min(w-1, target_pixel_x))
+                target_pixel_y = max(0, min(h-1, target_pixel_y))
+                
+                # Convert search radius from meters to pixels (approximate)
+                # Assume average depth and use camera parameters for conversion
+                avg_depth = camera_position[2] if camera_position[2] > 0.1 else 0.5  # Fallback depth
+                radius_pixels = int((search_radius_m * fx) / avg_depth)
+                radius_pixels = max(10, min(100, radius_pixels))  # Constrain between 10-100 pixels
+                print(f"Target pixel: ({target_pixel_x}, {target_pixel_y}), search radius: {radius_pixels} pixels ({search_radius_m}m)")
+            else:
+                target_pixel_x = target_pixel_y = None
+                radius_pixels = 50  # Default fallback
+                print(f"Could not determine target pixel coordinates, using default radius: {radius_pixels} pixels")
+            
+            # Detect flat horizontal surfaces for top-down grasps using surface normals
+            horizontal_surfaces_mask = self._detect_horizontal_surfaces(depth_image, object_mask)
+            
+            # Create search region around the target
+            if horizontal_surfaces_mask is not None and np.any(horizontal_surfaces_mask):
+                # Use the largest horizontal surface component near the target
+                search_mask = horizontal_surfaces_mask
+                print(f"Using detected horizontal surfaces for TCP centering")
+            elif object_mask is not None:
+                search_mask = object_mask
+                print(f"No horizontal surfaces detected, using full object mask")
+            else:
+                # Create circular search region as fallback
+                radius = 30  # pixels
+                h, w = depth_image.shape
+                y_coords, x_coords = np.ogrid[:h, :w]
+                search_mask = (x_coords - ppx)**2 + (y_coords - ppy)**2 <= radius**2
+                print(f"Using circular search region as fallback")
+            # Find surface points within the search mask
+            valid_depths = depth_image > 100  # Valid depth values
+            surface_region = valid_depths & search_mask
+            
+            if not np.any(surface_region):
+                print("No valid surface points found in search region")
+                return None
+            
+            # For top-down grasps, prioritize the center of the horizontal surface region
+            surface_coords = np.where(surface_region)
+            if len(surface_coords[0]) < 5:
+                print("Insufficient surface points for centering")
+                return None
+                
+            # Convert all surface points to robot frame to find highest Z coordinate
+            surface_points_robot = []
+            surface_y_coords, surface_x_coords = surface_coords
+            surface_depths = depth_image[surface_region] / 1000.0  # Convert mm to m
+            
+            # Convert each surface point to robot frame
+            for i in range(len(surface_y_coords)):
+                pixel_y, pixel_x = surface_y_coords[i], surface_x_coords[i]
+                depth = depth_image[pixel_y, pixel_x] / 1000.0
+                
+                # Convert to camera 3D coordinates
+                cam_x = (pixel_x - ppx) * depth / fx
+                cam_y = (pixel_y - ppy) * depth / fy
+                cam_z = depth
+                
+                # Convert to robot frame
+                robot_point = self.convert_cam_pose_to_base([cam_x, cam_y, cam_z], [0, 1, 0, 0], debug=False)
+                if robot_point is not None and len(robot_point) > 0:
+                    surface_points_robot.append(robot_point[0])
+            
+            if not surface_points_robot:
+                print("Failed to convert any surface points to robot frame")
+                return None
+            
+            # Find the highest Z coordinate and then find the centroid of all points near that height
+            surface_points_robot = np.array(surface_points_robot)
+            highest_z = np.max(surface_points_robot[:, 2])
+            
+            # Define a tolerance for "near highest" points (within 5mm of the top)
+            z_tolerance = 0.005  # 5mm tolerance
+            near_highest_mask = (surface_points_robot[:, 2] >= (highest_z - z_tolerance))
+            near_highest_points = surface_points_robot[near_highest_mask]
+            
+            # Calculate centroid of the highest surface region for stable grasp positioning
+            if len(near_highest_points) > 0:
+                centroid_x = np.mean(near_highest_points[:, 0])
+                centroid_y = np.mean(near_highest_points[:, 1])
+                # Use the actual highest Z coordinate, not the centroid Z
+                highest_z_coord = highest_z
+                
+            else:
+                # Fallback to single highest point if no near-highest points found
+                highest_z_idx = np.argmax(surface_points_robot[:, 2])
+                highest_point = surface_points_robot[highest_z_idx]
+                centroid_x, centroid_y, highest_z_coord = highest_point
+            
+            print(f"Found {len(surface_points_robot)} surface points in robot frame")
+            print(f"Near-highest points ({len(near_highest_points)} within {z_tolerance*1000:.1f}mm of top)")
+            print(f"Highest Z: {highest_z_coord:.3f}m, Centroid XY: ({centroid_x:.3f}, {centroid_y:.3f})")
+            
+            # Debug: show the distribution of surface points for centering analysis
+            if len(surface_points_robot) > 0:
+                x_coords = surface_points_robot[:, 0]
+                y_coords = surface_points_robot[:, 1]
+                z_coords = surface_points_robot[:, 2]
+                print(f"Surface point distribution:")
+                print(f"  X: min={np.min(x_coords):.3f}, max={np.max(x_coords):.3f}, mean={np.mean(x_coords):.3f}")
+                print(f"  Y: min={np.min(y_coords):.3f}, max={np.max(y_coords):.3f}, mean={np.mean(y_coords):.3f}")
+                print(f"  Z: min={np.min(z_coords):.3f}, max={np.max(z_coords):.3f}, mean={np.mean(z_coords):.3f}")
+                
+                if len(near_highest_points) > 0:
+                    nh_x = near_highest_points[:, 0]
+                    nh_y = near_highest_points[:, 1]
+                    print(f"Near-highest distribution:")
+                    print(f"  X: min={np.min(nh_x):.3f}, max={np.max(nh_x):.3f}, mean={np.mean(nh_x):.3f}")
+                    print(f"  Y: min={np.min(nh_y):.3f}, max={np.max(nh_y):.3f}, mean={np.mean(nh_y):.3f}")
+            
+            # Apply TCP standoff in robot's Z direction (vertical)
+            adjusted_position = [
+                centroid_x,  # X: use centroid of highest region for stability
+                centroid_y,  # Y: use centroid of highest region for stability
+                highest_z_coord + tcp_standoff_m  # Z: add standoff above highest surface
+            ]
+            
+            print(f"Surface analysis: centroid_XY=({centroid_x:.3f}, {centroid_y:.3f}), "
+                  f"highest_Z={highest_z_coord:.3f}m, adjusted_with_standoff={adjusted_position}")
+            
+            return adjusted_position
+            
+        except Exception as e:
+            print(f"Error in surface-based TCP adjustment: {e}")
+            return None
+    
+    def _detect_horizontal_surfaces(self, depth_image, object_mask=None):
+        """
+        Detect horizontal flat surfaces in the depth image using surface normals.
+        Returns a binary mask of horizontal surface pixels.
+        """
+        try:
+            import cv2
+            
+            h, w = depth_image.shape
+            
+            # Convert depth to float for gradient computation
+            depth_float = depth_image.astype(np.float32)
+            
+            # Compute depth gradients using Sobel operator
+            grad_x = cv2.Sobel(depth_float, cv2.CV_32F, 1, 0, ksize=3)
+            grad_y = cv2.Sobel(depth_float, cv2.CV_32F, 0, 1, ksize=3)
+            
+            # Create mask for valid pixels
+            if object_mask is not None:
+                valid_mask = object_mask & (depth_image > 100)
+            else:
+                valid_mask = depth_image > 100
+            
+            # Compute surface normals for valid pixels
+            horizontal_mask = np.zeros((h, w), dtype=bool)
+            
+            for y in range(1, h-1):
+                for x in range(1, w-1):
+                    if not valid_mask[y, x]:
+                        continue
+                        
+                    # Get local depth gradients
+                    dx = grad_x[y, x]
+                    dy = grad_y[y, x]
+                    
+                    # Compute normal using cross product method
+                    # Two tangent vectors: (1, 0, dx) and (0, 1, dy)
+                    # Normal = (1, 0, dx) × (0, 1, dy) = (-dx, -dy, 1)
+                    normal = np.array([-dx, -dy, 1.0])
+                    
+                    # Normalize the normal vector
+                    norm_length = np.linalg.norm(normal)
+                    if norm_length > 1e-6:
+                        normal = normal / norm_length
+                        
+                        # Check if surface is horizontal (normal points up toward camera)
+                        # Camera normal is (0, 0, -1) pointing away from camera
+                        camera_normal = np.array([0, 0, -1])
+                        alignment = abs(np.dot(normal, camera_normal))
+                        
+                        # Surface is horizontal if normal is well aligned with camera normal
+                        if alignment > 0.5:  # More lenient threshold for better coverage
+                            horizontal_mask[y, x] = True
+            
+            # Apply morphological operations to clean up the mask
+            if np.any(horizontal_mask):
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                horizontal_mask = cv2.morphologyEx(horizontal_mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
+                horizontal_mask = cv2.morphologyEx(horizontal_mask, cv2.MORPH_OPEN, kernel)
+                horizontal_mask = horizontal_mask.astype(bool)
+            
+            return horizontal_mask
+            
+        except Exception as e:
+            print(f"Error detecting horizontal surfaces: {e}")
+            return None
+    
+    def _verify_gripper_contact_area(self, surface_points, initial_x, initial_y, required_length_m, gripper_orientation):
+        """
+        Verify and adjust grasp position to ensure sufficient gripper contact area.
+        
+        Args:
+            surface_points: Array of surface points in robot frame [N, 3]
+            initial_x, initial_y: Initial grasp position
+            required_length_m: Required length of surface contact (e.g., 3cm)
+            gripper_orientation: Gripper orientation [x, y, z, w]
+        
+        Returns:
+            (adjusted_x, adjusted_y): Position ensuring sufficient contact area
+        """
+        try:
+            # For top-down grasps:
+            # - Gripper closes along Y-axis (left-right from robot's perspective) 
+            # - But gripper pads contact the surface in X-direction
+            # - Need ±1.5cm of object surface in X-direction from interaction point
+            
+            # Check surface coverage along X-axis (contact direction for gripper pads)
+            x_coords = surface_points[:, 0]
+            x_min, x_max = np.min(x_coords), np.max(x_coords)
+            available_x_span = x_max - x_min
+            
+            print(f"Gripper contact verification:")
+            print(f"  Required contact length: {required_length_m*100:.1f}cm")
+            print(f"  Available X-span: {available_x_span*100:.1f}cm (from {x_min:.3f} to {x_max:.3f})")
+            
+            if available_x_span < required_length_m:
+                print(f"  Small cap area: X surface area ({available_x_span*100:.1f}cm < {required_length_m*100:.1f}cm)")
+                # For small caps, center on available area and proceed - this is normal for bottle caps
+                adjusted_x = (x_min + x_max) / 2
+                print(f"  Centering on available {available_x_span*100:.1f}cm cap area at X: {adjusted_x:.3f}")
+                
+                # For bottle caps, small contact area is acceptable
+                if available_x_span < 0.005:  # Less than 0.5cm
+                    print(f"  Cap very small ({available_x_span*100:.1f}cm) - precision grasp required")
+                else:
+                    print(f"  Cap size acceptable for opening ({available_x_span*100:.1f}cm span)")
+            else:
+                # Ensure the grasp point allows sufficient margin on each side in X-direction
+                margin = required_length_m / 2  # 1cm on each side for opening tasks
+                
+                # Constrain the X position to ensure sufficient gripper pad contact area
+                x_min_allowed = x_min + margin
+                x_max_allowed = x_max - margin
+                
+                if initial_x < x_min_allowed:
+                    adjusted_x = x_min_allowed
+                    print(f"  Adjusted X from {initial_x:.3f} to {adjusted_x:.3f} (need 1cm behind)")
+                elif initial_x > x_max_allowed:
+                    adjusted_x = x_max_allowed  
+                    print(f"  Adjusted X from {initial_x:.3f} to {adjusted_x:.3f} (need 1cm in front)")
+                else:
+                    adjusted_x = initial_x
+                    print(f"  X position {adjusted_x:.3f} OK (sufficient pad contact area: ±1cm)")
+            
+            # For Y-axis (gripper closing direction), ensure we're within surface bounds
+            y_coords = surface_points[:, 1]
+            y_min, y_max = np.min(y_coords), np.max(y_coords)
+            
+            if initial_y < y_min:
+                adjusted_y = y_min
+                print(f"  Adjusted Y from {initial_y:.3f} to {adjusted_y:.3f} (outside surface bounds)")
+            elif initial_y > y_max:
+                adjusted_y = y_max
+                print(f"  Adjusted Y from {initial_y:.3f} to {adjusted_y:.3f} (outside surface bounds)")
+            else:
+                adjusted_y = initial_y
+                print(f"  Y position {adjusted_y:.3f} OK (within surface bounds)")
+            
+            return adjusted_x, adjusted_y
+            
+        except Exception as e:
+            print(f"Error in gripper contact verification: {e}")
+            return initial_x, initial_y
 
 def test_direct_xarm_pivot_pull():
     """Test pivot pull using direct xArm API, bypassing CuRobo"""
@@ -4657,8 +5080,32 @@ def test_dynamic_close_gripper():
     success_dynamic = planner.close_gripper(simple_close=False)
     print(f"Dynamic close result: {'SUCCESS' if success_dynamic else 'FAILED'}")
 
+def test_retract():
+    # Initialize planner
+    robot_ip = "192.168.1.224"
+    planner = CuRoboMotionPlanner(robot_ip=robot_ip)
+    while planner.arm.get_state()[1] not in [0, 2, 3]:
+            time.sleep(0.5)
+            planner.arm.set_state(0)
+            print(f"Waiting for robot ready state: {planner.arm.get_state()}")
+    pose, _ = planner.get_tcp_pose_api()
+    print(f"MOVING TO X POSE {pose}")
+    move_res = planner.arm.set_position(x = (pose[0] + 0.2) * 1000, wait=True)
+    while planner.arm.get_state()[1] not in [0, 2, 3]:
+            time.sleep(0.5)
+            planner.arm.set_state(0)
+            print(f"Waiting for robot ready state: {planner.arm.get_state()}")
+    pose, _ = planner.get_tcp_pose_api()
+    print(f"MOVING TO Z POSE")
+    
+    move_res = planner.arm.set_position(z = (pose[2] - 0.1) * 1000, wait=True)
+    return planner.retract_gripper()
+
+    
+
+
 if __name__ == "__main__":
     # Run comprehensive test suite
     print("=== xArm CuRobo Interface Test Suite ===\n")
     
-    test_dynamic_close_gripper()
+    test_retract()

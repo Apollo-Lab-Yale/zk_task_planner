@@ -18,7 +18,7 @@ def get_openai_key():
         raise "failed to find api key."
 
 def get_claude_key():
-    file_path = "/usr/config/claude_api_key.txt"
+    file_path = "/usr/config/claud_api_key.txt"
     try:
         with open(file_path, 'r') as file:
             first_line = file.readline()

@@ -15,7 +15,7 @@ from cognitive_bt_framework.utils import BOOL_PREDS, RELATIONAL_PREDS
 
 
 class LLMInterfaceOpenAI:
-    def __init__(self, model_name="o4-mini-2025-04-16"):
+    def __init__(self, model_name="o4-mini"):
         self.client = OpenAI(api_key=get_openai_key())
         self.async_client = AsyncOpenAI(api_key=get_openai_key())
         self.model_name = model_name
@@ -396,3 +396,44 @@ class LLMInterfaceOpenAI:
                 print(f"Error parsing JSON response: {e}")
         
         return object_states, masks, metadata
+    
+    def get_response_with_image(self, prompt: str, image_b64: str) -> str:
+        """
+        Get response from LLM with image input for task planning
+        
+        Args:
+            prompt: Text prompt for the LLM
+            image_b64: Base64 encoded image
+            
+        Returns:
+            LLM response text
+        """
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{image_b64}"
+                        }
+                    }
+                ]
+            }
+        ]
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                max_completion_tokens=4096
+                # Remove temperature parameter - use default (1.0) for o4-mini model
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"Error in get_response_with_image: {e}")
+            return None

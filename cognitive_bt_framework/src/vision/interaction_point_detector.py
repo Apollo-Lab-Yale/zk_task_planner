@@ -49,7 +49,8 @@ class RobustInteractionDetector:
         edge_threshold: float = 15.0,
         shift_factor: float = 0.25,
         min_distance: int = 20,  # Added parameter for minimum distance between points
-        fast_mode: bool = True   # Enable fast mode by default
+        fast_mode: bool = True,   # Enable fast mode by default
+        depth_plane_only: bool = True  # NEW: Use only depth plane detection method
     ) -> List[InteractionPoint]:
         """
         Detect robust interaction points with optional center-shift for edge points.
@@ -64,13 +65,57 @@ class RobustInteractionDetector:
             edge_threshold: Distance from edge to consider "edge point" (pixels)
             shift_factor: How much to shift toward center (0.0-1.0)
             min_distance: Minimum distance between points in pixels (for non-maximum suppression)
+            fast_mode: Whether to use fast mode (ignored when depth_plane_only=True)
+            depth_plane_only: If True, use only depth plane detection method (requires depth_data)
             
         Returns:
             List of interaction points
         """
         if not np.any(mask):
             return []
-            
+        
+        # Check if we should use only depth plane detection
+        if depth_plane_only:
+            if depth_data is None:
+                if self.debug:
+                    print("WARNING: depth_plane_only=True but no depth_data provided. Falling back to standard methods.")
+                depth_plane_only = False
+            else:
+                if self.debug:
+                    print("Using depth plane detection method exclusively")
+                # Use only the new depth plane detection method
+                candidates = self._detect_depth_planes_with_distribution(depth_data, mask)
+                if self.debug:
+                    print(f"[DEBUG] Initial candidates from depth plane detection: {len(candidates)}")
+                
+                # Always apply distance filtering for spatial distribution
+                if self.debug:
+                    print(f"[DEBUG] Applying NMS filtering with min_distance={min_distance} pixels")
+                final_points = self._apply_nms(candidates, min_distance=min_distance, depth_data=depth_data)
+                if self.debug:
+                    print(f"[DEBUG] Points after NMS filtering: {len(final_points)}")
+                
+                # Limit to max_points after distance filtering if needed
+                if len(final_points) > max_points:
+                    if self.debug:
+                        print(f"[DEBUG] Limiting from {len(final_points)} to {max_points} points (max_points constraint)")
+                    final_points = final_points[:max_points]
+                
+                # Apply center shift if requested (though depth plane points are already well-positioned)
+                if apply_center_shift:
+                    if self.debug:
+                        print(f"[DEBUG] Applying center-shift for {len(final_points)} depth plane points")
+                    final_points = self.shift_edge_points_to_center(
+                        final_points, mask, edge_threshold, shift_factor
+                    )
+                    if self.debug:
+                        print(f"[DEBUG] Points after center-shift: {len(final_points)}")
+                
+                if self.debug:
+                    print(f"[DEBUG] Final point count returned: {len(final_points[:max_points])}")
+                return final_points[:max_points]
+        
+        # Original multi-method detection (when depth_plane_only=False)
         # Convert image to grayscale for processing
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
         masked_gray = np.zeros_like(gray)
@@ -116,7 +161,7 @@ class RobustInteractionDetector:
         # Apply non-maximum suppression with configurable min_distance
         if self.debug:
             print(f"Applying NMS with minimum distance of {min_distance} pixels")
-        final_points = self._apply_nms(scored_points, min_distance=min_distance)
+        final_points = self._apply_nms(scored_points, min_distance=min_distance, depth_data=depth_data)
         
         # Apply center shift if requested
         if apply_center_shift:
@@ -143,7 +188,7 @@ class RobustInteractionDetector:
         edge_threshold: float = 15.0,
         shift_factor: float = 0.4,
         min_shift: int = 5,
-        max_shift: int = 10
+        max_shift: int = 20
     ) -> List[InteractionPoint]:
         """
         Shift points near object edges toward the object center for better depth reliability.
@@ -436,7 +481,11 @@ class RobustInteractionDetector:
         edge_points = self._detect_depth_discontinuities(depth_smooth, mask)
         points.extend(edge_points)
         
-        # 5. Calculate surface normals and approach angles for all points
+        # 5. Detect depth planes with distributed points (NEW METHOD)
+        plane_points = self._detect_depth_planes_with_distribution(depth_smooth, mask)
+        points.extend(plane_points)
+        
+        # 6. Calculate surface normals and approach angles for all points
         points = self._add_surface_normals(points, depth_smooth, mask)
         
         return points
@@ -595,46 +644,190 @@ class RobustInteractionDetector:
         }
         return type_scores.get(interaction_type, 0.5)
     
-    def _apply_nms(self, points: List[InteractionPoint], min_distance: int = 30) -> List[InteractionPoint]:
+    def _apply_nms(self, points: List[InteractionPoint], min_distance: int = 30, depth_data: Optional[np.ndarray] = None) -> List[InteractionPoint]:
         """
-        Apply non-maximum suppression to remove nearby duplicate points.
+        Apply two-stage filtering: distance-based coverage + depth consistency prioritization.
+        
+        Stage 1: Ensure spatial coverage of all valid regions using distance filtering
+        Stage 2: Within each spatial region, prioritize depth consistency over other metrics
         
         Args:
             points: List of candidate interaction points
             min_distance: Minimum allowed distance between points in pixels
+            depth_data: Optional depth data for consistency checking
             
         Returns:
-            Filtered list of points with no points closer than min_distance
+            Filtered list ensuring both coverage and depth consistency prioritization
+        """
+        if not points:
+            if self.debug:
+                print("[DEBUG] NMS: No input points to filter")
+            return []
+        
+        if self.debug:
+            print(f"[DEBUG] NMS: Starting with {len(points)} candidate points")
+        
+        # STAGE 1: SPATIAL COVERAGE - Group points into spatial regions
+        spatial_regions = self._group_points_by_spatial_regions(points, min_distance)
+        
+        if self.debug:
+            print(f"[DEBUG] NMS: Grouped into {len(spatial_regions)} spatial regions (min_distance={min_distance})")
+            for i, region in enumerate(spatial_regions):
+                print(f"[DEBUG] NMS:   Region {i}: {len(region)} points")
+        
+        # STAGE 2: DEPTH CONSISTENCY - Select best point from each region
+        final_points = []
+        points_filtered_in_regions = 0
+        for i, region_points in enumerate(spatial_regions):
+            points_filtered_in_regions += len(region_points) - 1  # All but the best point get filtered
+            
+            if depth_data is not None:
+                # Within each region, prioritize depth consistency
+                best_point = self._select_best_point_by_depth_consistency(region_points, depth_data)
+            else:
+                # Fallback to score-based selection
+                best_point = max(region_points, key=lambda p: p.score)
+            
+            final_points.append(best_point)
+        
+        if self.debug:
+            print(f"[DEBUG] NMS: Selected 1 best point from each region")
+            print(f"[DEBUG] NMS: FILTERED OUT {points_filtered_in_regions} points due to proximity/redundancy")
+            print(f"[DEBUG] NMS: Final result: {len(final_points)} points")
+        
+        return final_points
+    
+    def _group_points_by_spatial_regions(self, points: List[InteractionPoint], min_distance: int) -> List[List[InteractionPoint]]:
+        """
+        Group points into spatial regions based on minimum distance threshold.
+        Ensures coverage of all distinct spatial areas.
+        
+        Args:
+            points: List of interaction points
+            min_distance: Minimum distance between regions
+            
+        Returns:
+            List of point groups, each representing a spatial region
         """
         if not points:
             return []
-            
-        # Keep track of which points to keep
-        keep = [True] * len(points)
         
-        for i in range(len(points)):
-            if not keep[i]:
+        # Sort points by score (highest first) to ensure best points seed regions
+        sorted_points = sorted(points, key=lambda p: p.score, reverse=True)
+        
+        regions = []
+        assigned = [False] * len(sorted_points)
+        
+        for i, point in enumerate(sorted_points):
+            if assigned[i]:
                 continue
                 
-            for j in range(i + 1, len(points)):
-                if not keep[j]:
+            # Start a new region with this point
+            current_region = [point]
+            assigned[i] = True
+            
+            # Find all points within min_distance of any point in this region
+            for j, other_point in enumerate(sorted_points):
+                if assigned[j]:
                     continue
                     
-                # Calculate distance between points
-                distance = np.sqrt(
-                    (points[i].x - points[j].x)**2 + 
-                    (points[i].y - points[j].y)**2
-                )
-                
-                if distance < min_distance:
-                    # Keep the higher scored point
-                    if points[i].score >= points[j].score:
-                        keep[j] = False
-                    else:
-                        keep[i] = False
+                # Check if this point is close to any point in the current region
+                for region_point in current_region:
+                    distance = np.sqrt(
+                        (region_point.x - other_point.x)**2 + 
+                        (region_point.y - other_point.y)**2
+                    )
+                    
+                    if distance < min_distance:
+                        current_region.append(other_point)
+                        assigned[j] = True
                         break
+            
+            regions.append(current_region)
         
-        return [point for i, point in enumerate(points) if keep[i]]
+        return regions
+    
+    def _select_best_point_by_depth_consistency(self, region_points: List[InteractionPoint], depth_data: np.ndarray) -> InteractionPoint:
+        """
+        Select the best point from a spatial region prioritizing depth consistency.
+        
+        Args:
+            region_points: Points within the same spatial region
+            depth_data: Depth image for consistency analysis
+            
+        Returns:
+            Best point based on depth consistency and score combination
+        """
+        if len(region_points) == 1:
+            return region_points[0]
+        
+        # Calculate combined score: depth consistency (weighted higher) + original score
+        best_point = None
+        best_combined_score = -1
+        
+        for point in region_points:
+            depth_consistency = self._calculate_depth_consistency(point, depth_data)
+            
+            # Weighted combination: 70% depth consistency, 30% original score
+            combined_score = 0.7 * depth_consistency + 0.3 * (point.score / 100.0)  # Normalize score
+            
+            if combined_score > best_combined_score:
+                best_combined_score = combined_score
+                best_point = point
+        
+        return best_point if best_point else region_points[0]
+        
+    def _calculate_depth_consistency(self, point: InteractionPoint, depth_data: np.ndarray, window_size: int = 15) -> float:
+        """
+        Calculate depth consistency around a point by measuring local depth variance.
+        Lower variance indicates more consistent depth (better for grasping).
+        
+        Args:
+            point: InteractionPoint to analyze
+            depth_data: Depth image
+            window_size: Size of analysis window around point
+            
+        Returns:
+            Consistency score (0-1, higher is more consistent)
+        """
+        if depth_data is None:
+            return 0.5  # Default consistency
+            
+        h, w = depth_data.shape
+        half_window = window_size // 2
+        
+        # Define window bounds
+        y_min = max(0, point.y - half_window)
+        y_max = min(h, point.y + half_window)
+        x_min = max(0, point.x - half_window)
+        x_max = min(w, point.x + half_window)
+        
+        # Extract depth region
+        depth_region = depth_data[y_min:y_max, x_min:x_max]
+        
+        # Filter valid depth values
+        valid_mask = (depth_region > 0) & (depth_region < 10000)  # Valid depth range
+        if not np.any(valid_mask):
+            return 0.0  # No valid depth data
+            
+        valid_depths = depth_region[valid_mask]
+        
+        if len(valid_depths) < 5:  # Not enough points for reliable statistics
+            return 0.0
+            
+        # Calculate depth consistency metrics
+        depth_std = np.std(valid_depths)
+        depth_mean = np.mean(valid_depths)
+        
+        # Normalize standard deviation by mean depth (relative consistency)
+        if depth_mean > 0:
+            relative_std = depth_std / depth_mean
+            # Convert to consistency score (lower std = higher consistency)
+            consistency = max(0.0, 1.0 - (relative_std * 10))  # Scale factor of 10
+        else:
+            consistency = 0.0
+            
+        return min(1.0, consistency)
     
     def _detect_ridges_valleys(self, depth: np.ndarray, mask: np.ndarray) -> List[InteractionPoint]:
         """Detect ridges and valleys in depth data - high curvature features good for grasping."""
@@ -1643,6 +1836,1118 @@ Top Point:
             cleaned = cv2.erode(cleaned, kernel_separate, iterations=1)
         
         return cleaned.astype(bool)
+    
+    def _detect_depth_planes_with_distribution(
+        self, 
+        depth: np.ndarray, 
+        mask: np.ndarray,
+        depth_shift_threshold: float = 0.015,  # 1.5cm depth shift threshold
+        min_region_area: int = 80,             # Minimum pixels for a valid region
+        points_per_region: int = 3,            # Points to distribute per region
+        gaussian_blur_size: int = 3,           # Blur kernel size for noise reduction
+        gradient_threshold: float = 0.01       # Threshold for detecting depth gradients/shifts
+    ) -> List[InteractionPoint]:
+        """
+        Detect distinct depth regions based on clusters of depth shifts and create distributed interaction points.
+        
+        This method analyzes depth gradients and discontinuities to identify regions where significant
+        depth changes occur, then clusters these regions and places interaction points strategically.
+        
+        Args:
+            depth: Depth image (in meters)
+            mask: Object mask
+            depth_shift_threshold: Minimum depth shift to consider significant (meters)
+            min_region_area: Minimum area in pixels for a valid depth region
+            points_per_region: Number of points to distribute per depth region
+            gaussian_blur_size: Size of Gaussian blur kernel for depth smoothing
+            gradient_threshold: Threshold for depth gradient magnitude to detect shifts
+            
+        Returns:
+            List of interaction points distributed across detected depth shift regions
+        """
+        if depth is None or not np.any(mask):
+            return []
+        
+        if self.debug:
+            print(f"\n--- Detecting Depth Shift Regions with Distribution ---")
+        
+        # Apply mask to depth and smooth to reduce noise
+        depth_masked = depth.copy()
+        depth_masked[~mask] = 0
+        
+        # Gaussian blur to reduce depth noise
+        if gaussian_blur_size > 0:
+            depth_smooth = cv2.GaussianBlur(depth_masked, (gaussian_blur_size, gaussian_blur_size), 0)
+            depth_smooth[~mask] = 0
+        else:
+            depth_smooth = depth_masked
+        
+        # Get valid depth values for analysis
+        valid_depths = depth_smooth[mask & (depth_smooth > 0)]
+        if self.debug:
+            total_mask_pixels = np.sum(mask)
+            valid_depth_pixels = len(valid_depths)
+            depth_min, depth_max = np.min(valid_depths) if len(valid_depths) > 0 else (0, 0), np.max(valid_depths) if len(valid_depths) > 0 else (0, 0)
+            depth_range = depth_max - depth_min
+            print(f"[DEBUG] Depth validation - Mask pixels: {total_mask_pixels}, Valid depth pixels: {valid_depth_pixels}")
+            print(f"[DEBUG] Depth range: {depth_min:.3f}m to {depth_max:.3f}m (range: {depth_range:.3f}m)")
+            print(f"[DEBUG] Depth shift threshold: {depth_shift_threshold:.3f}m, Gradient threshold: {gradient_threshold:.3f}")
+            
+            # Check if there are regions with significant depth differences
+            if depth_range > depth_shift_threshold * 10:  # If range is much larger than threshold
+                print(f"[DEBUG] Large depth range detected - handle/depression should be detectable!")
+        
+        if len(valid_depths) < min_region_area:
+            if self.debug:
+                print(f"[DEBUG] FILTERED OUT: Insufficient valid depth points ({len(valid_depths)} < {min_region_area} required)")
+            return []
+        
+        # 1. Detect depth gradients and discontinuities
+        depth_shift_regions = self._detect_depth_shift_regions(
+            depth_smooth, mask, gradient_threshold, depth_shift_threshold
+        )
+        
+        if self.debug:
+            print(f"[DEBUG] Depth plane detection - Step 1: Detected {len(depth_shift_regions)} initial depth shift regions")
+        
+        # 2. Cluster nearby depth shift regions
+        clustered_regions = self._cluster_depth_regions(
+            depth_shift_regions, depth_smooth, mask, min_region_area
+        )
+        
+        if self.debug:
+            print(f"[DEBUG] Depth plane detection - Step 2: Clustered into {len(clustered_regions)} final depth regions")
+            regions_filtered = len(depth_shift_regions) - len(clustered_regions)
+            if regions_filtered > 0:
+                print(f"[DEBUG] Depth plane detection - FILTERED OUT {regions_filtered} regions during clustering")
+        
+        # 3. Create distributed points for each clustered region
+        # Calculate region sizes to determine how many points to distribute
+        region_areas = [np.sum(region_mask) for region_mask in clustered_regions]
+        region_areas = [area for area in region_areas if area >= min_region_area]
+        
+        if len(region_areas) == 0:
+            if self.debug:
+                total_regions = len(clustered_regions)
+                print(f"[DEBUG] FILTERED OUT: No regions meet minimum area requirement (had {total_regions} regions, need area >= {min_region_area})")
+                for i, region_mask in enumerate(clustered_regions):
+                    area = np.sum(region_mask)
+                    print(f"[DEBUG]   Region {i}: {area} pixels (too small)")
+            return []
+        
+        # Calculate adaptive points per region based on relative size
+        max_area = max(region_areas)
+        min_points_per_region = 1  # Minimum points for any valid region
+        max_points_per_region = 8  # Maximum points for largest regions
+        
+        region_points = []
+        for i, region_mask in enumerate(clustered_regions):
+            region_area = np.sum(region_mask)
+            if region_area < min_region_area:
+                if self.debug:
+                    print(f"[DEBUG] FILTERED OUT: Region {i} too small ({region_area} < {min_region_area} pixels)")
+                continue
+            
+            # Calculate adaptive number of points based on region size
+            size_ratio = region_area / max_area
+            adaptive_points = int(min_points_per_region + 
+                                size_ratio * (max_points_per_region - min_points_per_region))
+            adaptive_points = max(min_points_per_region, min(adaptive_points, max_points_per_region))
+            
+            # Calculate representative depth for this region
+            region_depths = depth_smooth[region_mask & (depth_smooth > 0)]
+            if len(region_depths) > 0:
+                representative_depth = np.median(region_depths)
+                
+                if self.debug:
+                    print(f"Region {i}: depth={representative_depth:.3f}m, area={region_area} pixels, points={adaptive_points}")
+                
+                # Create distributed points for this region with adaptive count
+                region_interaction_points = self._create_distributed_points_on_region(
+                    depth_smooth, region_mask, representative_depth, adaptive_points, region_id=i
+                )
+                if self.debug:
+                    print(f"[DEBUG]   Generated {len(region_interaction_points)} points for region {i}")
+                region_points.extend(region_interaction_points)
+        
+        # 4. Add border points along object segmentation boundary
+        border_points = self._create_segmentation_border_points(depth_smooth, mask)
+        region_points.extend(border_points)
+        
+        if self.debug:
+            print(f"Added {len(border_points)} border points along object segmentation")
+        
+        # 5. If no significant regions found, fall back to basic depth analysis
+        if len(region_points) == 0:
+            if self.debug:
+                print("[DEBUG] FALLBACK: No significant depth shift regions found, using fallback method")
+            fallback_points = self._create_distributed_points_single_plane(depth_smooth, mask, points_per_region)
+            # Still add border points for fallback
+            fallback_border_points = self._create_segmentation_border_points(depth_smooth, mask)
+            if self.debug:
+                print(f"[DEBUG] Fallback generated {len(fallback_points)} plane points + {len(fallback_border_points)} border points")
+            return fallback_points + fallback_border_points
+        
+        if self.debug:
+            print(f"Generated {len(region_points)} total points ({len(region_points) - len(border_points)} region + {len(border_points)} border)")
+        
+        return region_points
+    
+    def diagnose_handle_detection(self, depth: np.ndarray, mask: np.ndarray, handle_center_approx: tuple = None):
+        """
+        Diagnostic function to help debug why handles/depressions aren't detected.
+        Call this with debug=True to get detailed information.
+        
+        Args:
+            depth: Depth image
+            mask: Object mask  
+            handle_center_approx: Optional (x, y) approximate center of handle for focused analysis
+        """
+        if not self.debug:
+            print("[DIAGNOSTIC] Enable debug mode (self.debug = True) to see diagnostic output")
+            return
+            
+        print("\n=== HANDLE DETECTION DIAGNOSTIC ===")
+        
+        # 1. Basic depth and mask info
+        valid_depths = depth[mask & (depth > 0)]
+        if len(valid_depths) == 0:
+            print("[DIAGNOSTIC] CRITICAL: No valid depth data in mask!")
+            return
+            
+        depth_min, depth_max = np.min(valid_depths), np.max(valid_depths)
+        depth_range = depth_max - depth_min
+        avg_depth = np.median(valid_depths)
+        
+        print(f"[DIAGNOSTIC] Mask coverage: {np.sum(mask)} pixels")
+        print(f"[DIAGNOSTIC] Depth range: {depth_min:.3f}m to {depth_max:.3f}m (range: {depth_range:.3f}m)")
+        print(f"[DIAGNOSTIC] Average depth: {avg_depth:.3f}m")
+        
+        # 2. Check handle area if coordinates provided
+        if handle_center_approx:
+            x, y = handle_center_approx
+            if y < mask.shape[0] and x < mask.shape[1]:
+                # Check small region around handle
+                radius = 20
+                y_min, y_max = max(0, y-radius), min(mask.shape[0], y+radius)
+                x_min, x_max = max(0, x-radius), min(mask.shape[1], x+radius)
+                
+                handle_mask_included = mask[y_min:y_max, x_min:x_max]
+                handle_depth_values = depth[y_min:y_max, x_min:x_max]
+                
+                print(f"[DIAGNOSTIC] Handle area ({x},{y} ±{radius}px):")
+                print(f"[DIAGNOSTIC]   Mask coverage: {np.sum(handle_mask_included)}/{(y_max-y_min)*(x_max-x_min)} pixels")
+                if np.any(handle_mask_included):
+                    handle_depths = handle_depth_values[handle_mask_included & (handle_depth_values > 0)]
+                    if len(handle_depths) > 0:
+                        handle_depth_avg = np.mean(handle_depths)
+                        print(f"[DIAGNOSTIC]   Handle depth: {handle_depth_avg:.3f}m vs surface avg {avg_depth:.3f}m")
+                        print(f"[DIAGNOSTIC]   Depth difference: {abs(handle_depth_avg - avg_depth):.3f}m")
+                else:
+                    print(f"[DIAGNOSTIC]   WARNING: Handle area not covered by mask!")
+        
+        # 3. Check current thresholds
+        gradient_threshold = 0.01
+        depth_shift_threshold = 0.015
+        min_region_area = 80
+        
+        depth_scale_factor = avg_depth / 1.0
+        scaled_gradient_threshold = gradient_threshold * depth_scale_factor
+        scaled_depth_shift_threshold = depth_shift_threshold * depth_scale_factor
+        
+        print(f"[DIAGNOSTIC] Current thresholds:")
+        print(f"[DIAGNOSTIC]   Gradient threshold: {gradient_threshold:.4f} → {scaled_gradient_threshold:.4f} (scaled)")
+        print(f"[DIAGNOSTIC]   Depth shift threshold: {depth_shift_threshold:.4f} → {scaled_depth_shift_threshold:.4f} (scaled)")
+        print(f"[DIAGNOSTIC]   Min region area: {min_region_area} pixels")
+        
+        # 4. Recommendations
+        print(f"[DIAGNOSTIC] Recommendations:")
+        if depth_range > 0.1:  # 10cm range
+            print(f"[DIAGNOSTIC]   ✓ Depth range ({depth_range:.3f}m) should be detectable")
+        else:
+            print(f"[DIAGNOSTIC]   ⚠ Small depth range ({depth_range:.3f}m) - may need lower thresholds")
+            
+        if avg_depth > 1.0:
+            print(f"[DIAGNOSTIC]   ⚠ Far object - consider using fixed thresholds instead of scaled ones")
+            print(f"[DIAGNOSTIC]   ⚠ Try: gradient_threshold=0.002, depth_shift_threshold=0.01")
+            
+        if handle_center_approx and not mask[handle_center_approx[1], handle_center_approx[0]]:
+            print(f"[DIAGNOSTIC]   ⚠ Handle center not in mask - check segmentation!")
+            
+        print("=== END DIAGNOSTIC ===\n")
+    
+    def _create_distributed_points_single_plane(
+        self, 
+        depth: np.ndarray, 
+        mask: np.ndarray, 
+        num_points: int
+    ) -> List[InteractionPoint]:
+        """Create distributed points on a single depth plane."""
+        if not np.any(mask):
+            return []
+        
+        # Find the center point of the plane
+        center_point = self._find_plane_center(depth, mask)
+        if center_point is None:
+            return []
+        
+        points = [center_point]
+        
+        # Add perimeter points if more points requested
+        if num_points > 1:
+            perimeter_points = self._find_plane_perimeter_points(depth, mask, num_points - 1)
+            points.extend(perimeter_points)
+        
+        return points
+    
+    def _create_distributed_points_on_plane(
+        self, 
+        depth: np.ndarray, 
+        plane_mask: np.ndarray, 
+        plane_depth: float,
+        num_points: int,
+        plane_id: int = 0
+    ) -> List[InteractionPoint]:
+        """Create distributed points on a specific depth plane."""
+        if not np.any(plane_mask):
+            return []
+        
+        points = []
+        
+        # 1. Start with center point of the plane
+        center_point = self._find_plane_center(depth, plane_mask, plane_depth, plane_id)
+        if center_point is not None:
+            points.append(center_point)
+        
+        # 2. Add perimeter/outline points if more points needed
+        if num_points > 1:
+            remaining_points = num_points - 1
+            perimeter_points = self._find_plane_perimeter_points(
+                depth, plane_mask, remaining_points, plane_depth, plane_id
+            )
+            points.extend(perimeter_points)
+        
+        return points
+    
+    def _find_plane_center(
+        self, 
+        depth: np.ndarray, 
+        mask: np.ndarray, 
+        target_depth: float = None,
+        plane_id: int = 0
+    ) -> InteractionPoint:
+        """Find the center point of a depth plane."""
+        if not np.any(mask):
+            return None
+        
+        # Calculate the centroid of the masked region
+        moments = cv2.moments(mask.astype(np.uint8))
+        if moments["m00"] == 0:
+            return None
+        
+        center_x = int(moments["m10"] / moments["m00"])
+        center_y = int(moments["m01"] / moments["m00"])
+        
+        # Ensure the center point is within bounds and masked
+        if (0 <= center_y < mask.shape[0] and 0 <= center_x < mask.shape[1] and 
+            mask[center_y, center_x]):
+            
+            actual_depth = depth[center_y, center_x]
+            confidence = 0.9  # High confidence for center points
+            
+            return InteractionPoint(
+                x=center_x,
+                y=center_y,
+                score=confidence,
+                interaction_type=InteractionType.CONTACT,
+                confidence=confidence,
+                stability=0.8,  # Centers are typically stable
+                accessibility=0.7,  # Usually accessible
+                surface_area=float(np.sum(mask)),
+                surface_stability=0.8,
+                surface_planarity=0.9  # Planes are planar by definition
+            )
+        
+        return None
+    
+    def _find_plane_perimeter_points(
+        self, 
+        depth: np.ndarray, 
+        mask: np.ndarray, 
+        num_points: int,
+        target_depth: float = None,
+        plane_id: int = 0
+    ) -> List[InteractionPoint]:
+        """Find evenly distributed points along the perimeter/outline of a depth plane."""
+        if not np.any(mask) or num_points <= 0:
+            return []
+        
+        # Find contours of the plane mask
+        contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            return []
+        
+        # Use the largest contour (main outline of the plane)
+        main_contour = max(contours, key=cv2.contourArea)
+        contour_length = cv2.arcLength(main_contour, True)
+        
+        if contour_length < 10:  # Too small contour
+            return []
+        
+        # Calculate evenly spaced points along the contour
+        points = []
+        step_size = contour_length / num_points
+        
+        for i in range(num_points):
+            # Calculate position along contour
+            target_distance = i * step_size
+            
+            # Find the point at this distance along the contour
+            current_distance = 0
+            point_found = False
+            
+            for j in range(len(main_contour)):
+                next_j = (j + 1) % len(main_contour)
+                segment_start = main_contour[j][0]
+                segment_end = main_contour[next_j][0]
+                segment_length = np.linalg.norm(segment_end - segment_start)
+                
+                if current_distance + segment_length >= target_distance:
+                    # Interpolate along this segment
+                    ratio = (target_distance - current_distance) / segment_length if segment_length > 0 else 0
+                    point_pos = segment_start + ratio * (segment_end - segment_start)
+                    
+                    x, y = int(point_pos[0]), int(point_pos[1])
+                    
+                    # Ensure point is within bounds
+                    if 0 <= y < depth.shape[0] and 0 <= x < depth.shape[1]:
+                        actual_depth = depth[y, x] if mask[y, x] else 0
+                        
+                        if actual_depth > 0:  # Valid depth
+                            confidence = 0.7  # Lower confidence for perimeter points
+                            
+                            points.append(InteractionPoint(
+                                x=x,
+                                y=y,
+                                score=confidence,
+                                interaction_type=InteractionType.GRASP_EDGE,
+                                confidence=confidence,
+                                stability=0.6,  # Edge points may be less stable
+                                accessibility=0.8,  # Edge points often more accessible
+                                surface_area=float(np.sum(mask)),
+                                surface_stability=0.6,
+                                surface_planarity=0.8
+                            ))
+                    
+                    point_found = True
+                    break
+                
+                current_distance += segment_length
+            
+            if not point_found and len(main_contour) > 0:
+                # Fallback: use contour point directly
+                fallback_idx = min(i * len(main_contour) // num_points, len(main_contour) - 1)
+                x, y = main_contour[fallback_idx][0]
+                
+                if 0 <= y < depth.shape[0] and 0 <= x < depth.shape[1] and mask[y, x]:
+                    actual_depth = depth[y, x]
+                    if actual_depth > 0:
+                        points.append(InteractionPoint(
+                            x=x,
+                            y=y,
+                            score=0.6,
+                            interaction_type=InteractionType.GRASP_EDGE,
+                            confidence=0.6,
+                            stability=0.5,
+                            accessibility=0.7,
+                            surface_area=float(np.sum(mask)),
+                            surface_stability=0.5,
+                            surface_planarity=0.7
+                        ))
+        
+        return points
+    
+    def _detect_depth_shift_regions(
+        self,
+        depth: np.ndarray,
+        mask: np.ndarray,
+        gradient_threshold: float = 0.01,
+        depth_shift_threshold: float = 0.015
+    ) -> List[np.ndarray]:
+        """
+        Detect regions where significant depth shifts occur, scaled by average region depth.
+        
+        Args:
+            depth: Smoothed depth image
+            mask: Object mask
+            gradient_threshold: Threshold for depth gradient magnitude (will be scaled by depth)
+            depth_shift_threshold: Minimum depth shift to consider significant (will be scaled by depth)
+            
+        Returns:
+            List of binary masks for each detected depth shift region
+        """
+        if not np.any(mask):
+            return []
+        
+        # Calculate average depth for scaling thresholds
+        valid_depths = depth[mask & (depth > 0)]
+        if len(valid_depths) == 0:
+            return []
+        
+        avg_depth = np.median(valid_depths)  # Use median for robustness
+        
+        # Scale thresholds based on average depth (relative scaling)
+        # Objects further away have proportionally larger depth variations
+        depth_scale_factor = avg_depth / 1.0  # Normalize to 1 meter baseline
+        scaled_gradient_threshold = gradient_threshold * depth_scale_factor
+        scaled_depth_shift_threshold = depth_shift_threshold * depth_scale_factor
+        
+        if self.debug:
+            print(f"[DEBUG] Depth shift detection - Average depth: {avg_depth:.3f}m, scale factor: {depth_scale_factor:.2f}")
+            print(f"[DEBUG] Scaled gradient threshold: {scaled_gradient_threshold:.4f} (original: {gradient_threshold:.4f})")
+            print(f"[DEBUG] Scaled depth shift threshold: {scaled_depth_shift_threshold:.4f} (original: {depth_shift_threshold:.4f})")
+            if avg_depth > 1.0:
+                print(f"[DEBUG] WARNING: Far object detected - scaled thresholds may be too high for handle detection!")
+        
+        # Calculate depth gradients
+        grad_x = cv2.Sobel(depth, cv2.CV_64F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(depth, cv2.CV_64F, 0, 1, ksize=3)
+        
+        # Calculate gradient magnitude
+        gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+        
+        # Apply mask to gradients
+        gradient_magnitude[~mask] = 0
+        
+        # Find areas with significant gradients using scaled threshold
+        significant_gradients = (gradient_magnitude > scaled_gradient_threshold) & mask
+        
+        if self.debug:
+            gradient_stats = gradient_magnitude[mask & (gradient_magnitude > 0)]
+            if len(gradient_stats) > 0:
+                grad_min, grad_max, grad_mean = np.min(gradient_stats), np.max(gradient_stats), np.mean(gradient_stats)
+                significant_pixel_count = np.sum(significant_gradients)
+                total_mask_pixels = np.sum(mask)
+                print(f"[DEBUG] Gradient stats: min={grad_min:.4f}, max={grad_max:.4f}, mean={grad_mean:.4f}")
+                print(f"[DEBUG] Significant gradient pixels: {significant_pixel_count}/{total_mask_pixels} ({100*significant_pixel_count/total_mask_pixels:.1f}%)")
+                if grad_max < scaled_gradient_threshold:
+                    print(f"[DEBUG] WARNING: Max gradient ({grad_max:.4f}) < threshold ({scaled_gradient_threshold:.4f}) - no regions will be detected!")
+        
+        # Use morphological operations to clean up gradient regions
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        significant_gradients = cv2.morphologyEx(
+            significant_gradients.astype(np.uint8), cv2.MORPH_CLOSE, kernel
+        ).astype(bool)
+        
+        # Find connected components in gradient regions
+        num_labels, labels = cv2.connectedComponents(significant_gradients.astype(np.uint8))
+        
+        if self.debug:
+            print(f"[DEBUG] Found {num_labels-1} potential gradient regions")
+        
+        gradient_regions = []
+        for label_id in range(1, num_labels):  # Skip background (label 0)
+            region_mask = (labels == label_id) & mask
+            region_area = np.sum(region_mask)
+            
+            if self.debug:
+                print(f"[DEBUG]   Gradient region {label_id}: {region_area} pixels")
+            
+            # Check if this gradient region has sufficient area and depth variation
+            if region_area > 10:  # Minimum area for gradient regions
+                region_depths = depth[region_mask & (depth > 0)]
+                if len(region_depths) > 5:
+                    depth_variation = np.ptp(region_depths)  # Peak-to-peak depth range
+                    # Use scaled threshold for depth variation check
+                    if depth_variation > scaled_depth_shift_threshold:
+                        gradient_regions.append(region_mask)
+        
+        # Also detect depth discontinuities using scaled threshold
+        discontinuity_regions = self._detect_depth_discontinuities_regions(
+            depth, mask, scaled_depth_shift_threshold
+        )
+        
+        # Combine gradient-based and discontinuity-based regions
+        all_regions = gradient_regions + discontinuity_regions
+        
+        if self.debug:
+            print(f"Found {len(gradient_regions)} gradient regions and {len(discontinuity_regions)} discontinuity regions")
+        
+        return all_regions
+    
+    def _detect_depth_discontinuities_regions(
+        self,
+        depth: np.ndarray,
+        mask: np.ndarray,
+        depth_shift_threshold: float = 0.015
+    ) -> List[np.ndarray]:
+        """
+        Detect regions with depth discontinuities using local depth statistics.
+        
+        Args:
+            depth: Depth image
+            mask: Object mask
+            depth_shift_threshold: Minimum depth shift to consider significant
+            
+        Returns:
+            List of binary masks for discontinuity regions
+        """
+        if not np.any(mask):
+            return []
+        
+        # Calculate local depth statistics in neighborhoods
+        kernel_size = 7
+        kernel = np.ones((kernel_size, kernel_size), np.float32) / (kernel_size**2)
+        
+        # Local mean and standard deviation
+        local_mean = cv2.filter2D(depth, -1, kernel)
+        local_sq_mean = cv2.filter2D(depth**2, -1, kernel)
+        local_std = np.sqrt(np.maximum(0, local_sq_mean - local_mean**2))
+        
+        # Apply mask
+        local_std[~mask] = 0
+        
+        # Find areas with high local depth variation
+        discontinuity_threshold = depth_shift_threshold / 2  # More sensitive for local variations
+        discontinuity_mask = (local_std > discontinuity_threshold) & mask
+        
+        # Clean up using morphology
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        discontinuity_mask = cv2.morphologyEx(
+            discontinuity_mask.astype(np.uint8), cv2.MORPH_OPEN, kernel
+        )
+        discontinuity_mask = cv2.morphologyEx(
+            discontinuity_mask, cv2.MORPH_CLOSE, kernel
+        ).astype(bool)
+        
+        # Find connected components
+        num_labels, labels = cv2.connectedComponents(discontinuity_mask.astype(np.uint8))
+        
+        discontinuity_regions = []
+        for label_id in range(1, num_labels):
+            region_mask = (labels == label_id) & mask
+            region_area = np.sum(region_mask)
+            
+            if region_area > 20:  # Minimum area for discontinuity regions
+                discontinuity_regions.append(region_mask)
+        
+        return discontinuity_regions
+    
+    def _cluster_depth_regions(
+        self,
+        depth_regions: List[np.ndarray],
+        depth: np.ndarray,
+        mask: np.ndarray,
+        min_region_area: int = 80
+    ) -> List[np.ndarray]:
+        """
+        Cluster nearby depth regions focusing on depth discontinuities rather than gradual changes.
+        
+        This method analyzes depth continuity between regions and only separates regions
+        where there are sudden depth jumps, not gradual transitions.
+        
+        Args:
+            depth_regions: List of initial depth region masks
+            depth: Depth image
+            mask: Object mask
+            min_region_area: Minimum area for final clustered regions
+            
+        Returns:
+            List of clustered region masks representing distinct depth discontinuities
+        """
+        if not depth_regions:
+            return []
+        
+        # Calculate region properties for clustering
+        region_properties = []
+        for i, region_mask in enumerate(depth_regions):
+            if not np.any(region_mask):
+                continue
+                
+            # Calculate centroid
+            moments = cv2.moments(region_mask.astype(np.uint8))
+            if moments["m00"] > 0:
+                centroid_x = moments["m10"] / moments["m00"]
+                centroid_y = moments["m01"] / moments["m00"]
+                
+                # Calculate representative depth and depth continuity metrics
+                region_depths = depth[region_mask & (depth > 0)]
+                if len(region_depths) > 0:
+                    representative_depth = np.median(region_depths)
+                    depth_std = np.std(region_depths)  # Internal depth variation
+                    region_area = np.sum(region_mask)
+                    
+                    # Calculate depth gradient at region boundaries for continuity analysis
+                    boundary_gradient = self._calculate_region_boundary_gradient(region_mask, depth)
+                    
+                    region_properties.append({
+                        'index': i,
+                        'centroid': (centroid_x, centroid_y),
+                        'depth': representative_depth,
+                        'depth_std': depth_std,
+                        'boundary_gradient': boundary_gradient,
+                        'area': region_area,
+                        'mask': region_mask
+                    })
+        
+        if not region_properties:
+            return []
+        
+        # Enhanced clustering based on depth continuity analysis
+        clustered_regions = []
+        used_regions = set()
+        
+        for i, region in enumerate(region_properties):
+            if i in used_regions:
+                continue
+                
+            # Start a new cluster with this region
+            cluster_mask = region['mask'].copy()
+            cluster_regions = [i]
+            used_regions.add(i)
+            
+            # Find nearby regions to merge based on depth continuity
+            for j, other_region in enumerate(region_properties):
+                if j in used_regions or j == i:
+                    continue
+                
+                # Calculate spatial distance
+                spatial_dist = np.sqrt(
+                    (region['centroid'][0] - other_region['centroid'][0])**2 +
+                    (region['centroid'][1] - other_region['centroid'][1])**2
+                )
+                
+                # Enhanced depth continuity analysis
+                should_merge = self._should_merge_regions_by_continuity(
+                    region, other_region, depth, spatial_dist
+                )
+                
+                if should_merge:
+                    # Merge this region into the cluster
+                    cluster_mask = cluster_mask | other_region['mask']
+                    cluster_regions.append(j)
+                    used_regions.add(j)
+            
+            # Add cluster if it meets minimum area requirement
+            cluster_area = np.sum(cluster_mask)
+            if cluster_area >= min_region_area:
+                clustered_regions.append(cluster_mask)
+        
+        # If no regions meet the area requirement, create larger regions by relaxing constraints
+        if not clustered_regions and region_properties:
+            if self.debug:
+                print("No clustered regions meet area requirement, creating relaxed clusters")
+            
+            # Create relaxed clusters by merging all nearby regions regardless of depth
+            used_regions = set()
+            for i, region in enumerate(region_properties):
+                if i in used_regions:
+                    continue
+                
+                cluster_mask = region['mask'].copy()
+                used_regions.add(i)
+                
+                # Merge all nearby regions regardless of depth
+                for j, other_region in enumerate(region_properties):
+                    if j in used_regions or j == i:
+                        continue
+                    
+                    spatial_dist = np.sqrt(
+                        (region['centroid'][0] - other_region['centroid'][0])**2 +
+                        (region['centroid'][1] - other_region['centroid'][1])**2
+                    )
+                    
+                    if spatial_dist < 80:  # More relaxed spatial threshold
+                        cluster_mask = cluster_mask | other_region['mask']
+                        used_regions.add(j)
+                
+                cluster_area = np.sum(cluster_mask)
+                if cluster_area >= min_region_area // 2:  # Relaxed area requirement
+                    clustered_regions.append(cluster_mask)
+        
+        return clustered_regions
+    
+    def _calculate_region_boundary_gradient(
+        self, 
+        region_mask: np.ndarray, 
+        depth: np.ndarray
+    ) -> float:
+        """
+        Calculate the average depth gradient at the boundary of a region.
+        
+        This helps determine if the region represents a sudden depth change (high gradient)
+        or a gradual transition (low gradient).
+        """
+        # Find region boundary using erosion
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        eroded_mask = cv2.erode(region_mask.astype(np.uint8), kernel, iterations=1)
+        boundary_mask = region_mask.astype(np.uint8) - eroded_mask
+        
+        if not np.any(boundary_mask):
+            return 0.0
+        
+        # Calculate depth gradients
+        grad_x = cv2.Sobel(depth, cv2.CV_64F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(depth, cv2.CV_64F, 0, 1, ksize=3)
+        gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+        
+        # Get boundary gradients
+        boundary_gradients = gradient_magnitude[boundary_mask.astype(bool)]
+        
+        if len(boundary_gradients) > 0:
+            return np.mean(boundary_gradients)
+        else:
+            return 0.0
+    
+    def _should_merge_regions_by_continuity(
+        self,
+        region1: Dict,
+        region2: Dict,
+        depth: np.ndarray,
+        spatial_dist: float
+    ) -> bool:
+        """
+        Determine if two regions should be merged based on depth continuity analysis.
+        
+        Regions are merged if they represent continuous depth changes rather than 
+        sudden discontinuities.
+        """
+        # Spatial proximity check
+        max_spatial_distance = 60  # pixels
+        if spatial_dist > max_spatial_distance:
+            return False
+        
+        # Calculate depth difference
+        depth_diff = abs(region1['depth'] - region2['depth'])
+        
+        # Scale depth threshold based on average depth with improved scaling
+        avg_depth = (region1['depth'] + region2['depth']) / 2
+        depth_scale_factor = max(avg_depth / 1.0, 0.5)  # Normalize to 1 meter, minimum 0.5x scaling
+        # More permissive threshold for continuous regions: 4cm at 1m, scales with distance
+        scaled_depth_threshold = 0.04 * depth_scale_factor
+        
+        # Check if depth difference is within continuous range
+        depth_continuous = depth_diff < scaled_depth_threshold
+        
+        # Check boundary gradients - if both regions have low boundary gradients,
+        # they likely represent gradual changes rather than sharp discontinuities
+        gradient_threshold = 0.025 * depth_scale_factor  # Slightly more permissive gradient threshold
+        
+        region1_has_low_gradient = region1['boundary_gradient'] < gradient_threshold
+        region2_has_low_gradient = region2['boundary_gradient'] < gradient_threshold
+        
+        # Also check if regions are spatially connected or very close
+        # Dilate both regions slightly and check for overlap
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        dilated_region1 = cv2.dilate(region1['mask'].astype(np.uint8), kernel, iterations=1)
+        dilated_region2 = cv2.dilate(region2['mask'].astype(np.uint8), kernel, iterations=1)
+        
+        regions_connected = np.any(dilated_region1 & dilated_region2)
+        
+        # Decision logic for merging:
+        # Primary condition: regions on same depth plane with small depth difference
+        same_depth_plane = depth_continuous and spatial_dist < 40  # Relaxed spatial distance for same plane
+        
+        # Secondary conditions for gradual transitions
+        gradual_transition = (
+            regions_connected and 
+            depth_continuous and 
+            (region1_has_low_gradient or region2_has_low_gradient)
+        )
+        
+        # Alternative: merge if both regions have very similar internal depth variation
+        # (indicates they're part of the same surface with similar characteristics)
+        std_similarity = abs(region1['depth_std'] - region2['depth_std']) < 0.01 * depth_scale_factor
+        similar_internal_variation = std_similarity and depth_continuous
+        
+        # Enhanced merging logic prioritizing depth plane continuity
+        final_decision = (
+            same_depth_plane or  # Primary: same depth plane (relaxed spatial requirement)
+            gradual_transition or  # Secondary: connected gradual transitions
+            (regions_connected and similar_internal_variation)  # Tertiary: similar surface characteristics
+        )
+        
+        return final_decision
+    
+    def _create_distributed_points_on_region(
+        self, 
+        depth: np.ndarray, 
+        region_mask: np.ndarray, 
+        representative_depth: float,
+        num_points: int,
+        region_id: int = 0
+    ) -> List[InteractionPoint]:
+        """Create distributed points on a specific depth region (similar to plane method but for irregular regions)."""
+        if not np.any(region_mask):
+            if self.debug:
+                print(f"[DEBUG] Region {region_id}: Empty region mask, no points created")
+            return []
+        
+        points = []
+        
+        # 1. Start with center point of the region
+        center_point = self._find_region_center(depth, region_mask, representative_depth, region_id)
+        if center_point is not None:
+            points.append(center_point)
+            if self.debug:
+                print(f"[DEBUG] Region {region_id}: Added center point at ({center_point.x}, {center_point.y})")
+        else:
+            if self.debug:
+                print(f"[DEBUG] Region {region_id}: Failed to create center point")
+        
+        # 2. Add perimeter/boundary points if more points needed
+        if num_points > 1:
+            remaining_points = num_points - 1
+            boundary_points = self._find_region_boundary_points(
+                depth, region_mask, remaining_points, representative_depth, region_id
+            )
+            points.extend(boundary_points)
+            if self.debug:
+                print(f"[DEBUG] Region {region_id}: Added {len(boundary_points)} boundary points (requested {remaining_points})")
+        
+        if self.debug:
+            print(f"[DEBUG] Region {region_id}: Created {len(points)} total points (requested {num_points})")
+        
+        return points
+    
+    def _create_segmentation_border_points(
+        self, 
+        depth: np.ndarray, 
+        mask: np.ndarray,
+        num_border_points: int = 6,
+        border_erosion: int = 2
+    ) -> List[InteractionPoint]:
+        """
+        Create interaction points distributed along the object segmentation border.
+        
+        Args:
+            depth: Depth image
+            mask: Object segmentation mask
+            num_border_points: Number of points to distribute along border
+            border_erosion: Pixels to erode from mask edge to avoid edge artifacts
+            
+        Returns:
+            List of interaction points along the object border
+        """
+        if not np.any(mask):
+            return []
+        
+        # Find the contour of the object mask
+        contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if len(contours) == 0:
+            return []
+        
+        # Use the largest contour (main object boundary)
+        main_contour = max(contours, key=cv2.contourArea)
+        
+        if len(main_contour) < 3:
+            return []
+        
+        # Smooth the contour to reduce noise
+        epsilon = 0.01 * cv2.arcLength(main_contour, True)
+        smooth_contour = cv2.approxPolyDP(main_contour, epsilon, True)
+        
+        # Create an eroded mask to avoid placing points exactly on the edge
+        if border_erosion > 0:
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (border_erosion*2+1, border_erosion*2+1))
+            eroded_mask = cv2.erode(mask.astype(np.uint8), kernel, iterations=1).astype(bool)
+        else:
+            eroded_mask = mask
+        
+        # Distribute points evenly along the contour
+        border_points = []
+        contour_length = len(smooth_contour)
+        
+        if contour_length > 0:
+            step = max(1, contour_length // num_border_points)
+            
+            for i in range(0, contour_length, step):
+                if len(border_points) >= num_border_points:
+                    break
+                
+                # Get contour point
+                contour_point = smooth_contour[i][0]
+                x, y = int(contour_point[0]), int(contour_point[1])
+                
+                # Ensure point is within image bounds
+                if 0 <= y < mask.shape[0] and 0 <= x < mask.shape[1]:
+                    # Move point slightly inward if using erosion
+                    if border_erosion > 0 and eroded_mask[y, x]:
+                        # Point is good as-is (inside eroded region)
+                        pass
+                    elif border_erosion > 0:
+                        # Try to find a nearby point inside the eroded mask
+                        found_valid = False
+                        for offset in range(1, border_erosion + 1):
+                            for dy in [-offset, 0, offset]:
+                                for dx in [-offset, 0, offset]:
+                                    ny, nx = y + dy, x + dx
+                                    if (0 <= ny < mask.shape[0] and 0 <= nx < mask.shape[1] and 
+                                        eroded_mask[ny, nx]):
+                                        x, y = nx, ny
+                                        found_valid = True
+                                        break
+                                if found_valid:
+                                    break
+                            if found_valid:
+                                break
+                        
+                        if not found_valid:
+                            continue  # Skip this point if we can't find a valid position
+                    
+                    # Create interaction point (border points are good for edge grasping)
+                    border_points.append(InteractionPoint(
+                        x=x, y=y,
+                        score=0.7,  # Good score for border points
+                        interaction_type=InteractionType.GRASP_EDGE,  # Border points are good for edge grasping
+                        confidence=0.8,
+                        grasp_width=20.0  # Default grasp width for border points
+                    ))
+        
+        if self.debug and len(border_points) > 0:
+            print(f"Created {len(border_points)} border points along object boundary")
+        
+        return border_points
+    
+    def _find_region_center(
+        self, 
+        depth: np.ndarray, 
+        region_mask: np.ndarray, 
+        representative_depth: float,
+        region_id: int = 0
+    ) -> InteractionPoint:
+        """Find the center point of a depth region."""
+        if not np.any(region_mask):
+            return None
+        
+        # Calculate the centroid of the region
+        moments = cv2.moments(region_mask.astype(np.uint8))
+        if moments["m00"] == 0:
+            return None
+        
+        center_x = int(moments["m10"] / moments["m00"])
+        center_y = int(moments["m01"] / moments["m00"])
+        
+        # Ensure the center point is within bounds and in the region
+        if (0 <= center_y < region_mask.shape[0] and 0 <= center_x < region_mask.shape[1] and 
+            region_mask[center_y, center_x]):
+            
+            actual_depth = depth[center_y, center_x]
+            confidence = 0.85  # High confidence for region centers
+            
+            return InteractionPoint(
+                x=center_x,
+                y=center_y,
+                score=confidence,
+                interaction_type=InteractionType.CONTACT,
+                confidence=confidence,
+                stability=0.75,  # Region centers are stable
+                accessibility=0.7,  # Usually accessible
+                surface_area=float(np.sum(region_mask)),
+                surface_stability=0.75,
+                surface_planarity=0.6  # Regions may be less planar than planes
+            )
+        
+        return None
+    
+    def _find_region_boundary_points(
+        self, 
+        depth: np.ndarray, 
+        region_mask: np.ndarray, 
+        num_points: int,
+        representative_depth: float,
+        region_id: int = 0
+    ) -> List[InteractionPoint]:
+        """Find evenly distributed points along the boundary of a depth region."""
+        if not np.any(region_mask) or num_points <= 0:
+            return []
+        
+        # Find the boundary of the region
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        boundary = cv2.morphologyEx(region_mask.astype(np.uint8), cv2.MORPH_GRADIENT, kernel)
+        
+        # Find contours of the boundary
+        contours, _ = cv2.findContours(boundary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            return []
+        
+        # Use the largest contour
+        main_contour = max(contours, key=cv2.contourArea)
+        contour_length = cv2.arcLength(main_contour, True)
+        
+        if contour_length < 10:
+            return []
+        
+        # Distribute points along the contour
+        points = []
+        step_size = contour_length / num_points
+        
+        for i in range(num_points):
+            target_distance = i * step_size
+            current_distance = 0
+            point_found = False
+            
+            for j in range(len(main_contour)):
+                next_j = (j + 1) % len(main_contour)
+                segment_start = main_contour[j][0]
+                segment_end = main_contour[next_j][0]
+                segment_length = np.linalg.norm(segment_end - segment_start)
+                
+                if current_distance + segment_length >= target_distance:
+                    ratio = (target_distance - current_distance) / segment_length if segment_length > 0 else 0
+                    point_pos = segment_start + ratio * (segment_end - segment_start)
+                    
+                    x, y = int(point_pos[0]), int(point_pos[1])
+                    
+                    if 0 <= y < depth.shape[0] and 0 <= x < depth.shape[1]:
+                        actual_depth = depth[y, x] if region_mask[y, x] else 0
+                        
+                        if actual_depth > 0:
+                            confidence = 0.65  # Moderate confidence for boundary points
+                            
+                            points.append(InteractionPoint(
+                                x=x,
+                                y=y,
+                                score=confidence,
+                                interaction_type=InteractionType.GRASP_EDGE,
+                                confidence=confidence,
+                                stability=0.55,  # Boundary points may be less stable
+                                accessibility=0.85,  # Boundary points often more accessible
+                                surface_area=float(np.sum(region_mask)),
+                                surface_stability=0.55,
+                                surface_planarity=0.5
+                            ))
+                    
+                    point_found = True
+                    break
+                
+                current_distance += segment_length
+            
+            # Fallback if interpolation fails
+            if not point_found and len(main_contour) > 0:
+                fallback_idx = min(i * len(main_contour) // num_points, len(main_contour) - 1)
+                x, y = main_contour[fallback_idx][0]
+                
+                if 0 <= y < depth.shape[0] and 0 <= x < depth.shape[1] and region_mask[y, x]:
+                    actual_depth = depth[y, x]
+                    if actual_depth > 0:
+                        points.append(InteractionPoint(
+                            x=x,
+                            y=y,
+                            score=0.6,
+                            interaction_type=InteractionType.GRASP_EDGE,
+                            confidence=0.6,
+                            stability=0.5,
+                            accessibility=0.8,
+                            surface_area=float(np.sum(region_mask)),
+                            surface_stability=0.5,
+                            surface_planarity=0.5
+                        ))
+        
+        return points
     
     def _extract_surface_components(self, surface_mask: np.ndarray) -> dict:
         """Extract connected components representing individual surfaces."""

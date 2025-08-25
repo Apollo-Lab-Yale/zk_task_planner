@@ -86,9 +86,9 @@ def main():
     parser.add_argument('--model', type=str, default='yolov8x-worldv2.pt', 
                         help='YOLO-World model path or name')
     parser.add_argument('--classes', type=str, nargs='+', 
-                        default=['person', 'chair', 'bottle', 'laptop', 'cell phone'],
+                        default=[],
                         help='Initial class prompts for detection (can be changed at runtime)')
-    parser.add_argument('--conf', type=float, default=0.5, 
+    parser.add_argument('--conf', type=float, default=0.3, 
                         help='Confidence threshold for detection')
     parser.add_argument('--width', type=int, default=640, help='Camera width')
     parser.add_argument('--height', type=int, default=480, help='Camera height')

@@ -21,7 +21,8 @@ class PrimitiveParser:
             r'(?:,\s*(?:is_parallel_surface=)?(?P<is_parallel_surface>true|false))?'
             r'(?:,\s*(?:is_button=)?(?P<is_button>true|false))?'
             r'(?:,\s*(?:has_pivot=)?(?P<has_pivot>true|false))?'
-            r'(?:,\s*(?:pivot_point=)?(?P<pivot_point>[^)]+))?'
+            r'(?:,\s*(?:hinge_location=)?(?:\'|")?(?P<hinge_location>top|bottom|left|right|)(?:\'|")?)?'
+            r'(?:,\s*(?:pivot_point=)?(?P<pivot_point>[^)]+))?'  # Keep for backward compatibility
             r'\)'
         ),
         'pull_surface': re.compile(
@@ -30,7 +31,8 @@ class PrimitiveParser:
             r'(?:,\s*(?:is_parallel_surface=)?(?P<is_parallel_surface>true|false))?'
             r'(?:,\s*(?:is_button=)?(?P<is_button>true|false))?'
             r'(?:,\s*(?:has_pivot=)?(?P<has_pivot>true|false))?'
-            r'(?:,\s*(?:pivot_point=)?(?P<pivot_point>[^)]+))?'
+            r'(?:,\s*(?:hinge_location=)?(?:\'|")?(?P<hinge_location>top|bottom|left|right|)(?:\'|")?)?'
+            r'(?:,\s*(?:pivot_point=)?(?P<pivot_point>[^)]+))?'  # Keep for backward compatibility
             r'\)'
         ),
         'move_gripper_to_pose_keywords': re.compile(
@@ -48,7 +50,7 @@ class PrimitiveParser:
             r'(?:,\s*(?:\'|")(?P<force_direction>parallel|perpendicular)(?:\'|"))?'  # Force direction
             r'(?:,\s*(?P<is_button>true|false))?'  # Is button
             r'(?:,\s*(?P<has_pivot>true|false))?'  # Has pivot
-            r'(?:,\s*(?:\'|")(?P<pivot_point_label>[A-Za-z0-9]*)(?:\'|"))?'  # Pivot point label (can be empty)
+            r'(?:,\s*(?:\'|")(?P<hinge_location>top|bottom|left|right|)(?:\'|"))?'  # Hinge location (can be empty)
             r'\)'
         ),
         'pull_positional': re.compile(
@@ -57,7 +59,7 @@ class PrimitiveParser:
             r'(?:,\s*(?:\'|")(?P<force_direction>parallel|perpendicular)(?:\'|"))?'  # Force direction
             r'(?:,\s*(?P<is_button>true|false))?'  # Is button
             r'(?:,\s*(?P<has_pivot>true|false))?'  # Has pivot
-            r'(?:,\s*(?:\'|")(?P<pivot_point_label>[A-Za-z0-9]*)(?:\'|"))?'  # Pivot point label (can be empty)
+            r'(?:,\s*(?:\'|")(?P<hinge_location>top|bottom|left|right|)(?:\'|"))?'  # Hinge location (can be empty)
             r'\)'
         ),
         'move_gripper_to_pose_positional': re.compile(
@@ -75,7 +77,7 @@ class PrimitiveParser:
             r'(?:,\s*force_direction=(?:\'|")(?P<force_direction>parallel|perpendicular)(?:\'|"))?'  # Force direction
             r'(?:,\s*is_button=(?P<is_button>true|false))?'  # Is button
             r'(?:,\s*has_pivot=(?P<has_pivot>true|false))?'  # Has pivot
-            r'(?:,\s*pivot_point_label=(?:\'|")(?P<pivot_point_label>[^\'"]*)(?:\'|"))?'  # Pivot point label (allowing empty string)
+            r'(?:,\s*(?:hinge_location=(?:\'|")(?P<hinge_location>top|bottom|left|right|)(?:\'|")|pivot_point_label=(?:\'|")(?P<pivot_point_label>[A-Za-z0-9]+)(?:\'|")))?'  # Hinge location or pivot point label
             r'\)'
         ),
         'pull_named': re.compile(
@@ -84,7 +86,7 @@ class PrimitiveParser:
             r'(?:,\s*force_direction=(?:\'|")?(?P<force_direction>parallel|perpendicular)(?:\'|")?)?'
             r'(?:,\s*is_button=(?P<is_button>true|false))?'
             r'(?:,\s*has_pivot=(?P<has_pivot>true|false))?'
-            r'(?:,\s*pivot_point_label=(?:\'|")?(?P<pivot_point_label>[^\'"]*)(?:\'|")?)?'  # Allowing empty string
+            r'(?:,\s*(?:hinge_location=(?:\'|")?(?P<hinge_location>top|bottom|left|right|)(?:\'|")?|pivot_point_label=(?:\'|")?(?P<pivot_point_label>[A-Za-z0-9]+)(?:\'|")?))?'  # Hinge location or pivot point label
             r'\)'
         ),
         'move_gripper_to_pose_named': re.compile(
@@ -120,7 +122,7 @@ class PrimitiveParser:
             r',\s*force_direction=(?:\'|")(?P<force_direction>parallel|perpendicular)(?:\'|")'
             r',\s*is_button=(?P<is_button>true|false)'
             r',\s*has_pivot=(?P<has_pivot>true|false)'
-            r',\s*pivot_point_label=(?:\'|")(?P<pivot_point_label>[^\'"]*)(?:\'|")'
+            r',\s*hinge_location=(?:\'|")(?P<hinge_location>top|bottom|left|right|)(?:\'|")'
             r'\)'
         )
     }
@@ -209,6 +211,10 @@ class PrimitiveParser:
                     if ((parameters[param].startswith("'") and parameters[param].endswith("'")) or 
                         (parameters[param].startswith('"') and parameters[param].endswith('"'))):
                         parameters[param] = parameters[param][1:-1]
+            
+            # Process hinge_location for surface patterns
+            if 'hinge_location' in match_dict and match_dict['hinge_location'] is not None:
+                parameters['hinge_location'] = match_dict['hinge_location']
         elif pattern_name == 'twist':
             # Process twist primitive
             if 'direction' in match_dict and match_dict['direction'] is not None:
@@ -221,8 +227,11 @@ class PrimitiveParser:
             if 'force_direction' in match_dict and match_dict['force_direction'] is not None:
                 parameters['force_direction'] = match_dict['force_direction']
             
-            if 'pivot_point_label' in match_dict and match_dict['pivot_point_label'] is not None:
-                # Empty string is a valid value
+            if 'hinge_location' in match_dict and match_dict['hinge_location'] is not None:
+                # Empty string is a valid value for when no hinge is specified
+                parameters['hinge_location'] = match_dict['hinge_location']
+            elif 'pivot_point_label' in match_dict and match_dict['pivot_point_label'] is not None:
+                # Backward compatibility: convert old pivot_point_label to hinge_location
                 parameters['pivot_point_label'] = match_dict['pivot_point_label']
             
             # Process boolean parameters
@@ -305,7 +314,10 @@ class PrimitiveParser:
                         if param in kwargs:
                             result += f", {param}={str(kwargs[param]).lower()}"
                     
-                    if 'pivot_point_label' in kwargs:
+                    if 'hinge_location' in kwargs:
+                        result += f", hinge_location='{kwargs['hinge_location']}'"
+                    elif 'pivot_point_label' in kwargs:
+                        # Backward compatibility
                         result += f", pivot_point_label='{kwargs['pivot_point_label']}'"
                 else:
                     # Positional parameters format
@@ -319,7 +331,10 @@ class PrimitiveParser:
                         if param in kwargs:
                             result += f", {str(kwargs[param]).lower()}"
                     
-                    if 'pivot_point_label' in kwargs:
+                    if 'hinge_location' in kwargs:
+                        result += f", '{kwargs['hinge_location']}'"
+                    elif 'pivot_point_label' in kwargs:
+                        # Backward compatibility
                         result += f", '{kwargs['pivot_point_label']}'"
                 
                 result += ')'
@@ -351,7 +366,7 @@ class PrimitiveParser:
                 result = f"{action_type}({surface_keywords_str}"
                 
                 # Add optional parameters with names
-                optional_params = ['is_parallel_surface', 'is_button', 'has_pivot', 'pivot_point']
+                optional_params = ['is_parallel_surface', 'is_button', 'has_pivot', 'hinge_location', 'pivot_point']
                 for param in optional_params:
                     if param in kwargs:
                         # Add comma
@@ -360,6 +375,8 @@ class PrimitiveParser:
                         # Add the parameter name and value
                         if param in ['is_parallel_surface', 'is_button', 'has_pivot']:
                             result += f"{param}={str(kwargs[param]).lower()}"
+                        elif param == 'hinge_location':
+                            result += f"hinge_location='{kwargs[param]}'"
                         else:
                             result += f"{param}={str(kwargs[param])}"
                 
