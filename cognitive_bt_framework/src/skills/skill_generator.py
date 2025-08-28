@@ -21,6 +21,13 @@ class PointOfInterest:
     position: Tuple[float, float]  # Normalized (x, y) coordinates
     description: str = ""  # Optional description of the point
     pixel_coords: Tuple[Tuple[float, float]]=()
+    detection_method: str = "unknown"  # Method used to detect this point
+    interaction_type: str = "unknown"  # Type of interaction at this point
+    confidence: float = 1.0  # Confidence score for this point
+    score: float = 1.0  # Overall score for this point
+    stability: float = 0.5  # Stability metric
+    accessibility: float = 0.5  # Accessibility metric
+    
     
 @dataclass
 class Skill:
@@ -52,6 +59,12 @@ class SkillGenerator:
         self.image_dir.mkdir(exist_ok=True)
         self.skills_cache: Dict[str, Skill] = {}
         self.debug = False
+        # Track generated files for data recording
+        self.last_generation_files = {
+            'skill_paths': [],
+            'image_paths': [],
+            'image_id': None
+        }
         # self._load_stored_skills()
 
     def _load_stored_skills(self):
@@ -87,9 +100,11 @@ class SkillGenerator:
         img_pil.save(buffered, format="PNG")
         return base64.b64encode(buffered.getvalue()).decode()
 
-    def _save_image(self, image: np.ndarray, image_id: str):
-        """Save image to disk"""
-        cv2.imwrite(str(self.image_dir / f"{image_id}.png"), image)
+    def _save_image(self, image: np.ndarray, image_id: str) -> str:
+        """Save image to disk and return the path"""
+        image_path = self.image_dir / f"{image_id}.png"
+        cv2.imwrite(str(image_path), image)
+        return str(image_path)
 
     def _load_image(self, image_id: str) -> Optional[np.ndarray]:
         """Load image from disk"""
@@ -732,7 +747,7 @@ class SkillGenerator:
                 cv2.RETR_EXTERNAL, 
                 cv2.CHAIN_APPROX_SIMPLE
             )
-            cv2.drawContours(points_img, mask_contours, -1, (0, 255, 255), 3)  # Yellow outline, slightly thicker
+            cv2.drawContours(points_img, mask_contours, -1, (0, 255, 255), 1)  # Yellow outline, slightly thicker
         
         cv2.putText(points_img, "Points of Interest + Object Segmentation", (10, 30),
                 cv2.FONT_HERSHEY_DUPLEX, 0.7, (255, 255, 255), 2)
@@ -1062,7 +1077,8 @@ class SkillGenerator:
             )
         
         # Save the depth image
-        self._save_image(depth_img, f"depth_image_{image_id}")
+        depth_img_path = self._save_image(depth_img, f"depth_image_{image_id}")
+        self.last_generation_files['image_paths'].append(depth_img_path)
         
         
         
@@ -1247,6 +1263,13 @@ class SkillGenerator:
         
         image_id = f"{abstract_action}_{target_object}_{timestamp}_{point_hash:06x}"
         
+        # Reset tracking for this generation
+        self.last_generation_files = {
+            'skill_paths': [],
+            'image_paths': [],
+            'image_id': image_id
+        }
+        
         if object_info is None:
             if self.debug:
                 self.get_logger().warn("No object_info provided for skill generation, visualizations will be limited")
@@ -1266,11 +1289,13 @@ class SkillGenerator:
         # Save each visualization separately
         surface_img_path = self._save_image(surface_img, f"surface_{image_id}")
         points_img_path = self._save_image(points_img, f"points_{image_id}")
+        self.last_generation_files['image_paths'].extend([surface_img_path, points_img_path])
         
         # Save object mask as debug image (not provided to LLM)
         if object_info is not None and object_info.mask is not None:
             mask_debug_img = self._create_mask_debug_image(image, object_info.mask)
-            self._save_image(mask_debug_img, f"mask_{image_id}")
+            mask_img_path = self._save_image(mask_debug_img, f"mask_{image_id}")
+            self.last_generation_files['image_paths'].append(mask_img_path)
             if self.debug:
                 print(f"Saved mask debug image: mask_{image_id}.png")
         
@@ -1279,7 +1304,8 @@ class SkillGenerator:
             self.get_logger().info(f"Saved points image to {points_img_path}")
         
         # Also save the original image for reference
-        self._save_image(image, image_id)
+        original_img_path = self._save_image(image, image_id)
+        self.last_generation_files['image_paths'].append(original_img_path)
         
         # Create descriptions for prompt
         point_descriptions = []
@@ -1747,6 +1773,7 @@ Only select interaction points within the segmented region.
                 □ I considered robot reach constraints and selected points within comfortable working range
                 □ I avoided points that would cause robot overextension or collision risks
                 □ For lids/caps: I included retract_gripper() to fully remove the lid/cap from the container
+                □ For doors/ hinged covers: I included open_gripper() before retract_gripper() to avoid breaking the object.
 
                 !!! CRITICAL OUTPUT REQUIREMENT !!!
                 ==================================
@@ -1763,6 +1790,7 @@ Only select interaction points within the segmented region.
                         "move_gripper_to_pose('point_label', false, true)",
                         "close_gripper()",
                         "pull('surface_label', 'perpendicular', false, true, 'right')",
+                        "open_gripper()",
                         "retract_gripper()"
                     ],
                     "parameters": {{
@@ -1848,7 +1876,8 @@ Only select interaction points within the segmented region.
             # We can add a reference to the object_info if needed
             skill.object_info = object_info
         
-        self._store_skill(skill)
+        skill_path = self._store_skill(skill)
+        self.last_generation_files['skill_paths'].append(skill_path)
         return skill
 
     def find_similar_skill(self, 
@@ -2021,7 +2050,8 @@ Only select interaction points within the segmented region.
             # Generate new image ID and save
             point_hash = hash(str([(p.label, p.position) for p in new_points.values()])) & 0xFFFFFF
             new_image_id = f"{base_skill.abstract_action}_{base_skill.target_object}_{point_hash:06x}"
-            self._save_image(new_vis_img, new_image_id)
+            adapted_img_path = self._save_image(new_vis_img, new_image_id)
+            self.last_generation_files['image_paths'].append(adapted_img_path)
             
             adapted_skill = Skill(
                 name=f"{base_skill.name}_adapted_{hash(new_image_id) & 0xFFFFFF:06x}",
@@ -2035,20 +2065,31 @@ Only select interaction points within the segmented region.
                 points_of_interest=new_points
             )
             
-            self._store_skill(adapted_skill)
+            adapted_skill_path = self._store_skill(adapted_skill)
+            self.last_generation_files['skill_paths'].append(adapted_skill_path)
             return adapted_skill
             
         except json.JSONDecodeError:
             print("Error parsing adaptation response")
             return None
 
-    def _store_skill(self, skill: Skill):
-        """Store a skill both in cache and on disk"""
+    def _store_skill(self, skill: Skill) -> str:
+        """Store a skill both in cache and on disk, return the path"""
         self.skills_cache[skill.name] = skill
         skill_path = self.skills_dir / f"{skill.name}.json"
         with open(skill_path, 'w') as f:
             json.dump(asdict(skill), f, indent=2)
+        return str(skill_path)
             
+    def get_last_generation_files(self) -> Dict[str, Any]:
+        """
+        Get information about files generated in the last skill generation
+        
+        Returns:
+            Dictionary containing skill paths, image paths, and image ID
+        """
+        return self.last_generation_files.copy()
+    
     def list_skills(self) -> List[str]:
         """Return a list of all available skill names"""
         return list(self.skills_cache.keys())

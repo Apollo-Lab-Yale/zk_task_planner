@@ -52,7 +52,7 @@ class PerceptionSystem:
     def __init__(
         self,
         fast_sam_config: Optional[FastSAMConfig],
-        yolo_model_path: str = 'yoloe-v8l-seg.pt',
+        yolo_model_path: str = 'yoloe-11l-seg.pt',
         camera_matrix: Optional[np.ndarray] = None,
         depth_scale: float = 0.001,  # Default for most depth cameras (m/unit)
         default_conf: float = 0.5,
@@ -79,7 +79,8 @@ class PerceptionSystem:
             if self.debug:
                 print(f"Initializing YOLO-World detector with model {yolo_model_path}")
                 
-            self.detector = YOLOE()
+            from cognitive_bt_framework.src.vision.object_detection.yolo import HybridYOLO
+            self.detector = HybridYOLO(fastsam_model="FastSAM-x.pt", device="auto", confidence_threshold=0.1)
             self.default_conf = default_conf
             self.interaction_detector = RobustInteractionDetector(debug=self.debug)
             # Set default classes if provided
@@ -165,7 +166,7 @@ class PerceptionSystem:
             
             # Set classes if provided
             if classes is not None:
-                self.detector.set_classes(classes, self.detector.get_text_pe(classes))
+                self.detector.set_classes(classes)
                 if self.debug:
                     print(f"Set detection classes: {classes}")
             
@@ -351,7 +352,7 @@ class PerceptionSystem:
                 # Continue with rest of processing...
                 # Only compute regions of interest for highest confidence detection if toggle is enabled
                 if not roi_highest_confidence_only or i == highest_confidence_idx:
-                    obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=100, min_distance=25, apply_center_shift=True)
+                    obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=15, min_distance=40, apply_center_shift=True)
                     print("Detected regions of interest")
                 else:
                     # Set empty points for non-highest confidence detections when toggle is enabled
@@ -665,7 +666,7 @@ class PerceptionSystem:
                         depth_data=depth_data,
                         apply_center_shift=apply_center_shift,
                         edge_threshold=10.0,
-                        shift_factor=0.25,
+                        shift_factor=0.4,
                         fast_mode=True,  # Enable fast mode for better performance
                         depth_plane_only=depth_plane_only  # NEW: Use only depth plane detection method
                     )
@@ -1628,15 +1629,15 @@ class PerceptionSystem:
             
             # Extract depth values in the region
             region_depths = depth_image[y_min:y_max+1, x_min:x_max+1] * self.depth_scale
-            print(f"converting point to 3d {label}, ({pixel_x}, {pixel_y})")
+            # print(f"converting point to 3d {label}, ({pixel_x}, {pixel_y})")
             # Filter valid depth values (non-zero and within reasonable range)
             MAX_DEPTH = 2.0  # Maximum reasonable depth in meters
             MIN_DEPTH = 0.05  # Minimum reasonable depth in meters
-            print(f"Region depths {region_depths}, {len(region_depths)}")
+            # print(f"Region depths {region_depths}, {len(region_depths)}")
             # Create mask of valid depths
             valid_mask = (region_depths > MIN_DEPTH) & (region_depths < MAX_DEPTH)
             valid_depths = region_depths[valid_mask]
-            print(f"Valid depths: {valid_depths}, {len(valid_depths)}")
+            # print(f"Valid depths: {valid_depths}, {len(valid_depths)}")
             # Check if we have enough valid depth values
             if len(valid_depths) < 1:
                 # If exact point has valid depth, use it despite few valid neighbors

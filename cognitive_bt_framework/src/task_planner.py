@@ -14,12 +14,16 @@ from datetime import datetime
 import base64
 import io
 from PIL import Image
+import time
 
 # Import skills system
 from cognitive_bt_framework.src.skills.skill_executor import DirectSkillExecutor
 
 # Import LLM interface for task decomposition
 from cognitive_bt_framework.src.llm_interface.llm_interface_openai import LLMInterfaceOpenAI
+
+# Import data recording system
+from cognitive_bt_framework.src.data_recorder import DataRecorder
 
 
 class TaskPlanner:
@@ -29,17 +33,20 @@ class TaskPlanner:
     
     def __init__(self, 
                  robot_ip: str = "192.168.1.224",
-                 use_llm: bool = True):
+                 use_llm: bool = True,
+                 enable_data_recording: bool = False):
         """
         Initialize the task planner with proper tool integration
         
         Args:
             robot_ip: IP address of the robot
             use_llm: Whether to use LLM for task decomposition (required for dynamic planning)
+            enable_data_recording: Whether to enable comprehensive data recording (default: False for development)
         """
         self.logger = logging.getLogger(__name__)
         self.robot_ip = robot_ip
         self.use_llm = use_llm
+        self.enable_data_recording = enable_data_recording
         
         # Initialize skill executor (it handles everything: camera, perception, skill generation, execution)
         self.skill_executor = DirectSkillExecutor(
@@ -57,6 +64,14 @@ class TaskPlanner:
         # Initialize LLM interface for task decomposition only
         if self.use_llm:
             self.llm = LLMInterfaceOpenAI()
+        
+        # Initialize data recording system
+        if self.enable_data_recording:
+            self.data_recorder = DataRecorder()
+            self.logger.info("Data recording system enabled")
+        else:
+            self.data_recorder = None
+            self.logger.info("Data recording system disabled (development mode)")
         
         # Define valid skills that can be requested from skill executor
         self.valid_skills = {
@@ -89,34 +104,63 @@ class TaskPlanner:
             self.logger.error(f"Failed to capture environment image: {e}")
             return None
     
-    def analyze_task(self, task_description: str) -> List[str]:
+    def analyze_task(self, task_description: str, record_data: bool = None) -> List[str]:
         """
         Analyze a high-level task and decompose into skill sequence
         
         Args:
             task_description: High-level task description (e.g., "move the bag and open the bottle")
+            record_data: Whether to record data for this analysis
             
         Returns:
             List of skill commands to execute
         """
         self.logger.info(f"Analyzing task: {task_description}")
         
+        # Determine if we should record data
+        should_record = record_data if record_data is not None else self.enable_data_recording
+        
+        # Start data recording if enabled
+        if should_record and self.data_recorder:
+            self.data_recorder.start_recording_session(
+                natural_language_task=task_description,
+                robot_ip=self.robot_ip,
+                camera_type="realsense",  # Could be made configurable
+                execution_mode="real"  # Could be made configurable
+            )
+        
         # Capture environment image for LLM context
         environment_image = self.capture_environment_image()
         if environment_image is None:
             self.logger.error("Could not capture environment image")
+            if record_data and self.data_recorder:
+                self.data_recorder.record_planning_complete(["manual execution required"])
             return ["manual execution required"]
+        
+        # Record environment image
+        if should_record and self.data_recorder:
+            self.data_recorder.record_environment_image(environment_image)
         
         # Use LLM for task decomposition
         if not self.use_llm or not self.llm:
             self.logger.error("LLM is required for dynamic task decomposition")
+            if should_record and self.data_recorder:
+                self.data_recorder.record_planning_complete(["manual execution required"])
             return ["manual execution required"]
             
         try:
             skill_sequence = self._llm_task_decomposition(task_description, environment_image)
-            return skill_sequence if skill_sequence else ["manual execution required"]
+            result = skill_sequence if skill_sequence else ["manual execution required"]
+            
+            # Record planning completion
+            if should_record and self.data_recorder:
+                self.data_recorder.record_planning_complete(result)
+            
+            return result
         except Exception as e:
             self.logger.error(f"LLM task decomposition failed: {e}")
+            if should_record and self.data_recorder:
+                self.data_recorder.record_planning_complete(["manual execution required"])
             return ["manual execution required"]
     
     def _llm_task_decomposition(self, task_description: str, environment_image: np.ndarray) -> Optional[List[str]]:
@@ -150,6 +194,7 @@ class TaskPlanner:
         - If an object becomes visible after opening a container, detect it immediately after the container is opened
         - Always detect objects before attempting to manipulate them
         - verify that all objects are in the reference image provided
+        - separate multi word objects with spaces ie "top shelf" etc
         
         PLACEMENT OBJECT STRATEGY:
         - verify that the selected object is both in the image and clear of clutter for placement
@@ -189,6 +234,13 @@ class TaskPlanner:
             # Get LLM response with vision
             response = self.llm.get_response_with_image(prompt, image_b64)
             
+            # Record raw LLM response if data recording is enabled
+            if self.data_recorder:
+                if not hasattr(self.data_recorder, 'current_record') or not self.data_recorder.current_record:
+                    pass  # No active session
+                else:
+                    self.data_recorder.current_record.llm_responses['task_decomposition'] = response or "No response"
+            
             if not response:
                 return None
                 
@@ -215,7 +267,7 @@ class TaskPlanner:
             self.logger.error(f"LLM task decomposition failed: {e}")
             return None
     
-    def execute_task(self, task_description: str, execute_on_robot: bool = True) -> Dict[str, Any]:
+    def execute_task(self, task_description: str, execute_on_robot: bool = True, record_data: bool = None) -> Dict[str, Any]:
         """
         Execute a complete task by decomposing it and using skill executor's full pipeline
         
@@ -239,21 +291,46 @@ class TaskPlanner:
         }
         
         try:
+            # Determine if we should record data
+            should_record = record_data if record_data is not None else self.enable_data_recording
+            
             # Step 1: Decompose task into skill commands using LLM + environment image
-            skill_commands = self.analyze_task(task_description)
+            skill_commands = self.analyze_task(task_description, record_data=should_record)
             results["skill_commands"] = skill_commands
             
             if skill_commands == ["manual execution required"]:
                 results["error_message"] = "Task decomposition failed - manual execution required"
                 results["end_time"] = datetime.now().isoformat()
+                
+                # Record failure and finalize if recording
+                if should_record and self.data_recorder:
+                    self.data_recorder.record_execution_complete(
+                        success=False, 
+                        failure_messages=["Task decomposition failed - manual execution required"]
+                    )
+                    self.data_recorder.finalize_session()
+                
                 return results
+            
+            # Record start of inference phase
+            if should_record and self.data_recorder:
+                self.data_recorder.record_inference_start()
             
             # Step 2: Execute all skills as a sequence using skill executor's optimized pipeline
             if not execute_on_robot:
                 # Simulate execution
                 success, error_msg = True, "Simulation mode - would generate and execute skill sequence"
+                
+                # Record simulated skill generation
+                simulated_skills = []
                 for command in skill_commands:
                     results["skills_generated"].append(f"Would generate skill for: {command}")
+                    simulated_skills.append({
+                        "command": command,
+                        "skill_name": command.split()[0] if command.split() else "unknown",
+                        "parameters": " ".join(command.split()[1:]) if len(command.split()) > 1 else "",
+                        "status": "simulated"
+                    })
                     step_result = {
                         "command": command,
                         "skill_generated": True,
@@ -261,6 +338,13 @@ class TaskPlanner:
                         "error": None
                     }
                     results["execution_results"].append(step_result)
+                
+                # Record inference completion for simulation
+                if should_record and self.data_recorder:
+                    self.data_recorder.record_inference_complete(
+                        skills_generated=simulated_skills,
+                        llm_responses={"execution_mode": "simulation"}
+                    )
             else:
                 # Parse all skill commands into (skill_name, parameters) tuples
                 skill_sequence = []
@@ -273,11 +357,41 @@ class TaskPlanner:
                 self.logger.info(f"Executing skill sequence with {len(skill_sequence)} skills")
                 print(f"Executing skill sequence: {skill_sequence}")
                 
+                # Record skills generated during inference phase
+                generated_skills = []
+                for skill_name, parameters in skill_sequence:
+                    generated_skills.append({
+                        "command": f"{skill_name} {parameters}".strip(),
+                        "skill_name": skill_name,
+                        "parameters": parameters,
+                        "status": "ready_for_execution"
+                    })
+                
+                # Record inference completion
+                if should_record and self.data_recorder:
+                    self.data_recorder.record_inference_complete(
+                        skills_generated=generated_skills,
+                        llm_responses={"execution_mode": "real_robot"}
+                    )
+                    
+                    # Record start of execution phase
+                    self.data_recorder.record_execution_start()
+                
                 # Execute entire skill sequence using optimized pipeline:
                 # - Extract unique objects and detect them all upfront
                 # - Generate all skills using cached detections
                 # - Execute all generated skills in sequence
                 success, error_msg = self.skill_executor.execute_skill_sequence(skill_sequence)
+                
+                # Collect any additional data from skill executor
+                if should_record and self.data_recorder and hasattr(self.skill_executor, 'get_execution_data'):
+                    execution_data = self.skill_executor.get_execution_data()
+                    if 'points_of_interest' in execution_data:
+                        self.data_recorder.record_points_of_interest(execution_data['points_of_interest'])
+                    if 'surface_images' in execution_data:
+                        self.data_recorder.record_surface_images(execution_data['surface_images'])
+                    if 'skill_generation_files' in execution_data:
+                        self.data_recorder.record_skill_generation_files(execution_data['skill_generation_files'])
                 
                 # Record results for all commands
                 for i, command in enumerate(skill_commands):
@@ -294,6 +408,15 @@ class TaskPlanner:
                     }
                     results["execution_results"].append(step_result)
                 
+                # Record execution completion
+                failure_messages = [error_msg] if not success and error_msg else []
+                if should_record and self.data_recorder:
+                    self.data_recorder.record_execution_complete(
+                        success=success,
+                        failure_messages=failure_messages,
+                        robot_errors=failure_messages  # For now, treat all errors as robot errors
+                    )
+                
                 if not success:
                     results["error_message"] = f"Skill sequence execution failed: {error_msg}"
             
@@ -307,26 +430,49 @@ class TaskPlanner:
             
             self.logger.info(f"Task execution summary: {successful_commands}/{total_commands} commands succeeded")
             
+            # Finalize data recording session
+            if should_record and self.data_recorder:
+                try:
+                    session_path = self.data_recorder.finalize_session()
+                    results["session_data_path"] = session_path
+                except Exception as recording_error:
+                    self.logger.warning(f"Failed to finalize recording session: {recording_error}")
+            
         except Exception as e:
-            results["error_message"] = f"Task execution failed: {str(e)}"
+            error_message = f"Task execution failed: {str(e)}"
+            results["error_message"] = error_message
             results["end_time"] = datetime.now().isoformat()
             self.logger.error(f"Task execution error: {e}")
+            
+            # Record execution failure and finalize
+            if should_record and self.data_recorder:
+                try:
+                    self.data_recorder.record_execution_complete(
+                        success=False,
+                        failure_messages=[error_message],
+                        robot_errors=[str(e)]
+                    )
+                    session_path = self.data_recorder.finalize_session()
+                    results["session_data_path"] = session_path
+                except Exception as recording_error:
+                    self.logger.warning(f"Failed to record execution failure: {recording_error}")
         
         return results
     
-    def plan_and_execute_task(self, task_description: str, execute_on_robot: bool = True) -> Dict[str, Any]:
+    def plan_and_execute_task(self, task_description: str, execute_on_robot: bool = True, record_data: bool = None) -> Dict[str, Any]:
         """
         Complete workflow: analyze task and execute it
         
         Args:
             task_description: High-level task description  
             execute_on_robot: Whether to execute on actual robot
+            record_data: Whether to record data (None uses class default)
             
         Returns:
             Complete execution results
         """
         # Just use the execute_task method (it handles both planning and execution)
-        return self.execute_task(task_description, execute_on_robot)
+        return self.execute_task(task_description, execute_on_robot, record_data)
     
     def _image_to_base64(self, image: np.ndarray) -> str:
         """Convert numpy image to base64 string for LLM"""
@@ -350,6 +496,34 @@ class TaskPlanner:
         except Exception as e:
             self.logger.error(f"Failed to convert image to base64: {e}")
             return ""
+    
+    def set_data_recording(self, enabled: bool):
+        """
+        Enable or disable data recording at runtime
+        
+        Args:
+            enabled: True to enable recording, False to disable
+        """
+        old_state = self.enable_data_recording
+        self.enable_data_recording = enabled
+        
+        if enabled and not old_state:
+            # Enabling recording
+            if self.data_recorder is None:
+                self.data_recorder = DataRecorder()
+            self.logger.info("Data recording enabled")
+        elif not enabled and old_state:
+            # Disabling recording
+            self.logger.info("Data recording disabled")
+        
+    def is_data_recording_enabled(self) -> bool:
+        """
+        Check if data recording is currently enabled
+        
+        Returns:
+            True if data recording is enabled, False otherwise
+        """
+        return self.enable_data_recording
     
     def get_available_skills(self) -> List[str]:
         """Get list of available robot skills"""
@@ -389,7 +563,7 @@ def test_task_planner():
     # Initialize task planner with LLM required
     planner = None
     try:
-        planner = TaskPlanner(use_llm=True)  # LLM required for dynamic planning
+        planner = TaskPlanner(use_llm=True, enable_data_recording=True)  # LLM required for dynamic planning
         
         # Test available skills
         print(f"\nAvailable Skills: {list(planner.valid_skills.keys())}")
@@ -398,7 +572,7 @@ def test_task_planner():
         test_tasks = [
             # "move the paper bag to the stove and open the bottle",
             # "open the bottle and put the cap in the bag."
-            "open the box"
+            "open the pen"
             # "turn on the kitchen light", 
             # "open the bottle and pour water",
             # "clean up the counter and close all cabinets"
@@ -413,7 +587,7 @@ def test_task_planner():
             
             try:
                 # Actually run the task planning and execution (simulation mode)
-                results = planner.execute_task(task, execute_on_robot=True)
+                results = planner.execute_task(task, execute_on_robot=True, record_data=True)
                 
                 print(f"Generated {len(results['skill_commands'])} skill commands:")
                 for i, command in enumerate(results['skill_commands']):

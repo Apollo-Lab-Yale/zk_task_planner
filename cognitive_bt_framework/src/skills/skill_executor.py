@@ -35,7 +35,7 @@ from cognitive_bt_framework.src.robot_interface.xarm_curobo_interface import CuR
 # Import the updated stereo ArUco detector
 
 
-DETECTION_RETRIES = 1
+DETECTION_RETRIES = 3
 
 class DebugVisualizer:
     def __init__(self):
@@ -1355,10 +1355,12 @@ class DirectSkillExecutor:
             # Handle gripper actions directly
             if action.action_type == 'close_gripper':
                 force = action.parameters.get('force', 10.0)
-                return self.motion_planner.close_gripper(wait=True, timeout=min(timeout, 10.0))
+                return self.motion_planner.close_gripper(wait=True, timeout=100.0)
                     
             elif action.action_type == 'open_gripper':
-                return self.motion_planner.open_gripper(wait=True, timeout=min(timeout, 10.0))
+                self.motion_planner.open_gripper(wait=True, timeout=100)
+                time.sleep(1)
+                return self.motion_planner.open_gripper(wait=True, timeout=100)
                     
             elif action.action_type == 'retract_gripper':
                 # Move gripper back by specified distance
@@ -1720,8 +1722,8 @@ class DirectSkillExecutor:
                             current_position=current_position,
                             current_orientation=current_orientation,
                             radius=radius,
-                            arc_angle_degrees=90.0,  # Use conservative angle like in test
-                            segments=90,
+                            arc_angle_degrees=55.0,  # Use conservative angle like in test
+                            segments=5,
                             speed_factor=0.05,  # Use ultra conservative speed like in test
                             is_quat=False,  # Match test method setting
                             hinge_location=hinge_location,  # Pass hinge location for logging
@@ -2292,6 +2294,84 @@ class DirectSkillExecutor:
             'calibration_method': 'simplified_stereo_aruco'
         }
     
+    def get_execution_data(self) -> Dict[str, Any]:
+        """
+        Get execution data for recording purposes
+        
+        Returns:
+            Dictionary containing execution data including points of interest and images
+        """
+        execution_data = {}
+        
+        # Collect points of interest from current object info
+        if hasattr(self, 'current_object_info') and self.current_object_info:
+            points_data = {
+                'pixel_coords': [],
+                'ids': [],
+                'scores': [],
+                'detection_methods': [],
+                'interaction_types': [],
+                'confidences': []
+            }
+            
+            # Extract points from object_info if available
+            if hasattr(self.current_object_info, 'points') and self.current_object_info.points:
+                points = self.current_object_info.points
+                if 'pixel_coords' in points:
+                    points_data['pixel_coords'] = points['pixel_coords']
+                if 'ids' in points:
+                    points_data['ids'] = points['ids']
+                if 'scores' in points:
+                    points_data['scores'] = points['scores']
+                if 'detection_methods' in points:
+                    points_data['detection_methods'] = points['detection_methods']
+                elif 'detection_method' in points:
+                    points_data['detection_methods'] = points['detection_method']
+                if 'interaction_types' in points:
+                    points_data['interaction_types'] = points['interaction_types']
+                if 'confidences' in points:
+                    points_data['confidences'] = points['confidences']
+            
+            execution_data['points_of_interest'] = points_data
+        
+        # Collect surface images if available
+        if hasattr(self, 'current_object_info') and self.current_object_info:
+            surface_images = {}
+            
+            # Add the main object image if available
+            if hasattr(self.current_object_info, 'image') and self.current_object_info.image is not None:
+                surface_images['main_object'] = self.current_object_info.image
+            
+            # Add surface masks as images if available
+            if hasattr(self.current_object_info, 'surface_masks') and self.current_object_info.surface_masks:
+                for surface_name, mask in self.current_object_info.surface_masks.items():
+                    if mask is not None and hasattr(self.current_object_info, 'image'):
+                        # Create masked image
+                        masked_image = self.current_object_info.image.copy()
+                        masked_image[~mask] = 0  # Set non-mask areas to black
+                        surface_images[surface_name] = masked_image
+            
+            if surface_images:
+                execution_data['surface_images'] = surface_images
+        
+        # Add timing information if available
+        if hasattr(self, 'execution_start_time') and self.execution_start_time:
+            execution_data['execution_start_time'] = self.execution_start_time
+            execution_data['current_time'] = time.time()
+            execution_data['execution_duration'] = time.time() - self.execution_start_time
+        
+        # Add camera type and robot info
+        execution_data['camera_type'] = "ZED" if self.use_zed_camera else "RealSense"
+        execution_data['robot_ip'] = getattr(self, 'robot_ip', 'unknown')
+        
+        # Collect skill generator file information
+        if hasattr(self, 'skill_handler') and self.skill_handler:
+            if hasattr(self.skill_handler, 'skill_generator') and self.skill_handler.skill_generator:
+                skill_gen_files = self.skill_handler.skill_generator.get_last_generation_files()
+                execution_data['skill_generation_files'] = skill_gen_files
+        
+        return execution_data
+
     def recalibrate_transform(self):
         """Recalibrate the camera-to-robot transform (only available for ZED camera)"""
         if not self.use_zed_camera:

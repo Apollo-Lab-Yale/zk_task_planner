@@ -46,6 +46,7 @@ class InteractionPoint:
     grasp_width: Optional[float] = None
     stability: float = 0.5
     accessibility: float = 0.5
+    detection_method: str = "unknown"  # Track which method detected this point
 
 
 # Simplified DFormer-Tiny model for RGB-D fusion
@@ -307,6 +308,19 @@ class RobustInteractionDetector:
             print(f"[DEBUG V2] Geometric detection found {len(geometric_points)} points")
             if len(geometric_points) == 0:
                 print(f"[DEBUG V2] WARNING: No geometric points found - check protrusion/indentation detection!")
+            else:
+                # Debug geometric points by method
+                method_counts = {}
+                for pt in geometric_points:
+                    method = pt.detection_method
+                    method_counts[method] = method_counts.get(method, 0) + 1
+                print(f"[DEBUG V2] Geometric points by method: {method_counts}")
+                
+                # Show top 3 geometric points with details
+                sorted_geometric = sorted(geometric_points, key=lambda p: p.score, reverse=True)
+                print(f"[DEBUG V2] Top 3 geometric points:")
+                for i, pt in enumerate(sorted_geometric[:3]):
+                    print(f"  {i+1}. ({pt.x}, {pt.y}) score={pt.score:.3f} conf={pt.confidence:.3f} type={pt.interaction_type.value} method={pt.detection_method}")
         
         # Early termination if confident geometric features found and cascade is enabled
         if self.cascade_enabled and not depth_plane_only:
@@ -360,11 +374,36 @@ class RobustInteractionDetector:
             
         final_points = self._apply_nms(scored_points, effective_min_distance)[:max_points]
         
+        # Apply center shift to move edge points toward object center
+        if apply_center_shift and len(final_points) > 0:
+            final_points = self._apply_center_shift(final_points, mask, edge_threshold, shift_factor)
+        
         if self.debug:
             total_time = time.time() - start_time
             points_filtered_by_nms = len(scored_points) - len(final_points)
             print(f"[DEBUG V2] NMS FILTERING: {points_filtered_by_nms} points filtered out")
             print(f"[DEBUG V2] After NMS: {len(final_points)} points (from {len(all_points)} total candidates)")
+            
+            # Debug final points with rankings
+            print(f"[DEBUG V2] FINAL RANKED POINTS (top {len(final_points)}):")
+            for i, pt in enumerate(final_points):
+                print(f"  RANK {i+1}: ({pt.x}, {pt.y}) score={pt.score:.3f} conf={pt.confidence:.3f} "
+                      f"type={pt.interaction_type.value} method={pt.detection_method} "
+                      f"stab={pt.stability:.2f} acc={pt.accessibility:.2f}")
+            
+            # Summary by detection method
+            final_methods = {}
+            for pt in final_points:
+                method = pt.detection_method
+                final_methods[method] = final_methods.get(method, 0) + 1
+            print(f"[DEBUG V2] Final points by detection method: {final_methods}")
+            
+            # Summary by interaction type
+            final_types = {}
+            for pt in final_points:
+                itype = pt.interaction_type.value
+                final_types[itype] = final_types.get(itype, 0) + 1
+            print(f"[DEBUG V2] Final points by interaction type: {final_types}")
             if len(final_points) > 0:
                 print(f"[DEBUG V2] Final point locations: {[(p.x, p.y) for p in final_points[:5]]}")
             else:
@@ -432,7 +471,13 @@ class RobustInteractionDetector:
         if self.debug:
             print(f"DEBUG: Edge detection: {len(edge_points)} points")
         
-        # 5. If PCL or Open3D is available, use more advanced geometric processing
+        # 5. Detect surface boundary transitions
+        boundary_points = self._detect_surface_boundaries(depth_filtered, mask, normal_points)
+        points.extend(boundary_points)
+        if self.debug:
+            print(f"DEBUG: Surface boundary detection: {len(boundary_points)} points")
+        
+        # 6. If PCL or Open3D is available, use more advanced geometric processing
         if HAS_PCL or HAS_OPEN3D:
             advanced_points = self._detect_advanced_geometric_features(depth_filtered, mask)
             points.extend(advanced_points)
@@ -487,6 +532,7 @@ class RobustInteractionDetector:
                         x=int(x), y=int(y),
                         score=min(1.0, prominence * 20),
                         interaction_type=InteractionType.HANDLE,
+                        detection_method=f"protrusion_k{kernel_size}",
                         confidence=0.9,
                         grasp_width=kernel_size * 2
                     ))
@@ -494,91 +540,177 @@ class RobustInteractionDetector:
         return points[:self.cascade_config["max_points"]]
     
     def _detect_indentations(self, depth: np.ndarray, mask: np.ndarray) -> List[InteractionPoint]:
-        """Detect local indentations that could be buttons or recessed features."""
+        """Detect prominent indentations and protrusions using multi-scale analysis."""
         points = []
         
         if self.debug:
-            print(f"[DEBUG V2] Starting indentation detection...")
+            print(f"[DEBUG V2] Starting improved indentation detection...")
         
-        kernel_size = 9
-        kernel = np.ones((kernel_size, kernel_size), np.float32) / (kernel_size**2)
-        local_mean = cv2.filter2D(depth, -1, kernel)
+        # Use multiple kernel sizes to detect features at different scales
+        kernels = [
+            (5, "small"),   # Small buttons/screws
+            (11, "medium"), # Medium handles/grips  
+            (17, "large")   # Large recessed areas
+        ]
         
-        # Find depressions (where local mean is greater than depth)
-        depression_map = local_mean - depth
-        depression_map[~mask] = 0
+        all_candidates = []
         
-        # Find significant depressions
-        valid_depressions = depression_map[mask & (depression_map > 0)]
-        
-        if self.debug:
-            total_depression_pixels = len(valid_depressions)
-            if total_depression_pixels > 0:
-                max_depression = np.max(valid_depressions)
-                mean_depression = np.mean(valid_depressions)
-                print(f"[DEBUG V2] Found {total_depression_pixels} depression pixels, max: {max_depression:.4f}m, mean: {mean_depression:.4f}m")
-            else:
-                print(f"[DEBUG V2] No depression pixels found!")
-        
-        if len(valid_depressions) > 0:
-            threshold = np.percentile(valid_depressions, 85)
-            significant_depressions = (depression_map > threshold) & mask
+        for kernel_size, scale_name in kernels:
+            if self.debug:
+                print(f"[DEBUG V2] Processing {scale_name} scale (kernel {kernel_size})...")
+            
+            # Create Gaussian kernel for smoother local mean
+            sigma = kernel_size / 4.0
+            kernel = cv2.getGaussianKernel(kernel_size, sigma)
+            kernel = kernel @ kernel.T
+            kernel = kernel / np.sum(kernel)
+            
+            local_mean = cv2.filter2D(depth.astype(np.float32), -1, kernel)
+            
+            # Detect both indentations AND protrusions
+            depression_map = local_mean - depth  # Indentations (positive values)
+            protrusion_map = depth - local_mean  # Protrusions (positive values) 
+            
+            # Process indentations
+            depression_map[~mask] = 0
+            protrusion_map[~mask] = 0
+            
+            # Find significant features for this scale
+            valid_depressions = depression_map[mask & (depression_map > 0)]
+            valid_protrusions = protrusion_map[mask & (protrusion_map > 0)]
             
             if self.debug:
-                significant_pixels = np.sum(significant_depressions)
-                print(f"[DEBUG V2] Depression threshold: {threshold:.4f}m, significant pixels: {significant_pixels}")
+                print(f"[DEBUG V2]   {scale_name}: {len(valid_depressions)} depression pixels, {len(valid_protrusions)} protrusion pixels")
             
-            # Find connected components
-            num_labels, labels = cv2.connectedComponents(significant_depressions.astype(np.uint8))
-            
-            if self.debug:
-                print(f"[DEBUG V2] Found {num_labels-1} depression components")
-            
-            for label in range(1, num_labels):
-                component = (labels == label)
-                area = np.sum(component)
+            # Process depressions (indentations)
+            if len(valid_depressions) > 0:
+                # Use adaptive threshold based on local statistics
+                dep_mean = np.mean(valid_depressions)
+                dep_std = np.std(valid_depressions)
+                threshold = max(np.percentile(valid_depressions, 90), dep_mean + 1.5 * dep_std)
                 
-                if 20 < area < 5000:  # Button to handle-sized features
-                    moments = cv2.moments(component.astype(np.uint8))
-                    if moments["m00"] > 0:
-                        cx = int(moments["m10"] / moments["m00"])
-                        cy = int(moments["m01"] / moments["m00"])
-                        
-                        depth_diff = depression_map[cy, cx]
-                        
-                        if self.debug:
-                            print(f"[DEBUG V2]   Added indentation point at ({cx}, {cy}) with depth_diff: {depth_diff:.4f}m")
-                        
-                        points.append(InteractionPoint(
-                            x=cx, y=cy,
-                            score=min(1.0, depth_diff * 30),
-                            interaction_type=InteractionType.PUSH_POINT,
-                            confidence=0.85
-                        ))
-                else:
-                    if self.debug:
-                        print(f"[DEBUG V2]   Component {label} FILTERED OUT: area {area} not in range [21, 499]")
+                significant_depressions = (depression_map > threshold) & mask
+                self._process_depth_features(depression_map, significant_depressions, 
+                                           "indentation", scale_name, all_candidates)
+            
+            # Process protrusions (raised features)
+            if len(valid_protrusions) > 0:
+                # Use adaptive threshold based on local statistics
+                prot_mean = np.mean(valid_protrusions)
+                prot_std = np.std(valid_protrusions)
+                threshold = max(np.percentile(valid_protrusions, 90), prot_mean + 1.5 * prot_std)
+                
+                significant_protrusions = (protrusion_map > threshold) & mask
+                self._process_depth_features(protrusion_map, significant_protrusions,
+                                           "protrusion", scale_name, all_candidates)
+        
+        # Rank all candidates and select the best ones
+        all_candidates.sort(key=lambda x: x['quality_score'], reverse=True)
+        
+        # Non-maximum suppression to avoid duplicates
+        selected_points = self._apply_spatial_nms(all_candidates, min_distance=15)
         
         if self.debug:
-            original_count = len(points)
-            max_allowed = self.cascade_config["max_points"]
-            print(f"[DEBUG V2] Indentation detection complete: {original_count} points found")
-            if original_count > max_allowed:
-                print(f"[DEBUG V2] CASCADE FILTERING: Limiting to {max_allowed} points (filtered {original_count - max_allowed})")
+            print(f"[DEBUG V2] Found {len(all_candidates)} total candidates, selected {len(selected_points)} after NMS")
+        
+        # Convert to InteractionPoint objects
+        for candidate in selected_points:
+            interaction_type = InteractionType.PUSH_POINT if candidate['feature_type'] == 'indentation' else InteractionType.GRASP_EDGE
+            
+            points.append(InteractionPoint(
+                x=candidate['x'], y=candidate['y'],
+                score=candidate['quality_score'],
+                interaction_type=interaction_type,
+                confidence=candidate['confidence'],
+                detection_method=f"indentation_{candidate['scale']}"
+            ))
+            
+            if self.debug:
+                print(f"[DEBUG V2]   Selected {candidate['feature_type']} at ({candidate['x']}, {candidate['y']}) "
+                      f"quality={candidate['quality_score']:.3f} conf={candidate['confidence']:.3f}")
         
         return points[:self.cascade_config["max_points"]]
     
+    def _process_depth_features(self, feature_map: np.ndarray, significant_features: np.ndarray, 
+                               feature_type: str, scale: str, candidates: list):
+        """Process connected components for depth features."""
+        num_labels, labels = cv2.connectedComponents(significant_features.astype(np.uint8))
+        
+        for label in range(1, num_labels):
+            component = (labels == label)
+            area = np.sum(component)
+            
+            # Scale-appropriate area filtering
+            if scale == "small" and not (10 < area < 200):
+                continue
+            elif scale == "medium" and not (50 < area < 800):  
+                continue
+            elif scale == "large" and not (200 < area < 2000):
+                continue
+            
+            moments = cv2.moments(component.astype(np.uint8))
+            if moments["m00"] > 0:
+                cx = int(moments["m10"] / moments["m00"])
+                cy = int(moments["m01"] / moments["m00"])
+                
+                depth_diff = feature_map[cy, cx]
+                
+                # Calculate quality metrics
+                local_feature_values = feature_map[component]
+                consistency = np.std(local_feature_values)  # Lower is better
+                prominence = np.mean(local_feature_values)  # Higher is better
+                
+                # Shape analysis - prefer circular/compact features
+                perimeter = cv2.arcLength(cv2.findContours(component.astype(np.uint8), 
+                                                         cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0][0], True)
+                compactness = (4 * np.pi * area) / (perimeter * perimeter) if perimeter > 0 else 0
+                
+                # Combined quality score
+                quality_score = min(1.0, (prominence * 0.5 + compactness * 0.3 + (1.0 / (1.0 + consistency)) * 0.2) * 
+                                        (area / 300.0) * 0.8)
+                
+                confidence = min(0.9, 0.6 + quality_score * 0.3)
+                
+                candidates.append({
+                    'x': cx, 'y': cy,
+                    'quality_score': quality_score,
+                    'confidence': confidence,
+                    'feature_type': feature_type,
+                    'scale': scale,
+                    'area': area,
+                    'prominence': prominence
+                })
+    
+    def _apply_spatial_nms(self, candidates: list, min_distance: int = 15) -> list:
+        """Apply non-maximum suppression to remove nearby duplicate detections."""
+        if not candidates:
+            return []
+        
+        selected = []
+        remaining = candidates.copy()
+        
+        while remaining:
+            # Take the best remaining candidate
+            best = remaining.pop(0)
+            selected.append(best)
+            
+            # Remove all candidates too close to this one
+            remaining = [c for c in remaining 
+                        if np.sqrt((c['x'] - best['x'])**2 + (c['y'] - best['y'])**2) >= min_distance]
+        
+        return selected
+    
     def _detect_surface_normals(self, depth: np.ndarray, mask: np.ndarray) -> List[InteractionPoint]:
-        """Detect distinct surface normal sections (like bottle caps, flat surfaces)."""
+        """Detect distinct surface normal sections using improved segmentation."""
         points = []
         
         if np.all(depth == 0) or not np.any(mask):
             return []
         
-        # Parameters for surface normal detection
+        # Parameters for surface normal detection - made more strict
         patch_size = 9  # Size of local patch for normal computation
-        min_patch_area = 50  # Minimum pixels for a valid surface patch
-        normal_threshold = 0.1  # Very low threshold to catch slightly angled surfaces
+        min_patch_area = 50  # Increased minimum area for more stable surfaces
+        normal_threshold = 0.10  # Stricter threshold for better surface separation
         
         # Compute surface normals for the entire depth image
         normals = self._compute_surface_normals(depth, mask, patch_size)
@@ -590,104 +722,60 @@ class RobustInteractionDetector:
         if self.debug:
             valid_normals = np.any(normals != 0, axis=2)
             print(f"DEBUG: Computed {np.sum(valid_normals)} valid surface normals")
-            
-        # Find regions with consistent surface normals
-        # Focus on normals pointing toward camera (good for top surfaces like caps)
-        camera_normal = np.array([0, 0, -1])  # Points toward camera
         
-        # Calculate dot product with camera normal
-        # normals is (H, W, 3), we need to compute dot product for each pixel
-        normal_alignment = np.sum(normals * camera_normal.reshape(1, 1, 3), axis=2)
-        
-        # Find regions well-aligned with camera (horizontal surfaces)
-        horizontal_surfaces = (normal_alignment > normal_threshold) & mask
+        # Segment surfaces based on normal similarity using improved clustering
+        surface_clusters = self._segment_surfaces_by_normals(normals, mask, normal_threshold)
         
         if self.debug:
-            print(f"DEBUG: Found {np.sum(horizontal_surfaces)} horizontal surface pixels (threshold: {normal_threshold})")
-            if np.any(mask):
-                valid_alignments = normal_alignment[mask]
-                print(f"DEBUG: Normal alignment range: {np.min(valid_alignments):.3f} to {np.max(valid_alignments):.3f}")
-                print(f"DEBUG: Mean alignment: {np.mean(valid_alignments):.3f}, Std: {np.std(valid_alignments):.3f}")
-                print(f"DEBUG: Above threshold count: {np.sum(valid_alignments > normal_threshold)}")
+            print(f"DEBUG: Found {len(surface_clusters)} distinct surface clusters")
         
-        if not np.any(horizontal_surfaces):
-            if self.debug:
-                print("DEBUG: No horizontal surfaces found")
-            return []
-            
-        # Find connected components of horizontal surfaces
-        num_labels, labels = cv2.connectedComponents(horizontal_surfaces.astype(np.uint8))
-        
-        if self.debug:
-            print(f"DEBUG: Found {num_labels-1} connected components of horizontal surfaces")
-        
-        for label in range(1, num_labels):
-            component = (labels == label)
-            area = np.sum(component)
+        # Process each surface cluster
+        for cluster_id, surface_mask in surface_clusters.items():
+            area = np.sum(surface_mask)
             
             if self.debug:
-                print(f"DEBUG: Component {label} has area {area} pixels")
+                print(f"DEBUG: Cluster {cluster_id} has area {area} pixels")
             
-            # Only consider reasonably sized flat surfaces
-            if min_patch_area < area < 2000:  # Cap-sized surfaces
+            # Process surfaces of various sizes - stricter upper bound
+            if min_patch_area < area < 2000:  # Reduced max size to avoid noisy large surfaces
                 # Find center of the surface patch
-                moments = cv2.moments(component.astype(np.uint8))
+                moments = cv2.moments(surface_mask.astype(np.uint8))
                 if moments["m00"] > 0:
                     cx = int(moments["m10"] / moments["m00"])
                     cy = int(moments["m01"] / moments["m00"])
                     
-                    # Verify this is a stable flat surface
-                    if self.debug:
-                        print(f"DEBUG: Verifying surface at ({cx}, {cy})...")
-                    
-                    surface_is_valid = self._verify_flat_surface(depth, cx, cy, mask, patch_size)
-                    if self.debug:
-                        print(f"DEBUG: Surface verification result: {surface_is_valid}")
-                    
-                    if surface_is_valid:
-                        # Calculate confidence based on normal consistency and area
-                        patch_normals = normals[component]  # This gives us (N, 3) array
-                        if len(patch_normals) > 0:
-                            normal_consistency = np.mean(np.sum(patch_normals * camera_normal, axis=1))
-                        else:
-                            normal_consistency = 0.0
-                        area_score = min(1.0, area / 500.0)  # Normalize by typical cap area
-                        confidence = 0.7 * normal_consistency + 0.3 * area_score
+                    # Get representative normal for this surface
+                    cluster_normals = normals[surface_mask]
+                    if len(cluster_normals) > 0:
+                        avg_normal = np.mean(cluster_normals, axis=0)
+                        avg_normal = avg_normal / (np.linalg.norm(avg_normal) + 1e-6)
                         
-                        points.append(InteractionPoint(
-                            x=cx, y=cy,
-                            score=min(1.0, confidence * 1.2),
-                            interaction_type=InteractionType.GRASP_SURFACE,
-                            confidence=confidence,
-                            grasp_width=np.sqrt(area)  # Estimate based on surface area
-                        ))
-        
-        # Also detect side surfaces (vertical walls) for grasping
-        side_normal = np.array([1, 0, 0])  # Side-facing normal
-        side_alignment = np.abs(np.sum(normals * side_normal.reshape(1, 1, 3), axis=2))
-        vertical_surfaces = (side_alignment > normal_threshold) & mask
-        
-        if np.any(vertical_surfaces):
-            num_labels, labels = cv2.connectedComponents(vertical_surfaces.astype(np.uint8))
-            
-            for label in range(1, num_labels):
-                component = (labels == label)
-                area = np.sum(component)
-                
-                if 30 < area < 800:  # Smaller patches for side grasping
-                    moments = cv2.moments(component.astype(np.uint8))
-                    if moments["m00"] > 0:
-                        cx = int(moments["m10"] / moments["m00"])
-                        cy = int(moments["m01"] / moments["m00"])
+                        # Determine surface type based on normal direction
+                        surface_type, confidence = self._classify_surface_by_normal(avg_normal)
                         
-                        # Verify this is a graspable side surface
-                        if self._verify_side_surface(depth, cx, cy, mask, patch_size):
+                        # Verify surface quality
+                        surface_is_valid = self._verify_surface_quality(depth, cx, cy, mask, patch_size, surface_type)
+                        
+                        if self.debug:
+                            print(f"DEBUG: Surface at ({cx}, {cy}) - type: {surface_type}, valid: {surface_is_valid}, normal: {avg_normal}")
+                        
+                        if surface_is_valid:
+                            # Calculate approach angle from surface normal
+                            approach_angle = self._calculate_approach_angle(avg_normal, surface_type)
+                            
+                            # More conservative scoring based on area and quality
+                            area_score = min(1.0, area / 500.0)  # Higher area requirement
+                            quality_score = confidence * 0.6  # Lower base multiplier
+                            final_score = min(0.8, area_score * quality_score)  # Cap at 0.8
+                            
                             points.append(InteractionPoint(
                                 x=cx, y=cy,
-                                score=0.8,
-                                interaction_type=InteractionType.GRASP_EDGE,
-                                confidence=0.75,
-                                approach_angle=90.0  # Side approach
+                                score=final_score,
+                                interaction_type=surface_type,
+                                confidence=confidence * 0.9,  # Slightly lower confidence
+                                approach_angle=approach_angle,
+                                grasp_width=np.sqrt(area),
+                                detection_method="surface_normal"
                             ))
         
         return points[:self.cascade_config["max_points"]]
@@ -732,6 +820,113 @@ class RobustInteractionDetector:
         
         return normals
     
+    def _segment_surfaces_by_normals(self, normals: np.ndarray, mask: np.ndarray, threshold: float) -> Dict[int, np.ndarray]:
+        """Segment surfaces based on normal similarity using region growing."""
+        h, w = normals.shape[:2]
+        visited = np.zeros((h, w), dtype=bool)
+        surface_clusters = {}
+        cluster_id = 0
+        
+        # Valid pixels have non-zero normals and are in mask
+        valid_pixels = mask & (np.linalg.norm(normals, axis=2) > 0.1)
+        
+        for y in range(h):
+            for x in range(w):
+                if not valid_pixels[y, x] or visited[y, x]:
+                    continue
+                
+                # Start a new surface cluster
+                seed_normal = normals[y, x]
+                cluster_mask = np.zeros((h, w), dtype=bool)
+                
+                # Region growing based on normal similarity
+                self._grow_surface_region(normals, seed_normal, x, y, visited, cluster_mask, threshold, valid_pixels)
+                
+                # Only keep clusters with reasonable size
+                if np.sum(cluster_mask) > 20:
+                    surface_clusters[cluster_id] = cluster_mask
+                    cluster_id += 1
+        
+        return surface_clusters
+    
+    def _grow_surface_region(self, normals: np.ndarray, seed_normal: np.ndarray, 
+                           start_x: int, start_y: int, visited: np.ndarray, 
+                           cluster_mask: np.ndarray, threshold: float, valid_pixels: np.ndarray):
+        """Grow a surface region using flood fill based on normal similarity."""
+        h, w = normals.shape[:2]
+        stack = [(start_x, start_y)]
+        
+        while stack:
+            x, y = stack.pop()
+            
+            if (x < 0 or x >= w or y < 0 or y >= h or 
+                visited[y, x] or not valid_pixels[y, x]):
+                continue
+            
+            # Check normal similarity
+            current_normal = normals[y, x]
+            dot_product = np.dot(seed_normal, current_normal)
+            
+            if dot_product > threshold:  # Similar normal direction
+                visited[y, x] = True
+                cluster_mask[y, x] = True
+                
+                # Add 8-connected neighbors to stack
+                for dx in [-1, 0, 1]:
+                    for dy in [-1, 0, 1]:
+                        if dx != 0 or dy != 0:
+                            stack.append((x + dx, y + dy))
+    
+    def _classify_surface_by_normal(self, normal: np.ndarray) -> Tuple[InteractionType, float]:
+        """Classify surface type based on its normal vector."""
+        # Normalize normal
+        normal = normal / (np.linalg.norm(normal) + 1e-6)
+        
+        # Define reference normals for different surface types
+        camera_normal = np.array([0, 0, -1])  # Facing camera (horizontal surfaces)
+        side_normal = np.array([1, 0, 0])     # Side surfaces
+        
+        # Calculate alignments
+        camera_alignment = np.abs(np.dot(normal, camera_normal))
+        side_alignment = np.abs(np.dot(normal, side_normal))
+        
+        # Classify based on strongest alignment - made more strict
+        if camera_alignment > 0.85:  # Stricter threshold for horizontal surfaces
+            return InteractionType.GRASP_SURFACE, camera_alignment * 0.8  # Lower confidence
+        elif side_alignment > 0.75:  # Stricter threshold for vertical surfaces
+            return InteractionType.GRASP_EDGE, side_alignment * 0.7  # Lower confidence
+        else:  # Angled surface
+            max_alignment = max(camera_alignment, side_alignment)
+            if max_alignment > 0.6:  # Higher threshold for contact points
+                return InteractionType.CONTACT, max_alignment * 0.6  # Lower confidence
+            else:
+                return InteractionType.PUSH_POINT, 0.5  # Lower confidence for uncertain surfaces
+    
+    def _calculate_approach_angle(self, normal: np.ndarray, surface_type: InteractionType) -> Optional[float]:
+        """Calculate optimal approach angle based on surface normal."""
+        if surface_type == InteractionType.GRASP_SURFACE:
+            # For horizontal surfaces, approach from above
+            return 0.0  # Top-down approach
+        elif surface_type == InteractionType.GRASP_EDGE:
+            # For vertical surfaces, approach perpendicular to normal
+            angle = np.arctan2(normal[1], normal[0])
+            return np.rad2deg(angle) + 90.0  # Perpendicular approach
+        else:
+            # For other surfaces, approach opposite to normal
+            angle = np.arctan2(normal[1], normal[0])
+            return np.rad2deg(angle) + 180.0
+    
+    def _verify_surface_quality(self, depth: np.ndarray, x: int, y: int, mask: np.ndarray, 
+                              window_size: int, surface_type: InteractionType) -> bool:
+        """Verify surface quality based on its type."""
+        if surface_type == InteractionType.GRASP_SURFACE:
+            return self._verify_flat_surface(depth, x, y, mask, window_size)
+        elif surface_type == InteractionType.GRASP_EDGE:
+            return self._verify_side_surface(depth, x, y, mask, window_size)
+        else:
+            # For other types, do basic stability check
+            return self._is_stable_feature(depth, x, y, mask, window_size)
+    
     def _verify_flat_surface(self, depth: np.ndarray, x: int, y: int, mask: np.ndarray, window_size: int) -> bool:
         """Verify that a point represents a stable flat surface."""
         half_win = window_size // 2
@@ -748,16 +943,16 @@ class RobustInteractionDetector:
         
         # Convert depth from mm to meters for consistency
         valid_depths = local_depth[local_mask & (local_depth > 0)] / 1000.0
-        if len(valid_depths) < 5:
+        if len(valid_depths) < 10:  # Require more points for better stability
             return False
         
         # Check depth consistency (flat surface should have low variation)
         depth_std = np.std(valid_depths)
         depth_range = np.ptp(valid_depths)
         
-        # Relaxed thresholds for real-world depth data noise
-        max_std = 0.05   # 5cm std (was 1cm) 
-        max_range = 0.10  # 10cm range (was 2cm)
+        # Stricter thresholds for better surface quality
+        max_std = 0.02   # 2cm std - stricter than before
+        max_range = 0.06  # 6cm range - stricter than before
         
         if self.debug:
             print(f"DEBUG: Surface validation at ({x},{y}) - std: {depth_std:.3f} (< {max_std}), range: {depth_range:.3f} (< {max_range})")
@@ -837,10 +1032,115 @@ class RobustInteractionDetector:
                         score=min(1.0, edge_strength / np.max(grad_mag) * 1.2),
                         interaction_type=InteractionType.GRASP_EDGE,
                         confidence=0.8,
-                        approach_angle=angle
+                        approach_angle=angle,
+                        detection_method="depth_edge"
                     ))
         
         return points[:self.cascade_config["max_points"]]
+    
+    def _detect_surface_boundaries(self, depth: np.ndarray, mask: np.ndarray, surface_points: List[InteractionPoint]) -> List[InteractionPoint]:
+        """Detect boundaries between different surfaces to ensure complete coverage."""
+        points = []
+        
+        # Compute surface normals
+        normals = self._compute_surface_normals(depth, mask, 9)
+        if normals is None:
+            return []
+        
+        # Create a map of existing surface coverage
+        existing_coverage = np.zeros(mask.shape, dtype=bool)
+        coverage_radius = 25  # Pixels around each existing point
+        
+        for point in surface_points:
+            y_min = max(0, point.y - coverage_radius)
+            y_max = min(mask.shape[0], point.y + coverage_radius)
+            x_min = max(0, point.x - coverage_radius)
+            x_max = min(mask.shape[1], point.x + coverage_radius)
+            existing_coverage[y_min:y_max, x_min:x_max] = True
+        
+        # Find uncovered regions that have valid surface normals
+        uncovered_mask = mask & ~existing_coverage & (np.linalg.norm(normals, axis=2) > 0.1)
+        
+        if self.debug:
+            uncovered_pixels = np.sum(uncovered_mask)
+            total_pixels = np.sum(mask)
+            coverage_percent = (1.0 - uncovered_pixels / total_pixels) * 100 if total_pixels > 0 else 0
+            print(f"DEBUG: Surface coverage: {coverage_percent:.1f}% ({uncovered_pixels} uncovered pixels)")
+        
+        if not np.any(uncovered_mask):
+            return []
+        
+        # Segment uncovered regions by normal similarity
+        uncovered_clusters = self._segment_surfaces_by_normals(normals, uncovered_mask, 0.2)
+        
+        if self.debug:
+            print(f"DEBUG: Found {len(uncovered_clusters)} uncovered surface clusters")
+        
+        # Add interaction points for significant uncovered regions
+        for _, cluster_mask in uncovered_clusters.items():
+            area = np.sum(cluster_mask)
+            
+            if area > 40:  # Minimum area for boundary points
+                # Find center of uncovered cluster
+                moments = cv2.moments(cluster_mask.astype(np.uint8))
+                if moments["m00"] > 0:
+                    cx = int(moments["m10"] / moments["m00"])
+                    cy = int(moments["m01"] / moments["m00"])
+                    
+                    # Get cluster normal
+                    cluster_normals = normals[cluster_mask]
+                    if len(cluster_normals) > 0:
+                        avg_normal = np.mean(cluster_normals, axis=0)
+                        avg_normal = avg_normal / (np.linalg.norm(avg_normal) + 1e-6)
+                        
+                        # Classify this boundary surface
+                        surface_type, confidence = self._classify_surface_by_normal(avg_normal)
+                        
+                        # Verify it's a valid boundary point
+                        if self._verify_boundary_point(depth, cx, cy, mask, cluster_mask):
+                            approach_angle = self._calculate_approach_angle(avg_normal, surface_type)
+                            
+                            points.append(InteractionPoint(
+                                x=cx, y=cy,
+                                score=min(1.0, confidence * (area / 200.0) * 0.7),
+                                interaction_type=surface_type,
+                                confidence=confidence * 0.8,  # Slightly lower confidence for boundary points
+                                approach_angle=approach_angle,
+                                detection_method="surface_boundary",
+                                grasp_width=np.sqrt(area)
+                            ))
+                            
+                            if self.debug:
+                                print(f"DEBUG: Added boundary point at ({cx}, {cy}) for {surface_type.value} surface")
+        
+        return points[:self.cascade_config["max_points"] // 2]  # Limit boundary points
+    
+    def _verify_boundary_point(self, depth: np.ndarray, x: int, y: int, _: np.ndarray, cluster_mask: np.ndarray) -> bool:
+        """Verify that a boundary point represents a valid interaction location."""
+        # Check local depth consistency within the cluster
+        window_size = 15
+        half_win = window_size // 2
+        y_min = max(0, y - half_win)
+        y_max = min(depth.shape[0], y + half_win + 1)
+        x_min = max(0, x - half_win)
+        x_max = min(depth.shape[1], x + half_win + 1)
+        
+        local_cluster = cluster_mask[y_min:y_max, x_min:x_max]
+        local_depth = depth[y_min:y_max, x_min:x_max]
+        
+        if np.sum(local_cluster) < 5:  # Too few cluster pixels
+            return False
+        
+        cluster_depths = local_depth[local_cluster & (local_depth > 0)]
+        if len(cluster_depths) < 3:
+            return False
+        
+        # Check depth consistency
+        depth_std = np.std(cluster_depths)
+        depth_range = np.ptp(cluster_depths)
+        
+        # Boundary points should have reasonable depth consistency
+        return depth_std < 0.03 and depth_range < 0.06  # 3cm std, 6cm range
     
     def _detect_advanced_geometric_features(self, depth: np.ndarray, mask: np.ndarray) -> List[InteractionPoint]:
         """Use PCL or Open3D for advanced geometric feature extraction."""
@@ -880,7 +1180,8 @@ class RobustInteractionDetector:
                             score=0.75,
                             interaction_type=InteractionType.GRASP_EDGE,
                             confidence=0.7,
-                            approach_angle=np.rad2deg(np.arctan2(normal_array[idx, 1], normal_array[idx, 0]))
+                            approach_angle=np.rad2deg(np.arctan2(normal_array[idx, 1], normal_array[idx, 0])),
+                            detection_method="pcl_corner"
                         ))
                     
         elif HAS_OPEN3D:
@@ -914,7 +1215,8 @@ class RobustInteractionDetector:
                             score=0.75,
                             interaction_type=InteractionType.GRASP_EDGE,
                             confidence=0.7,
-                            approach_angle=np.rad2deg(np.arctan2(normals_array[idx, 1], normals_array[idx, 0]))
+                            approach_angle=np.rad2deg(np.arctan2(normals_array[idx, 1], normals_array[idx, 0])),
+                            detection_method="open3d_corner"
                         ))
         
         return points[:self.cascade_config["max_points"]]
@@ -968,7 +1270,8 @@ class RobustInteractionDetector:
                         score=float(score),
                         interaction_type=interaction_type,
                         confidence=float(score),
-                        approach_angle=approach_angle
+                        approach_angle=approach_angle,
+                        detection_method="rgb_guided"
                     ))
         
         # Additional RGB-specific detection for handles on textured backgrounds
@@ -1034,7 +1337,8 @@ class RobustInteractionDetector:
                                     score=0.85,  # High score since this is a specialized detector
                                     interaction_type=InteractionType.HANDLE,
                                     confidence=0.9,
-                                    grasp_width=np.sqrt(area)  # Approximate width based on area
+                                    grasp_width=np.sqrt(area),  # Approximate width based on area
+                                    detection_method="dark_handle"
                                 ))
         
         return points
@@ -1342,6 +1646,104 @@ class RobustInteractionDetector:
             print(f"[DEBUG V2] NMS: Kept {len(keep)} points, filtered {filtered_count} points")
         
         return keep
+    
+    def _apply_center_shift(self, points: List[InteractionPoint], mask: np.ndarray, 
+                           edge_threshold: float, shift_factor: float) -> List[InteractionPoint]:
+        """
+        Apply center shift to move interaction points near object edges toward the center.
+        
+        This helps improve manipulation success by moving points away from unstable edge regions
+        to more robust areas closer to the object's center of mass.
+        
+        Args:
+            points: List of interaction points to potentially shift
+            mask: Binary mask of the object
+            edge_threshold: Distance from edge (in pixels) below which to apply shift
+            shift_factor: Factor controlling how much to shift (0.0 = no shift, 1.0 = full shift to center)
+            
+        Returns:
+            List of interaction points with center shift applied
+        """
+        if not points or shift_factor <= 0.0:
+            return points
+            
+        # Calculate object centroid
+        y_coords, x_coords = np.where(mask)
+        if len(y_coords) == 0:
+            return points
+            
+        centroid_x = float(np.mean(x_coords))
+        centroid_y = float(np.mean(y_coords))
+        
+        if self.debug:
+            print(f"[DEBUG V2] Center shift: Object centroid at ({centroid_x:.1f}, {centroid_y:.1f})")
+            print(f"[DEBUG V2] Center shift: edge_threshold={edge_threshold}, shift_factor={shift_factor}")
+        
+        # Calculate distance from each point to nearest edge
+        # Use distance transform on the mask to get distance to edges
+        distance_transform = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 5)
+        
+        shifted_points = []
+        shift_count = 0
+        
+        for point in points:
+            # Get distance from edge at this point
+            if (0 <= point.y < distance_transform.shape[0] and 
+                0 <= point.x < distance_transform.shape[1]):
+                edge_distance = distance_transform[int(point.y), int(point.x)]
+            else:
+                edge_distance = 0.0
+                
+            # Apply center shift if point is close to edge
+            if edge_distance < edge_threshold:
+                # Calculate vector from point to centroid
+                dx = centroid_x - point.x
+                dy = centroid_y - point.y
+                
+                # Apply shift (move point toward center)
+                shift_amount = shift_factor * (1.0 - edge_distance / edge_threshold)  # Stronger shift for closer to edge
+                
+                new_x = point.x + dx * shift_amount
+                new_y = point.y + dy * shift_amount
+                
+                # Ensure shifted point is still within mask bounds
+                new_x = max(0, min(new_x, mask.shape[1] - 1))
+                new_y = max(0, min(new_y, mask.shape[0] - 1))
+                
+                # Check if shifted position is still within object mask
+                if (0 <= int(new_y) < mask.shape[0] and 
+                    0 <= int(new_x) < mask.shape[1] and 
+                    mask[int(new_y), int(new_x)]):
+                    
+                    # Create new point with shifted position
+                    shifted_point = InteractionPoint(
+                        x=int(new_x),
+                        y=int(new_y),
+                        interaction_type=point.interaction_type,
+                        confidence=point.confidence * 0.95,  # Slightly reduce confidence due to shift
+                        score=point.score,
+                        stability=point.stability,
+                        accessibility=point.accessibility,
+                        detection_method=f"{point.detection_method}+center_shift"
+                    )
+                    shifted_points.append(shifted_point)
+                    shift_count += 1
+                    
+                    if self.debug:
+                        shift_dist = np.sqrt(dx*dx + dy*dy) * shift_amount
+                        print(f"[DEBUG V2] Center shift: Point ({point.x}, {point.y}) -> ({int(new_x)}, {int(new_y)}) "
+                              f"(edge_dist={edge_distance:.1f}, shift_dist={shift_dist:.1f})")
+                else:
+                    # Keep original point if shift would move it outside mask
+                    shifted_points.append(point)
+            else:
+                # Keep original point if not close to edge
+                shifted_points.append(point)
+        
+        if self.debug:
+            print(f"[DEBUG V2] Center shift: Applied to {shift_count}/{len(points)} points")
+        
+        return shifted_points
     
     # Point cloud conversion methods
     

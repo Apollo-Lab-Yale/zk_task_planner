@@ -1,0 +1,85 @@
+{
+  "session_id": "ebcf93e2-88f5-4b96-a171-f754e6fb2fda",
+  "timestamp": "2025-08-27T12:07:41.843816",
+  "natural_language_task": "Test task: open the bottle",
+  "task_decomposition": [
+    "detect_object bottle",
+    "open bottle"
+  ],
+  "skills_generated": [
+    {
+      "command": "detect_object bottle",
+      "skill_name": "detect_object",
+      "parameters": "bottle",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "open bottle",
+      "skill_name": "open",
+      "parameters": "bottle",
+      "status": "ready_for_execution"
+    }
+  ],
+  "llm_responses": {
+    "task_decomposition": "1. detect_object bottle\\n2. open bottle",
+    "execution_mode": "simulation"
+  },
+  "points_of_interest": [
+    {
+      "label": "A",
+      "pixel_coordinates": [
+        300,
+        200
+      ],
+      "normalized_coordinates": [
+        0.46875,
+        0.4166666666666667
+      ],
+      "detection_method": "test_method",
+      "interaction_type": "push",
+      "confidence": 0.95,
+      "score": 0.9,
+      "stability": 0.5,
+      "accessibility": 0.5
+    },
+    {
+      "label": "B",
+      "pixel_coordinates": [
+        350,
+        180
+      ],
+      "normalized_coordinates": [
+        0.546875,
+        0.375
+      ],
+      "detection_method": "test_method",
+      "interaction_type": "twist",
+      "confidence": 0.85,
+      "score": 0.8,
+      "stability": 0.5,
+      "accessibility": 0.5
+    }
+  ],
+  "environment_image_path": "test_task_data/images/ebcf93e2-88f5-4b96-a171-f754e6fb2fda_environment.jpg",
+  "surface_images_paths": [
+    "test_task_data/images/ebcf93e2-88f5-4b96-a171-f754e6fb2fda_surface_bottle_surface.jpg",
+    "test_task_data/images/ebcf93e2-88f5-4b96-a171-f754e6fb2fda_surface_cap_surface.jpg"
+  ],
+  "timing": {
+    "planning_start": 1756310861.8438115,
+    "planning_end": 1756310861.8438356,
+    "inference_start": 1756310861.851058,
+    "inference_end": 1756310861.8510602,
+    "execution_start": 1756310861.851065,
+    "execution_end": 1756310861.8510656
+  },
+  "execution_success": true,
+  "failure_messages": [],
+  "robot_errors": [],
+  "user_success_rating": true,
+  "user_notes": null,
+  "user_explanation": "Test execution completed successfully",
+  "robot_ip": "192.168.1.224",
+  "camera_type": "test_camera",
+  "execution_mode": "simulation"
+}

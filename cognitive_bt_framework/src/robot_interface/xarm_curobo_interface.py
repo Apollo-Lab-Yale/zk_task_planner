@@ -499,7 +499,7 @@ class CuRoboMotionPlanner:
             else:
                 print("Using dynamic camera transform for pose conversion")
                 camera_pose, camera_rotation = self.get_camera_transform()
-            camera_pose[1] += 0.03
+            camera_pose[1] += 0.025
             if debug:
                 print(f"Pose before conversion pose: {position}, {orientation}")
             # Convert input position to homogeneous coordinates
@@ -2227,7 +2227,10 @@ class CuRoboMotionPlanner:
         pose = self.arm.get_position(is_radian=True)
         print(pose)
         x, y, z, r, p, w = pose[1]
-        success = self.arm.set_position(x, y, z + distance * 1000, r, p, w, is_radian=True, wait=True, timeout=10.0) == 0
+        success = True
+        print(f"------------------ z: {z}")
+        if z < 500:
+            success = self.arm.set_position(x, y, z + distance * 1000, r, p, w, is_radian=True, wait=True, timeout=10.0) == 0
         
         if success:
             success = self.arm.set_servo_angle(servo_id=None, angle=self.initial_position, is_radian=True, wait=True) == 0
@@ -2631,7 +2634,7 @@ class CuRoboMotionPlanner:
         Returns:
             bool: True if successful, False otherwise
         """
-        return self.set_gripper(100.0, wait, timeout)
+        return self.set_gripper(1000.0, wait, timeout)
     
     def execute_pick_and_place(
         self, 
@@ -2815,7 +2818,7 @@ class CuRoboMotionPlanner:
         execute=False,
         speed_factor=1.0,
         pivot_point=None,       # Legacy: [x, y, z] coordinates of pivot point
-        arc_segments=10,        # Number of segments for arc motion
+        arc_segments=5,        # Number of segments for arc motion
         hinge_location=None     # New: hinge location ('top', 'bottom', 'left', 'right')
     ):
         """Plan a push or pull movement along a direction vector
@@ -4161,6 +4164,7 @@ class CuRoboMotionPlanner:
                 return False
             
             pivot_to_grasp = current_pos_flat - pivot_point_flat
+            pivot_to_grasp *= 0.9
             actual_radius = np.linalg.norm(pivot_to_grasp)
             
             print(f"Pivot point: {pivot_point_flat}")
@@ -4589,7 +4593,7 @@ class CuRoboMotionPlanner:
                 # For dynamic transform, use a simple approximation
                 # This is not perfect but should work for the search radius constraint
                 camera_pose, camera_rotation = self.get_camera_transform()
-                # camera_pose[1] += 0.03  # Match the offset in convert_cam_pose_to_base
+                camera_pose[1] -= 0.015  # Match the offset in convert_cam_pose_to_base
                 relative_pos = np.array(target_position_robot) - camera_pose
                 camera_position = camera_rotation.inv().apply(relative_pos)
             

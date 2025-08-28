@@ -125,18 +125,59 @@ class SkillHandler:
             norm_x = pixel_x / image.shape[1]
             norm_y = pixel_y / image.shape[0]
             
+            # Extract additional information from roi_results if available
+            detection_method = "unknown"
+            interaction_type = "unknown"
+            confidence = 1.0
+            score = roi_results.get('scores', [1.0] * len(roi_results['pixel_coords']))[i]
+            stability = 0.5
+            accessibility = 0.5
+            
+            # Try to get detection method and other metadata
+            if 'detection_methods' in roi_results and i < len(roi_results['detection_methods']):
+                detection_method = roi_results['detection_methods'][i]
+            elif 'detection_method' in roi_results and i < len(roi_results['detection_method']):
+                detection_method = roi_results['detection_method'][i]
+            
+            if 'interaction_types' in roi_results and i < len(roi_results['interaction_types']):
+                interaction_type = roi_results['interaction_types'][i]
+            elif 'types' in roi_results and i < len(roi_results['types']):
+                interaction_type = roi_results['types'][i]
+            
+            if 'confidences' in roi_results and i < len(roi_results['confidences']):
+                confidence = roi_results['confidences'][i]
+            
+            if 'interaction_points' in roi_results and i < len(roi_results['interaction_points']):
+                ip = roi_results['interaction_points'][i]
+                if hasattr(ip, 'detection_method'):
+                    detection_method = ip.detection_method
+                if hasattr(ip, 'interaction_type'):
+                    interaction_type = ip.interaction_type.value if hasattr(ip.interaction_type, 'value') else str(ip.interaction_type)
+                if hasattr(ip, 'confidence'):
+                    confidence = ip.confidence
+                if hasattr(ip, 'stability'):
+                    stability = ip.stability
+                if hasattr(ip, 'accessibility'):
+                    accessibility = ip.accessibility
+            
             # Store in dictionary
             points_of_interest[label] = PointOfInterest(
                 label=label,
                 position=(norm_x, norm_y),
-                description=f"Interest point {label} at normalized position {(norm_x, norm_y)}",
-                pixel_coords=(pixel_x,pixel_y)
+                description=f"Interest point {label} detected by {detection_method} at normalized position {(norm_x, norm_y)}",
+                pixel_coords=(pixel_x,pixel_y),
+                detection_method=detection_method,
+                interaction_type=interaction_type,
+                confidence=confidence,
+                score=score,
+                stability=stability,
+                accessibility=accessibility
             )
         
         # DEBUG: Show points being passed to skill generator
         print(f"DEBUG - Points passed to skill generator:")
         for label, point in points_of_interest.items():
-            print(f"  {label}: normalized=({point.position[0]:.4f}, {point.position[1]:.4f}), pixel_coords={point.pixel_coords}")
+            print(f"  {label}: normalized=({point.position[0]:.4f}, {point.position[1]:.4f}), pixel_coords={point.pixel_coords}, method={point.detection_method}, type={point.interaction_type}, conf={point.confidence:.3f}, score={point.score:.3f}")
         
         # Get or generate skill using SkillGenerator
         # skill = await self.skill_generator.find_similar_skill(

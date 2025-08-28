@@ -1,0 +1,46 @@
+{
+  "session_id": "db6a8bd1-3c03-45cd-a0e0-fff8efca3c19",
+  "timestamp": "2025-08-27T13:57:05.804698",
+  "natural_language_task": "open the right cabinet",
+  "task_decomposition": [
+    "detect_object right cabinet",
+    "open right cabinet"
+  ],
+  "skills_generated": [
+    {
+      "command": "detect_object right cabinet",
+      "skill_name": "detect_object",
+      "parameters": "right cabinet",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "open right cabinet",
+      "skill_name": "open",
+      "parameters": "right cabinet",
+      "status": "ready_for_execution"
+    }
+  ],
+  "llm_responses": {
+    "execution_mode": "real_robot"
+  },
+  "points_of_interest": [],
+  "environment_image_path": "task_execution_data/images/db6a8bd1-3c03-45cd-a0e0-fff8efca3c19_environment.jpg",
+  "surface_images_paths": [],
+  "timing": {
+    "planning_start": 1756317425.804694,
+    "planning_end": 1756317429.8358684,
+    "inference_start": 1756317429.8359063,
+    "inference_end": 1756317429.8359663,
+    "execution_start": 1756317429.835983,
+    "execution_end": 1756317581.3365276
+  },
+  "execution_success": true,
+  "failure_messages": [],
+  "robot_errors": [],
+  "user_success_rating": true,
+  "user_notes": null,
+  "user_explanation": "No additional details provided.",
+  "robot_ip": "192.168.1.224",
+  "camera_type": "realsense",
+  "execution_mode": "real"
+}

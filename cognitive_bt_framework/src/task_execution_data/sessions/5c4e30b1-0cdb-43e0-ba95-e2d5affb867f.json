@@ -1,0 +1,61 @@
+{
+  "session_id": "5c4e30b1-0cdb-43e0-ba95-e2d5affb867f",
+  "timestamp": "2025-08-27T14:17:08.695039",
+  "natural_language_task": "open the right cabinet",
+  "task_decomposition": [
+    "detect_object right cabinet",
+    "open right cabinet"
+  ],
+  "skills_generated": [
+    {
+      "command": "detect_object right cabinet",
+      "skill_name": "detect_object",
+      "parameters": "right cabinet",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "open right cabinet",
+      "skill_name": "open",
+      "parameters": "right cabinet",
+      "status": "ready_for_execution"
+    }
+  ],
+  "llm_responses": {
+    "execution_mode": "real_robot"
+  },
+  "points_of_interest": [],
+  "environment_image_path": "task_execution_data/images/5c4e30b1-0cdb-43e0-ba95-e2d5affb867f_environment.jpg",
+  "surface_images_paths": [],
+  "skill_generation_image_paths": [
+    "stored_skills/images/depth_image_open right cabinet_right cabinet_1756318653_100451.png",
+    "stored_skills/images/surface_open right cabinet_right cabinet_1756318653_100451.png",
+    "stored_skills/images/points_open right cabinet_right cabinet_1756318653_100451.png",
+    "stored_skills/images/mask_open right cabinet_right cabinet_1756318653_100451.png",
+    "stored_skills/images/open right cabinet_right cabinet_1756318653_100451.png"
+  ],
+  "stored_skill_paths": [
+    "stored_skills/open right cabinet_right cabinet_generic_5c2ee4.json"
+  ],
+  "skill_image_id": "open right cabinet_right cabinet_1756318653_100451",
+  "timing": {
+    "planning_start": 1756318628.695032,
+    "planning_end": 1756318631.905566,
+    "inference_start": 1756318631.9056156,
+    "inference_end": 1756318631.9056869,
+    "execution_start": 1756318631.905699,
+    "execution_end": 1756318750.3476923
+  },
+  "execution_success": false,
+  "failure_messages": [
+    "Failed to execute action 5 of skill 2: retract_gripper"
+  ],
+  "robot_errors": [
+    "Failed to execute action 5 of skill 2: retract_gripper"
+  ],
+  "user_success_rating": true,
+  "user_notes": null,
+  "user_explanation": "got the cabinet open but failed to open the gripper at the end so had to hit estop",
+  "robot_ip": "192.168.1.224",
+  "camera_type": "realsense",
+  "execution_mode": "real"
+}
