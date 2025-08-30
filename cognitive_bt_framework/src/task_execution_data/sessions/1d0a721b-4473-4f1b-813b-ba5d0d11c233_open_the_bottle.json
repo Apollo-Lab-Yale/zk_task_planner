@@ -1,0 +1,57 @@
+{
+  "session_id": "1d0a721b-4473-4f1b-813b-ba5d0d11c233",
+  "timestamp": "2025-08-29T09:58:28.612001",
+  "natural_language_task": "open the bottle",
+  "task_decomposition": [
+    "detect_object bottle",
+    "open bottle"
+  ],
+  "skills_generated": [
+    {
+      "command": "detect_object bottle",
+      "skill_name": "detect_object",
+      "parameters": "bottle",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "open bottle",
+      "skill_name": "open",
+      "parameters": "bottle",
+      "status": "ready_for_execution"
+    }
+  ],
+  "llm_responses": {
+    "execution_mode": "real_robot"
+  },
+  "points_of_interest": [],
+  "environment_image_path": "task_execution_data/images/1d0a721b-4473-4f1b-813b-ba5d0d11c233_environment.jpg",
+  "surface_images_paths": [],
+  "skill_generation_image_paths": [
+    "stored_skills/images/depth_image_open bottle_bottle_1756475924_ec5d39.png",
+    "stored_skills/images/surface_open bottle_bottle_1756475924_ec5d39.png",
+    "stored_skills/images/points_open bottle_bottle_1756475924_ec5d39.png",
+    "stored_skills/images/mask_open bottle_bottle_1756475924_ec5d39.png",
+    "stored_skills/images/open bottle_bottle_1756475924_ec5d39.png"
+  ],
+  "stored_skill_paths": [
+    "stored_skills/open bottle_bottle_generic_27a78d.json"
+  ],
+  "skill_image_id": "open bottle_bottle_1756475924_ec5d39",
+  "timing": {
+    "planning_start": 1756475908.6119962,
+    "planning_end": 1756475914.5171351,
+    "inference_start": 1756475914.5171692,
+    "inference_end": 1756475914.5172405,
+    "execution_start": 1756475914.5172513,
+    "execution_end": 1756476029.91847
+  },
+  "execution_success": true,
+  "failure_messages": [],
+  "robot_errors": [],
+  "user_success_rating": true,
+  "user_notes": null,
+  "user_explanation": "No additional details provided.",
+  "robot_ip": "192.168.1.224",
+  "camera_type": "realsense",
+  "execution_mode": "real"
+}

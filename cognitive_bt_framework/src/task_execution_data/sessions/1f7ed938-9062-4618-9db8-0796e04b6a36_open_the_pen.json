@@ -1,0 +1,57 @@
+{
+  "session_id": "1f7ed938-9062-4618-9db8-0796e04b6a36",
+  "timestamp": "2025-08-28T15:50:45.956369",
+  "natural_language_task": "open the pen",
+  "task_decomposition": [
+    "detect_object pen",
+    "open pen"
+  ],
+  "skills_generated": [
+    {
+      "command": "detect_object pen",
+      "skill_name": "detect_object",
+      "parameters": "pen",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "open pen",
+      "skill_name": "open",
+      "parameters": "pen",
+      "status": "ready_for_execution"
+    }
+  ],
+  "llm_responses": {
+    "execution_mode": "real_robot"
+  },
+  "points_of_interest": [],
+  "environment_image_path": "task_execution_data/images/1f7ed938-9062-4618-9db8-0796e04b6a36_environment.jpg",
+  "surface_images_paths": [],
+  "skill_generation_image_paths": [
+    "stored_skills/images/depth_image_open pen_pen_1756410660_e04fb3.png",
+    "stored_skills/images/surface_open pen_pen_1756410660_e04fb3.png",
+    "stored_skills/images/points_open pen_pen_1756410660_e04fb3.png",
+    "stored_skills/images/mask_open pen_pen_1756410660_e04fb3.png",
+    "stored_skills/images/open pen_pen_1756410660_e04fb3.png"
+  ],
+  "stored_skill_paths": [
+    "stored_skills/open pen_pen_generic_ce490e.json"
+  ],
+  "skill_image_id": "open pen_pen_1756410660_e04fb3",
+  "timing": {
+    "planning_start": 1756410645.9563644,
+    "planning_end": 1756410649.607724,
+    "inference_start": 1756410649.6077547,
+    "inference_end": 1756410649.6078033,
+    "execution_start": 1756410649.6078107,
+    "execution_end": 1756410717.0130138
+  },
+  "execution_success": true,
+  "failure_messages": [],
+  "robot_errors": [],
+  "user_success_rating": false,
+  "user_notes": null,
+  "user_explanation": "failed to open the marker maybe not a good enough grasp slipped out of gripper",
+  "robot_ip": "192.168.1.224",
+  "camera_type": "realsense",
+  "execution_mode": "real"
+}

@@ -1,0 +1,57 @@
+{
+  "session_id": "82c68ff4-b689-4d29-a961-cd8437f22250",
+  "timestamp": "2025-08-28T15:25:52.958873",
+  "natural_language_task": "open the pen",
+  "task_decomposition": [
+    "detect_object pen",
+    "open pen"
+  ],
+  "skills_generated": [
+    {
+      "command": "detect_object pen",
+      "skill_name": "detect_object",
+      "parameters": "pen",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "open pen",
+      "skill_name": "open",
+      "parameters": "pen",
+      "status": "ready_for_execution"
+    }
+  ],
+  "llm_responses": {
+    "execution_mode": "real_robot"
+  },
+  "points_of_interest": [],
+  "environment_image_path": "task_execution_data/images/82c68ff4-b689-4d29-a961-cd8437f22250_environment.jpg",
+  "surface_images_paths": [],
+  "skill_generation_image_paths": [
+    "stored_skills/images/depth_image_open pen_pen_1756409173_a1a61b.png",
+    "stored_skills/images/surface_open pen_pen_1756409173_a1a61b.png",
+    "stored_skills/images/points_open pen_pen_1756409173_a1a61b.png",
+    "stored_skills/images/mask_open pen_pen_1756409173_a1a61b.png",
+    "stored_skills/images/open pen_pen_1756409173_a1a61b.png"
+  ],
+  "stored_skill_paths": [
+    "stored_skills/open pen_pen_generic_3ef664.json"
+  ],
+  "skill_image_id": "open pen_pen_1756409173_a1a61b",
+  "timing": {
+    "planning_start": 1756409152.9588685,
+    "planning_end": 1756409162.1331818,
+    "inference_start": 1756409162.1332052,
+    "inference_end": 1756409162.1332679,
+    "execution_start": 1756409162.1332772,
+    "execution_end": 1756409283.8446932
+  },
+  "execution_success": true,
+  "failure_messages": [],
+  "robot_errors": [],
+  "user_success_rating": false,
+  "user_notes": null,
+  "user_explanation": "open with twist with another bad initial grasp, maintained grasp durring twist but failed to actually remove the cap after retract",
+  "robot_ip": "192.168.1.224",
+  "camera_type": "realsense",
+  "execution_mode": "real"
+}

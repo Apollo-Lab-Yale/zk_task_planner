@@ -1,0 +1,75 @@
+{
+  "session_id": "fbcf9459-8fed-4da8-8a04-faf4c618ea28",
+  "timestamp": "2025-08-29T14:26:28.160549",
+  "natural_language_task": "open the cabinet on the right and take out the towel",
+  "task_decomposition": [
+    "detect_object right cabinet",
+    "open right cabinet",
+    "detect_object towel",
+    "pickup towel"
+  ],
+  "skills_generated": [
+    {
+      "command": "detect_object right cabinet",
+      "skill_name": "detect_object",
+      "parameters": "right cabinet",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "open right cabinet",
+      "skill_name": "open",
+      "parameters": "right cabinet",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "detect_object towel",
+      "skill_name": "detect_object",
+      "parameters": "towel",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "pickup towel",
+      "skill_name": "pickup",
+      "parameters": "towel",
+      "status": "ready_for_execution"
+    }
+  ],
+  "llm_responses": {
+    "execution_mode": "real_robot"
+  },
+  "points_of_interest": [],
+  "environment_image_path": "task_execution_data/images/fbcf9459-8fed-4da8-8a04-faf4c618ea28_environment.jpg",
+  "surface_images_paths": [],
+  "skill_generation_image_paths": [
+    "stored_skills/images/depth_image_pickup towel_towel_1756492118_49de35.png",
+    "stored_skills/images/surface_pickup towel_towel_1756492118_49de35.png",
+    "stored_skills/images/points_pickup towel_towel_1756492118_49de35.png",
+    "stored_skills/images/mask_pickup towel_towel_1756492118_49de35.png",
+    "stored_skills/images/pickup towel_towel_1756492118_49de35.png"
+  ],
+  "stored_skill_paths": [
+    "stored_skills/pickup towel_towel_generic_026073.json"
+  ],
+  "skill_image_id": "pickup towel_towel_1756492118_49de35",
+  "timing": {
+    "planning_start": 1756491988.1605425,
+    "planning_end": 1756491996.0399725,
+    "inference_start": 1756491996.0400066,
+    "inference_end": 1756491996.0400531,
+    "execution_start": 1756491996.0400655,
+    "execution_end": 1756492146.6207519
+  },
+  "execution_success": false,
+  "failure_messages": [
+    "Failed to execute action 1 of skill 4: move_gripper_to_pose"
+  ],
+  "robot_errors": [
+    "Failed to execute action 1 of skill 4: move_gripper_to_pose"
+  ],
+  "user_success_rating": false,
+  "user_notes": null,
+  "user_explanation": "tried to use a top down grasp for the towel leading to an IK failure",
+  "robot_ip": "192.168.1.224",
+  "camera_type": "realsense",
+  "execution_mode": "real"
+}

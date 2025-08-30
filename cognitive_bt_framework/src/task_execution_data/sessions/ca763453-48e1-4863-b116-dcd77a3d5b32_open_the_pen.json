@@ -1,0 +1,57 @@
+{
+  "session_id": "ca763453-48e1-4863-b116-dcd77a3d5b32",
+  "timestamp": "2025-08-28T15:32:46.352095",
+  "natural_language_task": "open the pen",
+  "task_decomposition": [
+    "detect_object pen",
+    "open pen"
+  ],
+  "skills_generated": [
+    {
+      "command": "detect_object pen",
+      "skill_name": "detect_object",
+      "parameters": "pen",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "open pen",
+      "skill_name": "open",
+      "parameters": "pen",
+      "status": "ready_for_execution"
+    }
+  ],
+  "llm_responses": {
+    "execution_mode": "real_robot"
+  },
+  "points_of_interest": [],
+  "environment_image_path": "task_execution_data/images/ca763453-48e1-4863-b116-dcd77a3d5b32_environment.jpg",
+  "surface_images_paths": [],
+  "skill_generation_image_paths": [
+    "stored_skills/images/depth_image_open pen_pen_1756409581_424640.png",
+    "stored_skills/images/surface_open pen_pen_1756409581_424640.png",
+    "stored_skills/images/points_open pen_pen_1756409581_424640.png",
+    "stored_skills/images/mask_open pen_pen_1756409581_424640.png",
+    "stored_skills/images/open pen_pen_1756409581_424640.png"
+  ],
+  "stored_skill_paths": [
+    "stored_skills/open pen_pen_generic_39a2f4.json"
+  ],
+  "skill_image_id": "open pen_pen_1756409581_424640",
+  "timing": {
+    "planning_start": 1756409566.3520906,
+    "planning_end": 1756409570.6900704,
+    "inference_start": 1756409570.690091,
+    "inference_end": 1756409570.690121,
+    "execution_start": 1756409570.6901262,
+    "execution_end": 1756409681.9010665
+  },
+  "execution_success": true,
+  "failure_messages": [],
+  "robot_errors": [],
+  "user_success_rating": true,
+  "user_notes": null,
+  "user_explanation": "No additional details provided.",
+  "robot_ip": "192.168.1.224",
+  "camera_type": "realsense",
+  "execution_mode": "real"
+}

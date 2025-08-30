@@ -1,0 +1,75 @@
+{
+  "session_id": "1235950e-64b3-4056-86ec-c41bd098e416",
+  "timestamp": "2025-08-29T11:09:48.634561",
+  "natural_language_task": "open the bottle and put the bottle cap in the paper bag",
+  "task_decomposition": [
+    "detect_object bottle",
+    "detect_object paper bag",
+    "open bottle",
+    "place bottle cap,paper bag"
+  ],
+  "skills_generated": [
+    {
+      "command": "detect_object bottle",
+      "skill_name": "detect_object",
+      "parameters": "bottle",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "detect_object paper bag",
+      "skill_name": "detect_object",
+      "parameters": "paper bag",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "open bottle",
+      "skill_name": "open",
+      "parameters": "bottle",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "place bottle cap,paper bag",
+      "skill_name": "place",
+      "parameters": "bottle cap,paper bag",
+      "status": "ready_for_execution"
+    }
+  ],
+  "llm_responses": {
+    "execution_mode": "real_robot"
+  },
+  "points_of_interest": [],
+  "environment_image_path": "task_execution_data/images/1235950e-64b3-4056-86ec-c41bd098e416_environment.jpg",
+  "surface_images_paths": [],
+  "skill_generation_image_paths": [
+    "stored_skills/images/depth_image_place bottle cap on paper bag_paper bag_1756480290_ef407a.png",
+    "stored_skills/images/surface_place bottle cap on paper bag_paper bag_1756480290_ef407a.png",
+    "stored_skills/images/points_place bottle cap on paper bag_paper bag_1756480290_ef407a.png",
+    "stored_skills/images/mask_place bottle cap on paper bag_paper bag_1756480290_ef407a.png",
+    "stored_skills/images/place bottle cap on paper bag_paper bag_1756480290_ef407a.png"
+  ],
+  "stored_skill_paths": [
+    "stored_skills/place bottle cap on paper bag_paper bag_generic_c3c549.json"
+  ],
+  "skill_image_id": "place bottle cap on paper bag_paper bag_1756480290_ef407a",
+  "timing": {
+    "planning_start": 1756480188.6345544,
+    "planning_end": 1756480193.2431302,
+    "inference_start": 1756480193.2431521,
+    "inference_end": 1756480193.2431855,
+    "execution_start": 1756480193.2431905,
+    "execution_end": 1756480390.8172321
+  },
+  "execution_success": false,
+  "failure_messages": [
+    "Failed to execute action 3 of skill 4: retract_gripper"
+  ],
+  "robot_errors": [
+    "Failed to execute action 3 of skill 4: retract_gripper"
+  ],
+  "user_success_rating": false,
+  "user_notes": null,
+  "user_explanation": "bad place position for cap, hit a joint limit/ kinematic failure",
+  "robot_ip": "192.168.1.224",
+  "camera_type": "realsense",
+  "execution_mode": "real"
+}

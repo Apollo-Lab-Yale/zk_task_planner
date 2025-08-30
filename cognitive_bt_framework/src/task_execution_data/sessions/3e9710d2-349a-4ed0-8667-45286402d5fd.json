@@ -1,0 +1,57 @@
+{
+  "session_id": "3e9710d2-349a-4ed0-8667-45286402d5fd",
+  "timestamp": "2025-08-28T15:13:07.487341",
+  "natural_language_task": "open the pen",
+  "task_decomposition": [
+    "detect_object pen",
+    "open pen"
+  ],
+  "skills_generated": [
+    {
+      "command": "detect_object pen",
+      "skill_name": "detect_object",
+      "parameters": "pen",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "open pen",
+      "skill_name": "open",
+      "parameters": "pen",
+      "status": "ready_for_execution"
+    }
+  ],
+  "llm_responses": {
+    "execution_mode": "real_robot"
+  },
+  "points_of_interest": [],
+  "environment_image_path": "task_execution_data/images/3e9710d2-349a-4ed0-8667-45286402d5fd_environment.jpg",
+  "surface_images_paths": [],
+  "skill_generation_image_paths": [
+    "stored_skills/images/depth_image_open pen_pen_1756408410_931326.png",
+    "stored_skills/images/surface_open pen_pen_1756408410_931326.png",
+    "stored_skills/images/points_open pen_pen_1756408410_931326.png",
+    "stored_skills/images/mask_open pen_pen_1756408410_931326.png",
+    "stored_skills/images/open pen_pen_1756408410_931326.png"
+  ],
+  "stored_skill_paths": [
+    "stored_skills/open pen_pen_generic_b7bc80.json"
+  ],
+  "skill_image_id": "open pen_pen_1756408410_931326",
+  "timing": {
+    "planning_start": 1756408387.4873364,
+    "planning_end": 1756408398.7976086,
+    "inference_start": 1756408398.797631,
+    "inference_end": 1756408398.7976818,
+    "execution_start": 1756408398.7976882,
+    "execution_end": 1756408512.9591641
+  },
+  "execution_success": true,
+  "failure_messages": [],
+  "robot_errors": [],
+  "user_success_rating": true,
+  "user_notes": null,
+  "user_explanation": "twist component of open skill, nearly lost grip because the cap wasn't perfectly vertical in gripper but barely kept it",
+  "robot_ip": "192.168.1.224",
+  "camera_type": "realsense",
+  "execution_mode": "real"
+}

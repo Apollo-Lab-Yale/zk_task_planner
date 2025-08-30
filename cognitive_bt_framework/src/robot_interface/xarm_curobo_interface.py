@@ -454,7 +454,7 @@ class CuRoboMotionPlanner:
             else:
                 raise ValueError(f"Unexpected quaternion shape: {camera_quat_raw.shape}")
             
-            print(f"Debug - Final camera_quat shape: {camera_quat.shape}, value: {camera_quat}")
+            # print(f"Debug - Final camera_quat shape: {camera_quat.shape}, value: {camera_quat}")
             
             # Ensure we have exactly 4 elements for quaternion
             if camera_quat.shape[0] != 4:
@@ -464,14 +464,14 @@ class CuRoboMotionPlanner:
             camera_quat_copy = copy.deepcopy(camera_quat)
             camera_quat = np.array([camera_quat_raw[1], camera_quat_raw[2], camera_quat_raw[3], camera_quat_raw[0]])
             
-            print(f"Debug - joint state: {config}")
-            print(f"Debug - camera_pose shape: {camera_pose.shape}, value: {list(camera_pose)}")
-            print(f"Debug - camera_quat_raw shape: {camera_quat.shape}")
-            print(f"Debug - camera_quat_raw: {list(camera_quat)}")
-            print(f"Debug - camera_quat_raw norm: {np.linalg.norm(list(camera_quat_raw))}")
-            print()
-            print()
-            print()
+            # print(f"Debug - joint state: {config}")
+            # print(f"Debug - camera_pose shape: {camera_pose.shape}, value: {list(camera_pose)}")
+            # print(f"Debug - camera_quat_raw shape: {camera_quat.shape}")
+            # print(f"Debug - camera_quat_raw: {list(camera_quat)}")
+            # print(f"Debug - camera_quat_raw norm: {np.linalg.norm(list(camera_quat_raw))}")
+            # print()
+            # print()
+            # print()
             
             camera_rotation = Rotation.from_quat(camera_quat)
             return camera_pose, camera_rotation
@@ -492,24 +492,24 @@ class CuRoboMotionPlanner:
         try:
             # Use static camera transform if available
             if self.static_camera_tf is not None:
-                if debug:
-                    print("Using static camera transform for pose conversion")
+                # if debug:
+                #     print("Using static camera transform for pose conversion")
                 camera_pose = self.static_camera_position
                 camera_rotation = self.static_camera_rotation
             else:
-                print("Using dynamic camera transform for pose conversion")
+                # print("Using dynamic camera transform for pose conversion")
                 camera_pose, camera_rotation = self.get_camera_transform()
             camera_pose[1] += 0.025
-            if debug:
-                print(f"Pose before conversion pose: {position}, {orientation}")
+            # if debug:
+            #     print(f"Pose before conversion pose: {position}, {orientation}")
             # Convert input position to homogeneous coordinates
             if isinstance(position, (list, tuple)):
                 position = np.array(position)
             
             # Transform position to base frame
             transformed_position = camera_rotation.apply(position)
-            if debug:
-                    print(f"Rotated pose: {transformed_position}")
+            # if debug:
+            #         print(f"Rotated pose: {transformed_position}")
             
             # Apply translation
             if self.static_camera_tf is not None and do_translation:
@@ -1657,11 +1657,11 @@ class CuRoboMotionPlanner:
             # Apply surface-based TCP adjustment in robot frame if requested
             print(f"Surface adjustment conditions: adjust_tcp_for_surface={adjust_tcp_for_surface}, "
                   f"depth_image_available={depth_image is not None}, is_camera_frame={is_camera_frame}")
-            if adjust_tcp_for_surface and depth_image is not None and is_camera_frame:
+            if adjust_tcp_for_surface and depth_image is not None and is_camera_frame and not is_place:
                 print("Applying surface-based TCP adjustment in robot frame...")
-                adjusted_position = target_position#self._adjust_tcp_for_surface_robot_frame(
-                #     target_position, depth_image, object_mask, tcp_standoff_m, search_radius_m
-                # )
+                adjusted_position = self._adjust_tcp_for_surface_robot_frame(
+                     target_position, depth_image, object_mask, tcp_standoff_m, search_radius_m
+                )
                 if adjusted_position is not None:
                     target_position = adjusted_position
                     print(f"TCP adjusted position: {target_position}")
@@ -1671,7 +1671,7 @@ class CuRoboMotionPlanner:
                 print("Surface adjustment skipped - conditions not met")
             
             if is_place:
-                target_position[2] += 0.2
+                target_position[2] += 0.1
                 
             if type(target_orientation) is not tuple and type(target_orientation[0]) is not float:
                 for i in range(len(target_orientation[0])):
@@ -4650,6 +4650,11 @@ class CuRoboMotionPlanner:
             valid_depths = depth_image > 100  # Valid depth values
             surface_region = valid_depths & search_mask
             
+            # Apply object mask to further constrain the region if provided
+            if object_mask is not None:
+                surface_region = surface_region & object_mask
+                print(f"Applied object mask to constrain surface region")
+            
             if not np.any(surface_region):
                 print("No valid surface points found in search region")
                 return None
@@ -4660,25 +4665,29 @@ class CuRoboMotionPlanner:
                 print("Insufficient surface points for centering")
                 return None
                 
-            # Convert all surface points to robot frame to find highest Z coordinate
-            surface_points_robot = []
+            # Convert masked surface points to robot frame to find highest Z coordinate
             surface_y_coords, surface_x_coords = surface_coords
-            surface_depths = depth_image[surface_region] / 1000.0  # Convert mm to m
             
-            # Convert each surface point to robot frame
-            for i in range(len(surface_y_coords)):
-                pixel_y, pixel_x = surface_y_coords[i], surface_x_coords[i]
-                depth = depth_image[pixel_y, pixel_x] / 1000.0
-                
-                # Convert to camera 3D coordinates
-                cam_x = (pixel_x - ppx) * depth / fx
-                cam_y = (pixel_y - ppy) * depth / fy
-                cam_z = depth
-                
-                # Convert to robot frame
-                robot_point = self.convert_cam_pose_to_base([cam_x, cam_y, cam_z], [0, 1, 0, 0], debug=False)
-                if robot_point is not None and len(robot_point) > 0:
-                    surface_points_robot.append(robot_point[0])
+            # Prepare camera 3D coordinates for all points at once
+            depths = depth_image[surface_y_coords, surface_x_coords] / 1000.0  # Convert mm to m
+            cam_x_coords = (surface_x_coords - ppx) * depths / fx
+            cam_y_coords = (surface_y_coords - ppy) * depths / fy
+            cam_z_coords = depths
+            
+            # Convert all points to robot frame in parallel using vectorized operations
+            from concurrent.futures import ThreadPoolExecutor
+            import functools
+            
+            def convert_single_point(i):
+                cam_pos = [cam_x_coords[i], cam_y_coords[i], cam_z_coords[i]]
+                robot_point = self.convert_cam_pose_to_base(cam_pos, [0, 1, 0, 0], debug=False)
+                return robot_point[0] if robot_point is not None and len(robot_point) > 0 else None
+            
+            # Use ThreadPoolExecutor for parallel conversion
+            surface_points_robot = []
+            with ThreadPoolExecutor(max_workers=min(8, len(surface_y_coords))) as executor:
+                results = list(executor.map(convert_single_point, range(len(surface_y_coords))))
+                surface_points_robot = [point for point in results if point is not None]
             
             if not surface_points_robot:
                 print("Failed to convert any surface points to robot frame")

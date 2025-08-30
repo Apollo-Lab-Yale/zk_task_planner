@@ -1234,6 +1234,7 @@ class SkillGenerator:
                     target_object: str,
                     object_info: Optional[ObjectInfo] = None,
                     executed_skills: List = None,
+                    task_context: str = None,
                     ) -> Optional[Skill]:
         """
         Generate a new skill using the LLM interface based on image input with labeled points and surfaces
@@ -1424,8 +1425,10 @@ Only select interaction points within the segmented region.
                 "content": f"""You are a robotic task planner with semantic-geometric understanding for automated assistance.
 
                 CONTEXT: This is for robotic task automation to assist with everyday objects and activities.
+                {f"FULL TASK CONTEXT: {task_context}" if task_context else ""}
 
                 Your task is to generate a complete, structured skill definition for performing **{abstract_action}** on a **{target_object}**, using only the provided visual inputs.
+                {f"This skill is part of the larger task: '{task_context}'" if task_context else ""}
                 
                 --- EXECUTED SKILLS CONTEXT ---
                 {self._format_executed_skills_context(executed_skills or [])}
@@ -1509,20 +1512,16 @@ Only select interaction points within the segmented region.
                 TOP-DOWN GRASP (is_top_down_grasp=True):
                 • Gripper Z-axis aligns with GLOBAL Z-axis (vertical)
                 • twist('clockwise') → Rotates about GLOBAL Z-axis (vertical rotation)
-                • Used for: turning bottle caps, knobs, lids, handles viewed from above
-                • Example: Opening a jar lid requires top-down grasp + clockwise twist
-                
+               
                 SIDE GRASP (is_side_grasp=True):
                 • Gripper Z-axis aligns with GLOBAL X-axis (horizontal, left-right)
                 • twist('clockwise') → Rotates about GLOBAL X-axis (roll rotation)
-                • Used for: turning door handles, levers, switches on vertical surfaces
-                • Example: Door handle requires side grasp + twist to rotate handle about its shaft
-                
+            
                 GRASP PLANNING FOR TWIST OPERATIONS:
                 • IDENTIFY the intended rotation axis of the object (what axis should it spin around?)
                 • CHOOSE the grasp type that aligns the gripper Z-axis with that rotation axis:
-                  - Object rotates vertically (like bottle cap) → use TOP-DOWN grasp
-                  - Object rotates horizontally (like door handle) → use SIDE grasp
+                  - Object rotates vertically → use TOP-DOWN grasp
+                  - Object rotates horizontally  → use SIDE grasp
                 • ENSURE the twist direction matches the desired object motion
                 • CONSIDER the object's physical constraints and threading direction
 
@@ -1535,20 +1534,14 @@ Only select interaction points within the segmented region.
                 • Use push() with is_button=True for button activation
                 • Common button locations: front panel, side panel, top panel
                 • After button press, object may automatically open or unlock for manual opening
-                
-                OPENING STRATEGY SELECTION:
-                • Physical handles/knobs: Use traditional pull/twist mechanisms
-                • Electronic devices: Look for buttons, displays, or touch areas first
-                • Combination devices: May require button press followed by manual opening
-                • Assess the object type and choose appropriate opening method
+            
 
                 --- CRITICAL RULES (IN ORDER OF IMPORTANCE) ---
                 
                 ⚠️ CRITICAL MISTAKES TO AVOID:
-                ✗ Circles "near" or "aligned with" handles (must PHYSICALLY OVERLAP)
+                ✗ Circles "near" or "aligned with" interaction points (must PHYSICALLY OVERLAP)
                 ✗ Using line intersections or label locations instead of colored circles
                 ✗ Selecting points on adjacent objects instead of target object
-                ✗ Choosing same edge as handle for hinge location (should be opposite)
 
                 1. POINT SELECTION REQUIREMENTS:
                 ✓ Use ONLY colored circles with black/white outlines as interaction points
@@ -1565,16 +1558,31 @@ Only select interaction points within the segmented region.
                 ✓ Choose handles, buttons, knobs with clear function
                 ✗ AVOID decorative circles or mounting hardware
 
-                4. SPATIAL RELATIONSHIPS:
-                ✓ Pivot points must be opposite from grasp points
-                ✓ Verify mechanical feasibility of selected points
-
-                5. ROBOT CONSTRAINTS:
+                4. ROBOT CONSTRAINTS:
                 ✓ Select points within comfortable reach (avoid overextension/collision)
                 ✓ Prefer natural, ergonomic robot poses
                 ✓ Top-down grasp for vertical movements, side grasp for horizontal movements
 
-                7. LID/CAP REMOVAL COMPLETION:
+                ⚠️⚠️⚠️ CRITICAL GRASP TYPE SELECTION ⚠️⚠️⚠️
+                ABSOLUTELY ESSENTIAL - FOLLOW THIS GUIDANCE STRICTLY:
+                
+                🔴 SIDE GRASP (is_side_grasp=True) MANDATORY when objects are:
+                  ✓ HIGH UP or ELEVATED (above robot's comfortable reach height)
+                  ✓ FAR AWAY from robot's base (at extended reach distances)  
+                  ✓ Positioned at AWKWARD ANGLES for top-down access
+                  ✓ Require horizontal approach for accessibility
+                
+                🔵 TOP-DOWN GRASP (is_top_down_grasp=True) MANDATORY when objects are:
+                  ✓ At COMFORTABLE robot working height
+                  ✓ CLOSE to robot's base position
+                  ✓ EASILY ACCESSIBLE from above
+                  ✓ Vertical approach is natural and ergonomic
+                
+                ❌ WRONG GRASP SELECTION WILL CAUSE TASK FAILURE
+                ❌ Always consider object height and distance from robot base
+                ❌ Choose grasp type based on robot reach limitations and ergonomics
+
+                5. LID/CAP REMOVAL COMPLETION:
                 ✓ When opening containers with lids or caps, the skill must fully remove the lid/cap
                 ✓ Use retract_gripper() to move the lid/cap completely away from the container opening
                 ✓ Ensure the container opening is fully accessible after lid/cap removal
@@ -1631,36 +1639,14 @@ Only select interaction points within the segmented region.
                 ✓ Look for actual visible hinges (metallic, cylindrical hardware)
                 ✓ Identify the edge where the object rotates (stationary edge)
                 ✓ Hinges are typically at 'left', 'right', 'top', or 'bottom' edges
-                
-                2. GEOMETRIC REASONING:
-                ✓ For cabinet doors: hinges usually on left or right edge
-                ✓ For drawers: typically no hinges (linear motion)
-                ✓ For lids/covers: hinges usually on back/top edge
-                ✓ For flip-up panels: hinges usually on bottom edge
 
-                3. HINGE LOCATION DETERMINATION:
+                2. HINGE LOCATION DETERMINATION:
                 • Examine the target object boundaries
                 • Identify which edge remains stationary during operation (THE HINGE EDGE)
                 • Specify hinge location as: 'left', 'right', 'top', 'bottom'
-                • Use '' (empty) for non-hinged objects (drawers, sliding doors)
+                • Use '' (empty) for non-hinged objects 
                 
-                ⚠️ CRITICAL MISTAKE PREVENTION:
-                • The hinge is the STATIONARY edge that does NOT move
-                • The hinge is typically OPPOSITE from the handle/interaction point
-                • If handle is on RIGHT side → hinge is likely on LEFT side
-                • If handle is on LEFT side → hinge is likely on RIGHT side
-                • DO NOT select the edge closest to the handle as the hinge location
 
-                EXAMPLE ANALYSIS:
-                "For cabinet door with handle:
-                - SPATIAL ANALYSIS: Handle is between the CENTER and RIGHT labels on the object (INTERACTION POINT)
-                - The handle is closest to the RIGHT edge marked by 'right' label and farthest from the LEFT edge marked by 'left' label
-                - HINGE REASONING: Since interaction point is on RIGHT side → hinge should be on LEFT side
-                - I can see a vertical gap on the LEFT edge of the door (opposite from handle)
-                - This LEFT edge has metallic hinge hardware visible (STATIONARY EDGE)
-                - I can see the white 'left' label with arrow pointing to this edge in the image
-                - Therefore: hinge_location='left' (spatially OPPOSITE from center-right handle position, matching the edge label shown)"
-                
                 --- EXPLANATION REQUIREMENTS ---
 
                     Your decision_rationale MUST include:
@@ -1700,25 +1686,8 @@ Only select interaction points within the segmented region.
                       - Where on the object is the handle/interaction point? (e.g., "near the LEFT label", "between CENTER and RIGHT labels")
                       - Which object edge(s) is it closest to? (e.g., "closest to the LEFT edge where I see the 'left' label")
                       - Which object edge(s) is it farthest from? (e.g., "farthest from the RIGHT edge marked by 'right' label")
-                    • HINGE REASONING: Based on the interaction point location, explain which edge should be the hinge:
-                      ⚠️ CRITICAL: The hinge is ALWAYS on the OPPOSITE side from where you grasp
-                      - If interaction point is on LEFT side → hinge should be 'right' (OPPOSITE side)
-                      - If interaction point is on RIGHT side → hinge should be 'left' (OPPOSITE side)  
-                      - If interaction point is on TOP area → hinge should be 'bottom' (OPPOSITE edge)
-                      - If interaction point is on BOTTOM area → hinge should be 'top' (OPPOSITE edge)
-                      - If interaction point is in CORNER (e.g., lower-left) → hinge could be 'top' OR 'right' (opposite edges)
+                    
                       
-                    EXAMPLES OF SPATIAL REASONING (RELATIVE TO OBJECT BOUNDARIES):
-                    • "Handle is near the BOTTOM and LEFT labels → closest to bottom-left of object → farthest from TOP and RIGHT edges → hinge could be 'top' or 'right'"
-                    • "Handle is between CENTER and RIGHT labels → on the right side of object → farthest from LEFT edge marked by 'left' label → hinge should be 'left'"  
-                    • "Handle is near TOP and CENTER labels → on upper area of object → farthest from BOTTOM edge marked by 'bottom' label → hinge should be 'bottom'"
-                    • State your chosen hinge_location and confirm it's spatially opposite from interaction point
-                    • Reference the visual arrow pointing to this edge in your justification
-                    • DOUBLE-CHECK VERIFICATION:
-                      "My interaction point is on the [LEFT/RIGHT/TOP/BOTTOM] side"
-                      "Therefore my hinge_location should be '[OPPOSITE_SIDE]'"
-                      "I can see the '[OPPOSITE_SIDE]' label pointing to this edge"
-                      "CONFIRMED: hinge_location='[OPPOSITE_SIDE]' is correct"
 
                     5. MECHANISM UNDERSTANDING:
                     • What type of mechanism is this?
@@ -1726,19 +1695,10 @@ Only select interaction points within the segmented region.
                     • Why did you choose this opening strategy?
                     • How confident are you?
 
-                    COMPREHENSIVE EXAMPLE:
-                    "For point selection: I see 5 colored circles total. Circle aaa OVERLAPS the target cabinet door handle (silver, rectangular) - this circle physically covers part of the handle. Circle aab is near the handle but does not overlap it - rejected for poor overlap. Circle aac is beyond a vertical gap on the adjacent cabinet - rejected for wrong object. Circle aad is on a decorative round element that lacks grip features - rejected for being non-functional. Circle aae is at the left edge where I can see metallic hinge hardware. 
-                    
-                    SPATIAL ANALYSIS: The handle (interaction point) is located between the CENTER and RIGHT labels on the object, closest to the RIGHT edge marked by 'right' label and farthest from the LEFT edge marked by 'left' label. 
-                    
-                    HINGE REASONING: Since the interaction point is on the RIGHT side → the hinge should be on the LEFT side (opposite edge). I can see the white 'left' label pointing to this edge. 
-                    
-                    I selected aaa for grasping (physically overlaps functional handle) with hinge_location='left' (spatially opposite from center-right handle position, matches edge label)."
-                
                 --- FORCED SPATIAL ANALYSIS (REQUIRED) ---
 
                 STEP 1: Draw a complete mental map of the scene:
-                • Label each distinct object in the scene (Cabinet 1, Cabinet 2, Wall, etc.)
+                • Label each distinct object in the scene 
                 • Mark visible boundaries between objects (seams, color changes)
                 • Identify which labeled points belong to which objects
 
@@ -1753,11 +1713,7 @@ Only select interaction points within the segmented region.
                 FORCE DIRECTION:
                 • 'perpendicular': Force along surface normal (into/out of surface)
                 • 'parallel': Force parallel to surface (sliding motion)
-                
-                PIVOT RULES:
-                • Doors/lids typically need has_pivot=True
-                • Drawers typically need has_pivot=False
-                • Pivot point should be on opposite side from grasp point
+            
 
                 --- BEFORE FINALIZING YOUR SELECTION ---
                 Complete this checklist:
@@ -1767,7 +1723,6 @@ Only select interaction points within the segmented region.
                 □ I confirmed each circle is on the target object (not adjacent objects)
                 □ I confirmed the features are functional (not decorative)
                 □ I described the precise spatial location of the interaction point (e.g., "lower-left", "center-right")
-                □ For rotation: hinge location is OPPOSITE from handle based on spatial analysis
                 □ I referenced the white edge labels ('top', 'bottom', 'left', 'right') and center label visible in the image
                 □ The selected points create mechanically sound motion
                 □ I considered robot reach constraints and selected points within comfortable working range
@@ -1783,15 +1738,13 @@ Only select interaction points within the segmented region.
 
                 RESPONSE FORMAT:
                 {{
-                    "name": "open_cabinet_hinged",
-                    "abstract_action": "open cabinet",
-                    "target_object": "cabinet",
+                    "name": "generic_manipulation_skill",
+                    "abstract_action": "perform task",
+                    "target_object": "target object",
                     "primitive_sequence": [
                         "move_gripper_to_pose('point_label', false, true)",
                         "close_gripper()",
-                        "pull('surface_label', 'perpendicular', false, true, 'right')",
-                        "open_gripper()",
-                        "retract_gripper()"
+                        ...
                     ],
                     "parameters": {{
                         "force_threshold": "medium",
@@ -1799,8 +1752,8 @@ Only select interaction points within the segmented region.
                         "speed_requirement": "slow"
                     }},
                     "prerequisites": [
-                        "cabinet is closed",
-                        "handle is free of obstructions"
+                        "target object is in initial state",
+                        "interaction points are accessible"
                     ],
                     "constraints": [
                         "avoid collision with nearby objects",

@@ -1,0 +1,71 @@
+{
+  "session_id": "40a3212d-133e-4e13-908d-0f4f6599d3fc",
+  "timestamp": "2025-08-29T11:00:05.179129",
+  "natural_language_task": "open the bottle and put the bottle cap in the paper bag",
+  "task_decomposition": [
+    "detect_object bottle",
+    "detect_object paper bag",
+    "open bottle",
+    "place bottle cap,paper bag"
+  ],
+  "skills_generated": [
+    {
+      "command": "detect_object bottle",
+      "skill_name": "detect_object",
+      "parameters": "bottle",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "detect_object paper bag",
+      "skill_name": "detect_object",
+      "parameters": "paper bag",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "open bottle",
+      "skill_name": "open",
+      "parameters": "bottle",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "place bottle cap,paper bag",
+      "skill_name": "place",
+      "parameters": "bottle cap,paper bag",
+      "status": "ready_for_execution"
+    }
+  ],
+  "llm_responses": {
+    "execution_mode": "real_robot"
+  },
+  "points_of_interest": [],
+  "environment_image_path": "task_execution_data/images/40a3212d-133e-4e13-908d-0f4f6599d3fc_environment.jpg",
+  "surface_images_paths": [],
+  "skill_generation_image_paths": [
+    "stored_skills/images/depth_image_place bottle cap on paper bag_paper bag_1756479716_6c4e94.png",
+    "stored_skills/images/surface_place bottle cap on paper bag_paper bag_1756479716_6c4e94.png",
+    "stored_skills/images/points_place bottle cap on paper bag_paper bag_1756479716_6c4e94.png",
+    "stored_skills/images/mask_place bottle cap on paper bag_paper bag_1756479716_6c4e94.png",
+    "stored_skills/images/place bottle cap on paper bag_paper bag_1756479716_6c4e94.png"
+  ],
+  "stored_skill_paths": [
+    "stored_skills/place bottle cap on paper bag_paper bag_generic_84d5e8.json"
+  ],
+  "skill_image_id": "place bottle cap on paper bag_paper bag_1756479716_6c4e94",
+  "timing": {
+    "planning_start": 1756479605.1791234,
+    "planning_end": 1756479612.8798494,
+    "inference_start": 1756479612.8798711,
+    "inference_end": 1756479612.8799067,
+    "execution_start": 1756479612.8799124,
+    "execution_end": 1756479838.2631702
+  },
+  "execution_success": true,
+  "failure_messages": [],
+  "robot_errors": [],
+  "user_success_rating": false,
+  "user_notes": null,
+  "user_explanation": "got into a weird state where it was updating the collision objects for like a minute straight then moved passed place position and dropped cap outside of bag",
+  "robot_ip": "192.168.1.224",
+  "camera_type": "realsense",
+  "execution_mode": "real"
+}

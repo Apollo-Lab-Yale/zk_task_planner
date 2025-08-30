@@ -37,7 +37,7 @@ class SyncSkillHandler:
     def __init__(self, skill_generator, perception_system):
         self.skill_handler = SkillHandler(skill_generator, perception_system)
         
-    def instantiate_skill(self, skill_command, target_object, color_image=None, depth_image=None, object_info=None, executed_skills=None):
+    def instantiate_skill(self, skill_command, target_object, color_image=None, depth_image=None, object_info=None, executed_skills=None, task_context=None):
         """Synchronous wrapper for instantiate_skill"""
         return self.skill_handler.instantiate_skill(
             skill_command,
@@ -45,7 +45,8 @@ class SyncSkillHandler:
             color_image,
             depth_image,
             object_info,
-            executed_skills
+            executed_skills,
+            task_context
         )
 
 class SkillHandler:
@@ -84,7 +85,8 @@ class SkillHandler:
         image: np.ndarray,
         depth_image: Optional[np.ndarray] = None,
         object_info: ObjectInfo = None,
-        executed_skills: List = None
+        executed_skills: List = None,
+        task_context: str = None
     ) -> Optional[InstantiatedSkill]:
         """
         Generate and instantiate a skill for the given action and object
@@ -194,7 +196,8 @@ class SkillHandler:
                 abstract_action=abstract_action,
                 target_object=target_object,
                 object_info=object_info,
-                executed_skills=executed_skills or []
+                executed_skills=executed_skills or [],
+                task_context=task_context
             )
             
         # DEBUG: Show points returned from skill generator

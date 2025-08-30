@@ -1,0 +1,89 @@
+{
+  "session_id": "61834fc7-fc43-4963-bbbb-b2f6573b5076",
+  "timestamp": "2025-08-28T16:08:13.698069",
+  "natural_language_task": "open the pen and put the pen cap in the paper bag",
+  "task_decomposition": [
+    "detect_object pen",
+    "open pen",
+    "detect_object pen cap",
+    "detect_object paper bag",
+    "pickup pen cap",
+    "place pen cap,paper bag"
+  ],
+  "skills_generated": [
+    {
+      "command": "detect_object pen",
+      "skill_name": "detect_object",
+      "parameters": "pen",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "open pen",
+      "skill_name": "open",
+      "parameters": "pen",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "detect_object pen cap",
+      "skill_name": "detect_object",
+      "parameters": "pen cap",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "detect_object paper bag",
+      "skill_name": "detect_object",
+      "parameters": "paper bag",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "pickup pen cap",
+      "skill_name": "pickup",
+      "parameters": "pen cap",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "place pen cap,paper bag",
+      "skill_name": "place",
+      "parameters": "pen cap,paper bag",
+      "status": "ready_for_execution"
+    }
+  ],
+  "llm_responses": {
+    "execution_mode": "real_robot"
+  },
+  "points_of_interest": [],
+  "environment_image_path": "task_execution_data/images/61834fc7-fc43-4963-bbbb-b2f6573b5076_environment.jpg",
+  "surface_images_paths": [],
+  "skill_generation_image_paths": [
+    "stored_skills/images/depth_image_open pen_pen_1756411721_2fb34d.png",
+    "stored_skills/images/surface_open pen_pen_1756411721_2fb34d.png",
+    "stored_skills/images/points_open pen_pen_1756411721_2fb34d.png",
+    "stored_skills/images/mask_open pen_pen_1756411721_2fb34d.png",
+    "stored_skills/images/open pen_pen_1756411721_2fb34d.png"
+  ],
+  "stored_skill_paths": [
+    "stored_skills/open pen_pen_generic_393645.json"
+  ],
+  "skill_image_id": "open pen_pen_1756411721_2fb34d",
+  "timing": {
+    "planning_start": 1756411693.6980655,
+    "planning_end": 1756411709.628814,
+    "inference_start": 1756411709.6288438,
+    "inference_end": 1756411709.6289067,
+    "execution_start": 1756411709.6289182,
+    "execution_end": 1756411779.2018187
+  },
+  "execution_success": false,
+  "failure_messages": [
+    "Failed to detect object pen cap in skill 3"
+  ],
+  "robot_errors": [
+    "Failed to detect object pen cap in skill 3"
+  ],
+  "user_success_rating": false,
+  "user_notes": null,
+  "user_explanation": "trying to detect the pen cap when its not in the image",
+  "robot_ip": "192.168.1.224",
+  "camera_type": "realsense",
+  "execution_mode": "real"
+}

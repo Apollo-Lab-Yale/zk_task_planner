@@ -666,7 +666,7 @@ class PerceptionSystem:
                         depth_data=depth_data,
                         apply_center_shift=apply_center_shift,
                         edge_threshold=10.0,
-                        shift_factor=0.4,
+                        shift_factor=0.2,
                         fast_mode=True,  # Enable fast mode for better performance
                         depth_plane_only=depth_plane_only  # NEW: Use only depth plane detection method
                     )

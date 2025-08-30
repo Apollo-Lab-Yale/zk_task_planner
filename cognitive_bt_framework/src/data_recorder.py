@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Data Recording System for Task Planner
-Records comprehensive data for each task execution run including timing, failures, and user feedback.
+Records comprehensive data for each task execution run including timing, failures, user feedback,
+joint states, RGBD images, and robot commands at configurable timesteps during execution.
 """
 
 import json
@@ -9,13 +10,15 @@ import time
 import numpy as np
 import cv2
 from datetime import datetime
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Callable
 from pathlib import Path
 from dataclasses import dataclass, asdict
 import base64
 import uuid
 from PIL import Image
 import io
+import threading
+import queue
 
 @dataclass
 class TimingData:
@@ -44,6 +47,26 @@ class TimingData:
         return self.execution_end - self.planning_start
 
 @dataclass
+class MotionDataRecord:
+    """Record for robot motion data at a specific timestep"""
+    timestamp: float
+    joint_positions: List[float]  # Current joint angles
+    joint_commands: List[float]   # Commanded joint angles
+    gripper_state: float          # Gripper position/state
+    gripper_command: float        # Commanded gripper position
+    rgb_image_path: Optional[str] = None      # Path to RGB image
+    depth_image_path: Optional[str] = None    # Path to depth image
+
+@dataclass
+class OpenVLADemonstrationRecord:
+    """OpenVLA-compatible demonstration data for each timestep"""
+    timestamp: float
+    images: Dict[str, str]        # Image paths: {"wrist_cam": path, "external_cam": path}
+    robot_state: Dict[str, Any]   # {"joint_positions": [...], "end_effector_pose": [...], "gripper_state": float}
+    action: Dict[str, Any]        # {"delta_pose": [...], "gripper_action": float}
+    language_instruction: str     # Natural language task description
+
+@dataclass
 class PointOfInterestRecord:
     """Record for points of interest detected"""
     label: str
@@ -63,6 +86,7 @@ class TaskExecutionRecord:
     session_id: str
     timestamp: str
     natural_language_task: str
+    task_name: str  # Short task identifier
     task_decomposition: List[str]
     
     # Generated skills and LLM responses
@@ -78,6 +102,13 @@ class TaskExecutionRecord:
     skill_generation_image_paths: List[str]
     stored_skill_paths: List[str]
     skill_image_id: Optional[str]
+    
+    # Motion data recorded during execution
+    motion_data: List[MotionDataRecord]
+    recording_timestep: float  # Timestep used for recording (seconds)
+    
+    # OpenVLA-compatible demonstration data
+    demonstration_data: List[OpenVLADemonstrationRecord]
     
     # Timing information
     timing: TimingData
@@ -100,32 +131,58 @@ class TaskExecutionRecord:
 class DataRecorder:
     """Records comprehensive data for each task execution"""
     
-    def __init__(self, data_dir: str = "task_execution_data"):
+    def __init__(self, data_dir: str = "task_execution_data", recording_timestep: float = 0.1):
         """
         Initialize data recorder
         
         Args:
             data_dir: Directory to store recorded data
+            recording_timestep: Time interval between motion data recordings (seconds)
         """
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(exist_ok=True)
         self.images_dir = self.data_dir / "images"
         self.images_dir.mkdir(exist_ok=True)
+        self.motion_images_dir = self.images_dir / "motion"
+        self.motion_images_dir.mkdir(exist_ok=True)
         self.sessions_dir = self.data_dir / "sessions"
         self.sessions_dir.mkdir(exist_ok=True)
+        
+        # Recording configuration
+        self.recording_timestep = recording_timestep
         
         # Current session tracking
         self.current_session_id = None
         self.current_record = None
         self.timing_data = None
         
-    def start_recording_session(self, natural_language_task: str, robot_ip: str = "192.168.1.224", 
+        # Motion recording state
+        self.is_recording_motion = False
+        self.motion_recording_thread = None
+        self.motion_data_queue = queue.Queue()
+        self.stop_recording_event = threading.Event()
+        self.pause_recording_event = threading.Event()  # For pausing/resuming recording
+        
+        # Motion detection parameters
+        self.motion_threshold = 0.01  # Minimum joint movement to consider "motion" (radians)
+        self.previous_joint_positions = None
+        self.stationary_timeout = 2.0  # Stop recording after 2 seconds of no motion
+        self.last_motion_time = 0
+        self.robot_connected = False  # Track if robot is actually connected
+        
+        # Robot and camera interfaces (will be set during recording session)
+        self.robot_interface = None
+        self.camera_interface = None
+        
+    def start_recording_session(self, natural_language_task: str, task_name: str = None, 
+                               robot_ip: str = "192.168.1.224", 
                                camera_type: str = "realsense", execution_mode: str = "real") -> str:
         """
         Start a new recording session
         
         Args:
             natural_language_task: The original natural language task
+            task_name: Short task identifier (auto-generated if None)
             robot_ip: IP address of the robot
             camera_type: Type of camera being used
             execution_mode: "simulation" or "real"
@@ -134,6 +191,10 @@ class DataRecorder:
             session_id: Unique identifier for this session
         """
         self.current_session_id = str(uuid.uuid4())
+        
+        # Generate task name if not provided
+        if task_name is None:
+            task_name = self._generate_task_name(natural_language_task)
         
         # Initialize timing data
         self.timing_data = TimingData(
@@ -150,6 +211,7 @@ class DataRecorder:
             session_id=self.current_session_id,
             timestamp=datetime.now().isoformat(),
             natural_language_task=natural_language_task,
+            task_name=task_name,
             task_decomposition=[],
             skills_generated=[],
             llm_responses={},
@@ -159,6 +221,9 @@ class DataRecorder:
             skill_generation_image_paths=[],
             stored_skill_paths=[],
             skill_image_id=None,
+            motion_data=[],
+            recording_timestep=self.recording_timestep,
+            demonstration_data=[],
             timing=self.timing_data,
             execution_success=False,
             failure_messages=[],
@@ -171,7 +236,7 @@ class DataRecorder:
             execution_mode=execution_mode
         )
         
-        print(f"Started recording session: {self.current_session_id}")
+        print(f"Started recording session: {self.current_session_id} for task: {task_name}")
         return self.current_session_id
     
     def record_planning_complete(self, task_decomposition: List[str]):
@@ -337,6 +402,376 @@ class DataRecorder:
         if 'image_id' in skill_gen_files:
             self.current_record.skill_image_id = skill_gen_files['image_id']
     
+    def set_motion_interfaces(self, robot_interface=None, camera_interface=None):
+        """
+        Set robot and camera interfaces for motion data recording
+        
+        Args:
+            robot_interface: Robot interface with get_robot_joint_state() method
+            camera_interface: Camera interface with get_frames() method
+        """
+        self.robot_interface = robot_interface
+        self.camera_interface = camera_interface
+    
+    def start_motion_recording(self, robot_interface=None, camera_interface=None):
+        """
+        Start recording motion data during execution
+        
+        Args:
+            robot_interface: Robot interface with get_robot_joint_state() method
+            camera_interface: Camera interface with get_frames() method
+        """
+        if not self.current_session_id or not self.current_record:
+            print("Warning: No active recording session for motion recording")
+            return False
+        
+        # Set interfaces if provided
+        if robot_interface is not None:
+            self.robot_interface = robot_interface
+        if camera_interface is not None:
+            self.camera_interface = camera_interface
+        
+        # Test robot connection
+        if self.robot_interface and hasattr(self.robot_interface, 'get_robot_joint_state'):
+            try:
+                test_state = self.robot_interface.get_robot_joint_state()
+                self.robot_connected = test_state is not None and len(test_state) > 0
+                if self.robot_connected:
+                    print(f"Robot connected - joint state size: {len(test_state)}")
+                else:
+                    print("Warning: Robot interface available but no joint state data")
+            except Exception as e:
+                print(f"Warning: Robot connection test failed: {e}")
+                self.robot_connected = False
+        else:
+            print("Warning: No robot interface available for motion recording")
+            self.robot_connected = False
+        
+        if self.is_recording_motion:
+            print("Motion recording already started")
+            return True
+        
+        self.is_recording_motion = True
+        self.stop_recording_event.clear()
+        
+        # Start motion recording thread
+        self.motion_recording_thread = threading.Thread(
+            target=self._motion_recording_loop,
+            daemon=True
+        )
+        self.motion_recording_thread.start()
+        
+        status = "with robot data" if self.robot_connected else "camera only"
+        print(f"Started motion recording at {self.recording_timestep}s intervals ({status})")
+        return True
+    
+    def stop_motion_recording(self):
+        """Stop recording motion data"""
+        if not self.is_recording_motion:
+            return
+        
+        self.is_recording_motion = False
+        self.stop_recording_event.set()
+        
+        # Wait for recording thread to finish
+        if self.motion_recording_thread and self.motion_recording_thread.is_alive():
+            self.motion_recording_thread.join(timeout=2.0)
+        
+        # Process any remaining data in queue
+        self._process_motion_data_queue()
+        
+        print(f"Stopped motion recording. Captured {len(self.current_record.motion_data)} motion samples")
+    
+    def pause_motion_recording(self):
+        """Pause motion recording (robot stopped for planning/perception)"""
+        if self.is_recording_motion:
+            self.pause_recording_event.set()
+            print("Motion recording paused (robot stationary for planning)")
+    
+    def resume_motion_recording(self):
+        """Resume motion recording (robot starting to move again)"""
+        if self.is_recording_motion:
+            self.pause_recording_event.clear()
+            print("Motion recording resumed (robot motion detected)")
+    
+    def is_robot_moving(self, current_joint_positions: List[float]) -> bool:
+        """
+        Detect if robot is currently moving based on joint position changes
+        
+        Args:
+            current_joint_positions: Current robot joint positions
+            
+        Returns:
+            True if robot is moving, False if stationary
+        """
+        if self.previous_joint_positions is None:
+            self.previous_joint_positions = current_joint_positions
+            return False
+        
+        if len(current_joint_positions) != len(self.previous_joint_positions):
+            return False
+        
+        # Calculate joint position differences
+        joint_diffs = [
+            abs(current - previous) 
+            for current, previous in zip(current_joint_positions, self.previous_joint_positions)
+        ]
+        
+        # Check if any joint moved more than threshold
+        is_moving = any(diff > self.motion_threshold for diff in joint_diffs)
+        
+        # Update previous positions
+        self.previous_joint_positions = current_joint_positions.copy()
+        
+        if is_moving:
+            self.last_motion_time = time.time()
+        
+        return is_moving
+    
+    def _motion_recording_loop(self):
+        """Main loop for motion data recording (runs in separate thread)"""
+        while not self.stop_recording_event.is_set():
+            try:
+                start_time = time.time()
+                
+                # Check if recording is paused
+                if self.pause_recording_event.is_set():
+                    time.sleep(0.1)  # Short sleep when paused
+                    continue
+                
+                # Get robot state
+                joint_positions = []
+                joint_commands = []
+                gripper_state = 0.0
+                gripper_command = 0.0
+                robot_is_moving = False
+                
+                if self.robot_interface and hasattr(self.robot_interface, 'get_robot_joint_state'):
+                    try:
+                        robot_state = self.robot_interface.get_robot_joint_state()
+                        if robot_state is not None and len(robot_state) > 0:
+                            joint_positions = robot_state[:6] if len(robot_state) >= 6 else robot_state
+                            joint_commands = joint_positions.copy()  # Assume commands match positions for now
+                            gripper_state = robot_state[6] if len(robot_state) > 6 else 0.0
+                            gripper_command = gripper_state
+                            
+                            # Check if robot is moving
+                            robot_is_moving = self.is_robot_moving(joint_positions)
+                            
+                    except Exception as e:
+                        print(f"Error getting robot joint state: {e}")
+                
+                # Skip recording if robot is not moving and has been stationary for too long
+                if not robot_is_moving:
+                    time_since_motion = time.time() - self.last_motion_time
+                    if time_since_motion > self.stationary_timeout and self.last_motion_time > 0:
+                        # Robot has been stationary for too long, skip recording
+                        time.sleep(self.recording_timestep)
+                        continue
+                
+                # Get camera frames
+                rgb_image_path = None
+                depth_image_path = None
+                
+                if self.camera_interface and hasattr(self.camera_interface, 'get_frames'):
+                    try:
+                        frames = self.camera_interface.get_frames()
+                        if frames:
+                            rgb_image, depth_image = frames
+                            
+                            # Save images with timestamp
+                            timestamp_str = f"{time.time():.3f}"
+                            
+                            if rgb_image is not None:
+                                rgb_filename = f"{self.current_session_id}_rgb_{timestamp_str}.jpg"
+                                rgb_path = self.motion_images_dir / rgb_filename
+                                cv2.imwrite(str(rgb_path), cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR))
+                                rgb_image_path = str(rgb_path)
+                            
+                            if depth_image is not None:
+                                depth_filename = f"{self.current_session_id}_depth_{timestamp_str}.png"
+                                depth_path = self.motion_images_dir / depth_filename
+                                # Save depth as 16-bit PNG
+                                cv2.imwrite(str(depth_path), depth_image.astype(np.uint16))
+                                depth_image_path = str(depth_path)
+                    
+                    except Exception as e:
+                        print(f"Error capturing camera frames: {e}")
+                
+                # Create motion data record
+                motion_record = MotionDataRecord(
+                    timestamp=time.time(),
+                    joint_positions=joint_positions,
+                    joint_commands=joint_commands,
+                    gripper_state=gripper_state,
+                    gripper_command=gripper_command,
+                    rgb_image_path=rgb_image_path,
+                    depth_image_path=depth_image_path
+                )
+                
+                # Add to queue for main thread to process
+                self.motion_data_queue.put(motion_record)
+                
+                # Calculate sleep time to maintain timestep
+                elapsed = time.time() - start_time
+                sleep_time = max(0, self.recording_timestep - elapsed)
+                
+                if sleep_time > 0:
+                    self.stop_recording_event.wait(sleep_time)
+            
+            except Exception as e:
+                print(f"Error in motion recording loop: {e}")
+                time.sleep(self.recording_timestep)
+    
+    def _process_motion_data_queue(self):
+        """Process all motion data from queue and add to current record"""
+        if not self.current_record:
+            return
+        
+        while not self.motion_data_queue.empty():
+            try:
+                motion_record = self.motion_data_queue.get_nowait()
+                self.current_record.motion_data.append(motion_record)
+            except queue.Empty:
+                break
+    
+    def _generate_task_name(self, natural_language_task: str) -> str:
+        """Generate a short task name from natural language task"""
+        # Take first 50 characters and sanitize
+        task_name = natural_language_task[:50].lower()
+        task_name = ''.join(c if c.isalnum() or c in ' _-' else '' for c in task_name)
+        task_name = '_'.join(task_name.split())  # Replace spaces with underscores
+        
+        if not task_name:
+            task_name = "task"
+        
+        return task_name
+    
+    def add_demonstration_timestep(self, 
+                                 wrist_image: Optional[np.ndarray] = None,
+                                 external_image: Optional[np.ndarray] = None,
+                                 joint_positions: Optional[List[float]] = None,
+                                 end_effector_pose: Optional[List[float]] = None,
+                                 gripper_state: Optional[float] = None,
+                                 delta_pose: Optional[List[float]] = None,
+                                 gripper_action: Optional[float] = None,
+                                 language_instruction: Optional[str] = None):
+        """
+        Add OpenVLA-compatible demonstration timestep
+        
+        Args:
+            wrist_image: 224x224 RGB wrist camera image
+            external_image: 224x224 RGB external camera image (optional)
+            joint_positions: 7-DOF xArm joint positions
+            end_effector_pose: Current EE pose [x,y,z,rx,ry,rz]
+            gripper_state: Current gripper state (0-1 normalized)
+            delta_pose: Delta EE movement [dx,dy,dz,drx,dry,drz]
+            gripper_action: Target gripper state (0-1 normalized)
+            language_instruction: Natural language task instruction
+        """
+        if not self.current_session_id or not self.current_record:
+            print("Warning: No active recording session for demonstration data")
+            return False
+        
+        timestamp = time.time()
+        timestamp_str = f"{timestamp:.3f}"
+        
+        # Save images and get paths
+        image_paths = {}
+        
+        if wrist_image is not None:
+            # Resize to 224x224 for OpenVLA compatibility
+            wrist_resized = cv2.resize(wrist_image, (224, 224))
+            wrist_filename = f"{self.current_session_id}_wrist_{timestamp_str}.jpg"
+            wrist_path = self.motion_images_dir / wrist_filename
+            cv2.imwrite(str(wrist_path), cv2.cvtColor(wrist_resized, cv2.COLOR_RGB2BGR))
+            image_paths["wrist_cam"] = str(wrist_path)
+        
+        if external_image is not None:
+            # Resize to 224x224 for OpenVLA compatibility
+            external_resized = cv2.resize(external_image, (224, 224))
+            external_filename = f"{self.current_session_id}_external_{timestamp_str}.jpg"
+            external_path = self.motion_images_dir / external_filename
+            cv2.imwrite(str(external_path), cv2.cvtColor(external_resized, cv2.COLOR_RGB2BGR))
+            image_paths["external_cam"] = str(external_path)
+        
+        # Create robot state
+        robot_state = {}
+        if joint_positions is not None:
+            robot_state["joint_positions"] = joint_positions
+        if end_effector_pose is not None:
+            robot_state["end_effector_pose"] = end_effector_pose
+        if gripper_state is not None:
+            robot_state["gripper_state"] = gripper_state
+        
+        # Create action
+        action = {}
+        if delta_pose is not None:
+            action["delta_pose"] = delta_pose
+        if gripper_action is not None:
+            action["gripper_action"] = gripper_action
+        
+        # Use current task instruction if not provided
+        if language_instruction is None and self.current_record:
+            language_instruction = self.current_record.natural_language_task
+        
+        # Create demonstration record
+        demo_record = OpenVLADemonstrationRecord(
+            timestamp=timestamp,
+            images=image_paths,
+            robot_state=robot_state,
+            action=action,
+            language_instruction=language_instruction or ""
+        )
+        
+        self.current_record.demonstration_data.append(demo_record)
+        return True
+    
+    def export_openvla_dataset(self, output_path: str = None) -> str:
+        """
+        Export current session data in OpenVLA-compatible format
+        
+        Args:
+            output_path: Output file path (default: auto-generated)
+            
+        Returns:
+            Path to exported dataset file
+        """
+        if not self.current_record or len(self.current_record.demonstration_data) == 0:
+            raise RuntimeError("No demonstration data available to export")
+        
+        # Process demonstration data queue first
+        self._process_motion_data_queue()
+        
+        if output_path is None:
+            safe_task_name = self._sanitize_filename(self.current_record.task_name)
+            output_path = str(self.data_dir / f"openvla_demo_{self.current_session_id}_{safe_task_name}.json")
+        
+        # Convert demonstration data to OpenVLA format
+        openvla_data = {
+            "task_description": self.current_record.natural_language_task,
+            "episode_data": []
+        }
+        
+        for demo_record in self.current_record.demonstration_data:
+            timestep = {
+                "images": demo_record.images,
+                "robot_state": demo_record.robot_state,
+                "action": demo_record.action,
+                "language_instruction": demo_record.language_instruction,
+                "timestamp": demo_record.timestamp
+            }
+            openvla_data["episode_data"].append(timestep)
+        
+        # Save OpenVLA dataset
+        with open(output_path, 'w') as f:
+            json.dump(openvla_data, f, indent=2, default=self._json_serializer)
+        
+        print(f"OpenVLA dataset exported: {output_path}")
+        print(f"Episode length: {len(openvla_data['episode_data'])} timesteps")
+        
+        return output_path
+    
     def collect_user_feedback(self) -> Tuple[bool, str]:
         """
         Collect user feedback about task execution success
@@ -390,9 +825,12 @@ class DataRecorder:
         
         return success_rating, explanation
     
-    def finalize_session(self) -> str:
+    def finalize_session(self, prompt_for_save: bool = True) -> str:
         """
         Finalize and save the current recording session
+        
+        Args:
+            prompt_for_save: Whether to prompt user before saving motion data
         
         Returns:
             Path to saved session file
@@ -400,11 +838,39 @@ class DataRecorder:
         if self.current_session_id is None or self.current_record is None:
             raise RuntimeError("No active recording session to finalize")
         
+        # Stop motion recording if still active
+        if self.is_recording_motion:
+            self.stop_motion_recording()
+        
+        # Process any remaining motion data
+        self._process_motion_data_queue()
+        
+        # Ask user about saving motion data if recording was enabled
+        save_motion_data = True
+        if prompt_for_save and len(self.current_record.motion_data) > 0:
+            print(f"\nMotion data recorded: {len(self.current_record.motion_data)} samples")
+            while True:
+                response = input("Do you want to save the motion robot data? (y/n): ").strip().lower()
+                if response in ['y', 'yes']:
+                    save_motion_data = True
+                    break
+                elif response in ['n', 'no']:
+                    save_motion_data = False
+                    break
+                else:
+                    print("Please enter 'y' for yes or 'n' for no.")
+        
+        # Clear motion data if user chose not to save
+        if not save_motion_data:
+            self.current_record.motion_data = []
+            print("Motion data cleared from session")
+        
         # Collect user feedback
         self.collect_user_feedback()
         
-        # Create session file
-        session_filename = f"{self.current_session_id}.json"
+        # Create session file with task name
+        safe_task_name = self._sanitize_filename(self.current_record.task_name)
+        session_filename = f"{self.current_session_id}_{safe_task_name}.json"
         session_path = self.sessions_dir / session_filename
         
         # Convert record to dictionary for JSON serialization
@@ -422,6 +888,8 @@ class DataRecorder:
         self.current_session_id = None
         self.current_record = None
         self.timing_data = None
+        self.robot_interface = None
+        self.camera_interface = None
         
         print(f"\nSession saved to: {session_path}")
         return str(session_path)
@@ -437,8 +905,49 @@ class DataRecorder:
         # Convert points of interest
         record_dict['points_of_interest'] = [asdict(poi) for poi in record.points_of_interest]
         
+        # Convert motion data
+        record_dict['motion_data'] = [asdict(motion_record) for motion_record in record.motion_data]
+        
+        # Convert demonstration data
+        record_dict['demonstration_data'] = [asdict(demo_record) for demo_record in record.demonstration_data]
+        
         return record_dict
     
+    def _sanitize_filename(self, text: str, max_length: int = 50) -> str:
+        """
+        Sanitize text for use in filename
+        
+        Args:
+            text: Text to sanitize
+            max_length: Maximum length of resulting filename part
+            
+        Returns:
+            Sanitized filename-safe text
+        """
+        import re
+        
+        # Replace spaces with underscores
+        sanitized = text.replace(" ", "_")
+        
+        # Remove or replace invalid filename characters
+        sanitized = re.sub(r'[<>:"/\\|?*]', '', sanitized)
+        
+        # Remove other non-alphanumeric characters except underscores and hyphens
+        sanitized = re.sub(r'[^\w\-_]', '', sanitized)
+        
+        # Limit length
+        if len(sanitized) > max_length:
+            sanitized = sanitized[:max_length]
+        
+        # Ensure it doesn't end with a period (Windows compatibility)
+        sanitized = sanitized.rstrip('.')
+        
+        # Fallback to "task" if sanitization resulted in empty string
+        if not sanitized:
+            sanitized = "task"
+            
+        return sanitized.lower()
+
     def _json_serializer(self, obj):
         """Custom JSON serializer for numpy and other types"""
         if isinstance(obj, np.ndarray):
@@ -456,6 +965,7 @@ class DataRecorder:
         print("SESSION SUMMARY")
         print("="*60)
         print(f"Session ID: {record.session_id}")
+        print(f"Task Name: {record.task_name}")
         print(f"Task: {record.natural_language_task}")
         print(f"Execution Mode: {record.execution_mode}")
         print(f"Timestamp: {record.timestamp}")
@@ -477,7 +987,31 @@ class DataRecorder:
         print(f"Skill Generation Images: {len(record.skill_generation_image_paths)}")
         if record.skill_image_id:
             print(f"Skill Image ID: {record.skill_image_id}")
-        print(f"Execution Success: {record.execution_success}")
+        
+        # Motion data summary
+        print(f"\nMotion Data:")
+        print(f"  Samples Recorded: {len(record.motion_data)}")
+        if len(record.motion_data) > 0:
+            print(f"  Recording Timestep: {record.recording_timestep}s")
+            duration = record.motion_data[-1].timestamp - record.motion_data[0].timestamp if len(record.motion_data) > 1 else 0
+            print(f"  Total Recording Duration: {duration:.2f}s")
+            
+            # Count RGBD images
+            rgb_count = sum(1 for md in record.motion_data if md.rgb_image_path)
+            depth_count = sum(1 for md in record.motion_data if md.depth_image_path)
+            print(f"  RGB Images: {rgb_count}")
+            print(f"  Depth Images: {depth_count}")
+        
+        # Demonstration data summary
+        print(f"\nOpenVLA Demonstration Data:")
+        print(f"  Timesteps Recorded: {len(record.demonstration_data)}")
+        if len(record.demonstration_data) > 0:
+            wrist_images = sum(1 for dd in record.demonstration_data if "wrist_cam" in dd.images)
+            external_images = sum(1 for dd in record.demonstration_data if "external_cam" in dd.images)
+            print(f"  Wrist Camera Images: {wrist_images}")
+            print(f"  External Camera Images: {external_images}")
+        
+        print(f"\nExecution Success: {record.execution_success}")
         
         if record.failure_messages:
             print(f"Failure Messages: {len(record.failure_messages)}")

@@ -1,0 +1,89 @@
+{
+  "session_id": "8fc402f2-a40c-4c57-b39b-783990cf1ea4",
+  "timestamp": "2025-08-29T13:13:02.156951",
+  "natural_language_task": "move the paper bag to the stove then open the bottle",
+  "task_decomposition": [
+    "detect_object paper bag",
+    "detect_object stove",
+    "pickup paper bag",
+    "place paper bag,stove",
+    "detect_object bottle",
+    "open bottle"
+  ],
+  "skills_generated": [
+    {
+      "command": "detect_object paper bag",
+      "skill_name": "detect_object",
+      "parameters": "paper bag",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "detect_object stove",
+      "skill_name": "detect_object",
+      "parameters": "stove",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "pickup paper bag",
+      "skill_name": "pickup",
+      "parameters": "paper bag",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "place paper bag,stove",
+      "skill_name": "place",
+      "parameters": "paper bag,stove",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "detect_object bottle",
+      "skill_name": "detect_object",
+      "parameters": "bottle",
+      "status": "ready_for_execution"
+    },
+    {
+      "command": "open bottle",
+      "skill_name": "open",
+      "parameters": "bottle",
+      "status": "ready_for_execution"
+    }
+  ],
+  "llm_responses": {
+    "execution_mode": "real_robot"
+  },
+  "points_of_interest": [],
+  "environment_image_path": "task_execution_data/images/8fc402f2-a40c-4c57-b39b-783990cf1ea4_environment.jpg",
+  "surface_images_paths": [],
+  "skill_generation_image_paths": [
+    "stored_skills/images/depth_image_pickup paper bag_paper bag_1756487617_b02702.png",
+    "stored_skills/images/surface_pickup paper bag_paper bag_1756487617_b02702.png",
+    "stored_skills/images/points_pickup paper bag_paper bag_1756487617_b02702.png",
+    "stored_skills/images/mask_pickup paper bag_paper bag_1756487617_b02702.png",
+    "stored_skills/images/pickup paper bag_paper bag_1756487617_b02702.png"
+  ],
+  "stored_skill_paths": [
+    "stored_skills/pickup paper bag_paper bag_generic_253c2f.json"
+  ],
+  "skill_image_id": "pickup paper bag_paper bag_1756487617_b02702",
+  "timing": {
+    "planning_start": 1756487582.156946,
+    "planning_end": 1756487594.7374496,
+    "inference_start": 1756487594.7374716,
+    "inference_end": 1756487594.7375102,
+    "execution_start": 1756487594.737516,
+    "execution_end": 1756487706.2510328
+  },
+  "execution_success": false,
+  "failure_messages": [
+    "Failed to execute action 3 of skill 3: retract_gripper"
+  ],
+  "robot_errors": [
+    "Failed to execute action 3 of skill 3: retract_gripper"
+  ],
+  "user_success_rating": false,
+  "user_notes": null,
+  "user_explanation": "had a joint limit error",
+  "robot_ip": "192.168.1.224",
+  "camera_type": "realsense",
+  "execution_mode": "real"
+}

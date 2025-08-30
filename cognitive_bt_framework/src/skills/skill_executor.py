@@ -1393,8 +1393,8 @@ class DirectSkillExecutor:
             # Handle twist action
             elif action.action_type == 'twist':
                 direction = action.parameters.get('direction', 'clockwise')
-                angular_velocity = action.parameters.get('angular_velocity', 0.5)
-                rotation_angle = action.parameters.get('rotation_angle', 2 * np.pi)  # Default 90 degrees
+                angular_velocity = action.parameters.get('angular_velocity', 0.8)
+                rotation_angle = 2 * np.pi#action.parameters.get('rotation_angle', 2 * np.pi)  # Default 90 degrees
                 
                 self.logger.info(f"Executing twist {direction} with angle {rotation_angle:.2f} rad")
                 
@@ -1931,7 +1931,8 @@ class DirectSkillExecutor:
                     target_object,
                     color_image,
                     depth_image,
-                    object_info
+                    object_info,
+                    task_context=task_context
                 )
                 
                 skill_time = time.time() - start_skill_time
@@ -1995,13 +1996,13 @@ class DirectSkillExecutor:
                 self.logger.error(f"Error creating points of interest visualization: {str(e)}")
             
             # Get point cloud from the main camera
-            pcd = self.main_camera.get_point_cloud()
-            if pcd is not None:
-                self.logger.info(f"Retrieved point cloud from {camera_type} camera")
-                # Note: Point cloud coordinates depend on camera type
-                self.motion_planner.update_dynamic_collision_objects(pcd)
-            else:
-                print(f"!!!!!!!!!!!!!!!!!! NO PCD FOR COLLISION OBJECTS")
+            # pcd = self.main_camera.get_point_cloud()
+            # if pcd is not None:
+            #     self.logger.info(f"!!!!!!!!!!!!!!!!!! Retrieved point cloud from {camera_type} camera")
+            #     # Note: Point cloud coordinates depend on camera type
+            #     self.motion_planner.update_dynamic_collision_objects(pcd)
+            # else:
+            #     print(f"!!!!!!!!!!!!!!!!!! NO PCD FOR COLLISION OBJECTS")
             
             # Get camera transform (depends on camera type)
             if self.use_zed_camera and self.zed_to_robot_transform is not None:
@@ -2037,13 +2038,14 @@ class DirectSkillExecutor:
         finally:
             self.execution_start_time = None
     
-    def execute_skill_sequence(self, skill_sequence: List[Tuple[str, str]]) -> Tuple[bool, str]:
+    def execute_skill_sequence(self, skill_sequence: List[Tuple[str, str]], task_context: str = None) -> Tuple[bool, str]:
         """
         Execute a sequence of skills with their parameters.
         Maintains a dictionary of detected objects and executes skills in order.
         
         Args:
             skill_sequence: List of tuples containing (skill_name, parameters)
+            task_context: Optional full task description for context
             
         Returns:
             Tuple[bool, str]: Success status and result message
@@ -2131,17 +2133,12 @@ class DirectSkillExecutor:
                     self.logger.error(error_msg)
                     return False, error_msg
                 
-                # Handle place skill specially - needs both objects detected, uses target location for skill generation
+                # Handle place skill specially - only needs target location detected, uses target location for skill generation
                 if skill_name.lower() == 'place':
-                    source_object = params[0]  # Object being placed
+                    source_object = params[0]  # Object being placed (assumed to be in gripper)
                     target_location = params[1]  # Location where object is placed
-                    
-                    # Check if both objects have been detected
-                    if source_object not in detected_objects:
-                        error_msg = f"Source object '{source_object}' has not been detected for place skill {i+1}. Use detect_object {source_object} first."
-                        self.logger.error(error_msg)
-                        return False, error_msg
-                    
+                    target_location = target_location.strip()
+                    # Only check if target location has been detected (source object is assumed to be held by robot)
                     if target_location not in detected_objects:
                         error_msg = f"Target location '{target_location}' has not been detected for place skill {i+1}. Use detect_object {target_location} first."
                         self.logger.error(error_msg)
@@ -2150,7 +2147,7 @@ class DirectSkillExecutor:
                     # Use target location object info for skill generation (important for placement)
                     target_object = target_location
                     object_info = detected_objects[target_location]
-                    self.logger.info(f"Using detected object info for target location: {target_location}")
+                    self.logger.info(f"Using detected object info for target location: {target_location} (source object '{source_object}' assumed to be held by robot)")
                 else:
                     # For other manipulation skills, check if target object has been detected
                     target_object = params[0]
@@ -2184,7 +2181,8 @@ class DirectSkillExecutor:
                         color_image,
                         depth_image,
                         object_info,
-                        executed_skills
+                        executed_skills,
+                        task_context=task_context
                     )
                     
                     if skill is None:
@@ -2200,7 +2198,14 @@ class DirectSkillExecutor:
                         initial_cam_tf = Rotation.from_matrix(self.zed_to_robot_transform[:3, :3])
                     else:
                         _, initial_cam_tf = self.motion_planner.get_camera_transform()
-                    
+                    # Get point cloud from the main camera
+                    # pcd = self.main_camera.get_point_cloud()
+                    # if pcd is not None:
+                    #     self.logger.info(f"!!!!!!!!!!!!!!!!!! Retrieved point cloud from {camera_type} camera")
+                    #     # Note: Point cloud coordinates depend on camera type
+                    #     # self.motion_planner.update_dynamic_collision_objects(pcd)
+                    # else:
+                    #     print(f"!!!!!!!!!!!!!!!!!! NO PCD FOR COLLISION OBJECTS")
                     # Execute skill actions
                     for j, action in enumerate(skill.action_sequence, 1):
                         self.logger.info(f"Executing action {j}/{len(skill.action_sequence)} of skill {i+1}: {action.action_type}")
