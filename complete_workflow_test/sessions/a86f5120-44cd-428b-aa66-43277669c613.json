@@ -1,0 +1,174 @@
+{
+  "session_id": "a86f5120-44cd-428b-aa66-43277669c613",
+  "timestamp": "2025-08-30T18:27:05.391928",
+  "natural_language_task": "move the bottle to the counter and open it",
+  "task_name": "move_the_bottle_to_the_counter_and_open_it",
+  "task_decomposition": [
+    "detect_object bottle",
+    "detect_object counter",
+    "pickup bottle",
+    "place bottle,counter",
+    "open bottle"
+  ],
+  "skills_generated": [
+    {
+      "command": "detect_object bottle",
+      "skill_name": "detect_object",
+      "parameters": "bottle",
+      "status": "generated",
+      "confidence": 0.9,
+      "generation_method": "llm_with_vision"
+    },
+    {
+      "command": "detect_object counter",
+      "skill_name": "detect_object",
+      "parameters": "counter",
+      "status": "generated",
+      "confidence": 0.8,
+      "generation_method": "llm_with_vision"
+    },
+    {
+      "command": "pickup bottle",
+      "skill_name": "pickup",
+      "parameters": "bottle",
+      "status": "generated",
+      "confidence": 0.7,
+      "generation_method": "llm_with_vision"
+    },
+    {
+      "command": "place bottle,counter",
+      "skill_name": "place",
+      "parameters": "bottle,counter",
+      "status": "generated",
+      "confidence": 0.6,
+      "generation_method": "llm_with_vision"
+    },
+    {
+      "command": "open bottle",
+      "skill_name": "open",
+      "parameters": "bottle",
+      "status": "generated",
+      "confidence": 0.5,
+      "generation_method": "llm_with_vision"
+    }
+  ],
+  "llm_responses": {
+    "task_decomposition": "Looking at the environment, I can see a bottle and a counter surface.\nTask breakdown:\n1. detect_object bottle - to locate the bottle precisely\n2. detect_object counter - to identify the target placement surface  \n3. pickup bottle - to grasp the bottle\n4. place bottle,counter - to move bottle to counter\n5. open bottle - to open the bottle once it's positioned",
+    "skill_generation": "Generated 5 skills with vision-based context",
+    "execution_mode": "real_robot"
+  },
+  "points_of_interest": [
+    {
+      "label": "A",
+      "pixel_coordinates": [
+        320,
+        150
+      ],
+      "normalized_coordinates": [
+        0.5,
+        0.3125
+      ],
+      "detection_method": "fastsam",
+      "interaction_type": "grasp_point",
+      "confidence": 0.98,
+      "score": 0.95,
+      "stability": 0.5,
+      "accessibility": 0.5
+    },
+    {
+      "label": "B",
+      "pixel_coordinates": [
+        350,
+        140
+      ],
+      "normalized_coordinates": [
+        0.546875,
+        0.2916666666666667
+      ],
+      "detection_method": "fastsam",
+      "interaction_type": "twist_point",
+      "confidence": 0.89,
+      "score": 0.88,
+      "stability": 0.5,
+      "accessibility": 0.5
+    },
+    {
+      "label": "C",
+      "pixel_coordinates": [
+        580,
+        350
+      ],
+      "normalized_coordinates": [
+        0.90625,
+        0.7291666666666666
+      ],
+      "detection_method": "surface_detection",
+      "interaction_type": "placement_surface",
+      "confidence": 0.94,
+      "score": 0.92,
+      "stability": 0.5,
+      "accessibility": 0.5
+    },
+    {
+      "label": "D",
+      "pixel_coordinates": [
+        550,
+        370
+      ],
+      "normalized_coordinates": [
+        0.859375,
+        0.7708333333333334
+      ],
+      "detection_method": "surface_detection",
+      "interaction_type": "edge",
+      "confidence": 0.87,
+      "score": 0.85,
+      "stability": 0.5,
+      "accessibility": 0.5
+    }
+  ],
+  "environment_image_path": "complete_workflow_test/images/a86f5120-44cd-428b-aa66-43277669c613_environment.jpg",
+  "surface_images_paths": [
+    "complete_workflow_test/images/a86f5120-44cd-428b-aa66-43277669c613_surface_bottle.jpg",
+    "complete_workflow_test/images/a86f5120-44cd-428b-aa66-43277669c613_surface_counter.jpg",
+    "complete_workflow_test/images/a86f5120-44cd-428b-aa66-43277669c613_surface_bottle_cap.jpg"
+  ],
+  "skill_generation_image_paths": [
+    "/path/to/skill/images/surface_open_bottle_123456.png",
+    "/path/to/skill/images/points_open_bottle_123456.png",
+    "/path/to/skill/images/mask_open_bottle_123456.png",
+    "/path/to/skill/images/open_bottle_123456.png"
+  ],
+  "stored_skill_paths": [
+    "/path/to/stored/skill1.json",
+    "/path/to/stored/skill2.json"
+  ],
+  "skill_image_id": "open_bottle_123456",
+  "motion_data": [],
+  "recording_timestep": 0.1,
+  "demonstration_data": [],
+  "timing": {
+    "planning_start": 1756592825.3919232,
+    "planning_end": 1756592825.3919575,
+    "inference_start": 1756592825.3964326,
+    "inference_end": 1756592825.3964427,
+    "execution_start": 1756592825.3986912,
+    "execution_end": 1756592825.4988852
+  },
+  "execution_success": true,
+  "failure_messages": [
+    "Robot gripper failed to close completely on bottle",
+    "Bottle slipped during pickup attempt #1",
+    "Retry successful on attempt #2"
+  ],
+  "robot_errors": [
+    "gripper_sensor_timeout",
+    "force_limit_exceeded"
+  ],
+  "user_success_rating": true,
+  "user_notes": null,
+  "user_explanation": "The task was completed successfully but had some issues:\n- Initial gripper failure required retry\n- Bottle placement was slightly off-center on counter  \n- Bottle opening worked smoothly\n- Overall: objective achieved with minor execution issues",
+  "robot_ip": "192.168.1.224",
+  "camera_type": "realsense",
+  "execution_mode": "real"
+}

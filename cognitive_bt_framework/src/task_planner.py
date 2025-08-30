@@ -687,7 +687,7 @@ class TaskPlanner:
             
             if robot_interface and hasattr(robot_interface, 'get_robot_joint_state'):
                 joint_state = robot_interface.get_robot_joint_state()
-                if joint_state:
+                if joint_state is not None and len(joint_state) > 0:
                     joint_positions = joint_state[:7] if len(joint_state) >= 7 else joint_state
                     gripper_state = joint_state[6] if len(joint_state) > 6 else 0.0
                     

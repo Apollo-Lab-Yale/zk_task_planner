@@ -152,3 +152,4 @@ data/
 *.pt
 *.ply
 test_skills/
+task_execution_data/

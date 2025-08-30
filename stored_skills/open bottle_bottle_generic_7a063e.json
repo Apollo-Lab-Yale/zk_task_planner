@@ -1,0 +1,126 @@
+{
+  "name": "open bottle_bottle_generic_7a063e",
+  "abstract_action": "open bottle",
+  "target_object": "bottle",
+  "primitive_sequence": [
+    "move_gripper_to_pose('gcc', true, false)",
+    "close_gripper()",
+    "twist('counterclockwise')",
+    "retract_gripper()",
+    "open_gripper()",
+    "retract_gripper()"
+  ],
+  "parameters": {
+    "force_threshold": "medium",
+    "precision_required": "medium",
+    "speed_requirement": "slow"
+  },
+  "prerequisites": [
+    "target object is in initial state",
+    "interaction points are accessible"
+  ],
+  "constraints": [
+    "avoid collision with nearby objects",
+    "limit applied force to prevent damage"
+  ],
+  "image_id": "open bottle_bottle_1756592879_3ad018",
+  "points_of_interest": {
+    "gcc": {
+      "label": "gcc",
+      "position": [
+        0.61875,
+        0.38125
+      ],
+      "description": "Interest point gcc detected by surface_boundary at normalized position (0.61875, 0.38125)",
+      "pixel_coords": [
+        396,
+        183
+      ],
+      "detection_method": "surface_boundary",
+      "interaction_type": "grasp_surface",
+      "confidence": 0.6390346145629884,
+      "score": 0.9960151825635958,
+      "stability": 0.5,
+      "accessibility": 0.5
+    },
+    "bcb": {
+      "label": "bcb",
+      "position": [
+        0.5921875,
+        0.6416666666666667
+      ],
+      "description": "Interest point bcb detected by indentation_small at normalized position (0.5921875, 0.6416666666666667)",
+      "pixel_coords": [
+        379,
+        308
+      ],
+      "detection_method": "indentation_small",
+      "interaction_type": "grasp_edge",
+      "confidence": 0.8999999999999999,
+      "score": 0.9515331502303278,
+      "stability": 0.5,
+      "accessibility": 0.5
+    },
+    "gel": {
+      "label": "gel",
+      "position": [
+        0.5625,
+        0.45625
+      ],
+      "description": "Interest point gel detected by indentation_small+center_shift at normalized position (0.5625, 0.45625)",
+      "pixel_coords": [
+        360,
+        219
+      ],
+      "detection_method": "indentation_small+center_shift",
+      "interaction_type": "grasp_edge",
+      "confidence": 0.8549999999999999,
+      "score": 0.8748212969217418,
+      "stability": 0.5,
+      "accessibility": 0.5
+    },
+    "pgu": {
+      "label": "pgu",
+      "position": [
+        0.64375,
+        0.5520833333333334
+      ],
+      "description": "Interest point pgu detected by indentation_small+center_shift at normalized position (0.64375, 0.5520833333333334)",
+      "pixel_coords": [
+        412,
+        265
+      ],
+      "detection_method": "indentation_small+center_shift",
+      "interaction_type": "grasp_edge",
+      "confidence": 0.8549999999999999,
+      "score": 0.8255152831805915,
+      "stability": 0.5,
+      "accessibility": 0.5
+    },
+    "ytx": {
+      "label": "ytx",
+      "position": [
+        0.63125,
+        0.475
+      ],
+      "description": "Interest point ytx detected by surface_normal at normalized position (0.63125, 0.475)",
+      "pixel_coords": [
+        404,
+        228
+      ],
+      "detection_method": "surface_normal",
+      "interaction_type": "grasp_surface",
+      "confidence": 0.693518443107605,
+      "score": 0.583443209309991,
+      "stability": 0.5,
+      "accessibility": 0.5
+    }
+  },
+  "explanations": [
+    "TARGET IDENTIFICATION: The yellow segmentation outlines a cylindrical blue bottle with a contrasting blue cap. Shape, color uniformity, and label boundaries separate it from nearby stove, cup, and clamp, confirming it is the specified bottle (high confidence).",
+    "POINT SELECTION: Visible colored circles on the bottle are gcc (red, centered on cap top), ytx (magenta, upper side wall), gel (green, mid-left wall), pgu (yellow, mid-right wall), and bcb (blue, lower wall). Only gcc physically overlaps the functional feature (cap). Others lie on the side wall and provide no advantage for cap removal. Therefore gcc is selected; all others are rejected for not being on the cap.",
+    "HINGE LOCATION: White arrows label top, bottom, left, right; no hinges are present because the cap is a screw mechanism, so hinge_location is ''.",
+    "PRIMITIVE SEQUENCE REASONING: 1) move_gripper_to_pose at gcc with is_top_down_grasp=True aligns gripper Z-axis with bottle\u2019s vertical axis, matching the required rotation axis. 2) close_gripper secures the cap. 3) twist counterclockwise unscrews a standard bottle cap. 4) retract_gripper lifts the loosened cap clear of the bottle mouth. 5) open_gripper releases the cap safely. 6) final retract_gripper pulls the gripper away to avoid collision. A top-down approach is ergonomic because the bottle sits on the countertop at comfortable height; side grasp would misalign the rotation axis.",
+    "PARAMETERS: Medium force prevents stripping threads yet overcomes seal friction; medium precision suffices for cap alignment; slow speed reduces slosh risk and avoids tipping the bottle."
+  ]
+}

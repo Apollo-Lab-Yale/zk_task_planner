@@ -17,7 +17,7 @@ from pathlib import Path
 # Add the cognitive_bt_framework to Python path
 sys.path.append(str(Path(__file__).parent / "cognitive_bt_framework" / "src"))
 
-from task_planner import TaskPlanner
+from cognitive_bt_framework.src.task_planner import TaskPlanner
 
 def main():
     # Set up logging
@@ -108,7 +108,7 @@ def test_recording_only():
     print("="*50)
     
     try:
-        from data_recorder import DataRecorder
+        from cognitive_bt_framework.src.data_recorder import DataRecorder
         
         # Test data recorder directly
         recorder = DataRecorder(recording_timestep=0.1)
