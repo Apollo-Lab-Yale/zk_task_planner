@@ -2223,13 +2223,13 @@ class CuRoboMotionPlanner:
             print(traceback.format_exc())
             return False, None, None
         
-    def retract_gripper(self, distance=0.1):
+    def retract_gripper(self, distance=0.05):
         pose = self.arm.get_position(is_radian=True)
         print(pose)
         x, y, z, r, p, w = pose[1]
         success = True
         print(f"------------------ z: {z}")
-        if z < 500:
+        if z < 500 and x < 400:
             success = self.arm.set_position(x, y, z + distance * 1000, r, p, w, is_radian=True, wait=True, timeout=10.0) == 0
         
         if success:

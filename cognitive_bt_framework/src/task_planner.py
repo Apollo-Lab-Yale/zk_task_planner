@@ -202,6 +202,8 @@ class TaskPlanner:
         - verify that all objects are in the reference image provided
         - separate multi word objects with spaces ie "top shelf" etc
         - IT is impossible to detect an object while holding it
+        - try to simplify object names chosen if possible "stove burner" or "counter top" will fail but "right stove" or "counter or "stove" will work if the object is in view
+        - object detection will always fail if the object isn't in view and completely detectable
         
         PLACEMENT OBJECT STRATEGY:
         - verify that the selected object is both in the image and clear of clutter for placement
@@ -689,7 +691,20 @@ class TaskPlanner:
                 joint_state = robot_interface.get_robot_joint_state()
                 if joint_state is not None and len(joint_state) > 0:
                     joint_positions = joint_state[:7] if len(joint_state) >= 7 else joint_state
-                    gripper_state = joint_state[6] if len(joint_state) > 6 else 0.0
+                    
+                    # Get gripper state using dedicated xArm SDK method
+                    if hasattr(robot_interface, 'arm') and robot_interface.arm is not None:
+                        try:
+                            gripper_result = robot_interface.arm.get_gripper_position()
+                            if gripper_result[0] == 0:  # Success code
+                                gripper_state = gripper_result[1]
+                            else:
+                                gripper_state = 0.0
+                        except Exception as e:
+                            self.logger.warning(f"Failed to get gripper position: {e}")
+                            gripper_state = 0.0
+                    else:
+                        gripper_state = 0.0
                     
                     # Get end effector pose (placeholder - would need actual forward kinematics)
                     end_effector_pose = [0.3, 0.0, 0.3, 0.0, 0.0, 0.0]  # [x,y,z,rx,ry,rz]
@@ -803,7 +818,7 @@ def test_task_planner():
         test_tasks = [
             # "move the paper bag to the stove and open the bottle",
             # "open the bottle and put the cap in the bag."
-            "open the bottle"
+            "move the towel to the counter then open the bottle"
             # "turn on the kitchen light", 
             # "open the bottle and pour water",
             # "clean up the counter and close all cabinets"

@@ -143,10 +143,11 @@ class DataRecorder:
         self.data_dir.mkdir(exist_ok=True)
         self.images_dir = self.data_dir / "images"
         self.images_dir.mkdir(exist_ok=True)
-        self.motion_images_dir = self.images_dir / "motion"
-        self.motion_images_dir.mkdir(exist_ok=True)
         self.sessions_dir = self.data_dir / "sessions"
         self.sessions_dir.mkdir(exist_ok=True)
+        
+        # Motion images directory will be created per session
+        self.motion_images_dir = None
         
         # Recording configuration
         self.recording_timestep = recording_timestep
@@ -191,6 +192,11 @@ class DataRecorder:
             session_id: Unique identifier for this session
         """
         self.current_session_id = str(uuid.uuid4())
+        
+        # Create session-specific motion images directory
+        safe_session_id = self._sanitize_filename(self.current_session_id)
+        self.motion_images_dir = self.images_dir / "motion" / safe_session_id
+        self.motion_images_dir.mkdir(parents=True, exist_ok=True)
         
         # Generate task name if not provided
         if task_name is None:
@@ -552,7 +558,19 @@ class DataRecorder:
                         if robot_state is not None and len(robot_state) > 0:
                             joint_positions = robot_state[:6] if len(robot_state) >= 6 else robot_state
                             joint_commands = joint_positions.copy()  # Assume commands match positions for now
-                            gripper_state = robot_state[6] if len(robot_state) > 6 else 0.0
+                            
+                            # Get gripper state using dedicated xArm SDK method
+                            if hasattr(self.robot_interface, 'arm') and self.robot_interface.arm is not None:
+                                try:
+                                    gripper_result = self.robot_interface.arm.get_gripper_position()
+                                    if gripper_result[0] == 0:  # Success code
+                                        gripper_state = gripper_result[1]
+                                    else:
+                                        gripper_state = 0.0
+                                except Exception as e:
+                                    gripper_state = 0.0
+                            else:
+                                gripper_state = 0.0
                             gripper_command = gripper_state
                             
                             # Check if robot is moving
