@@ -499,7 +499,7 @@ class CuRoboMotionPlanner:
             else:
                 # print("Using dynamic camera transform for pose conversion")
                 camera_pose, camera_rotation = self.get_camera_transform()
-            camera_pose[1] += 0.025
+            camera_pose[1] += 0.01
             # if debug:
             #     print(f"Pose before conversion pose: {position}, {orientation}")
             # Convert input position to homogeneous coordinates
@@ -597,7 +597,7 @@ class CuRoboMotionPlanner:
             wrist_joint_index = self.config.dof - 1  # Last joint
             
             # Calculate velocity based on direction and speed_factor
-            base_velocity = 0.5  # Base velocity in rad/s
+            base_velocity = 1  # Base velocity in rad/s
             velocity = base_velocity * speed_factor
             
             if direction.lower() == "clockwise":
@@ -1659,9 +1659,9 @@ class CuRoboMotionPlanner:
                   f"depth_image_available={depth_image is not None}, is_camera_frame={is_camera_frame}")
             if adjust_tcp_for_surface and depth_image is not None and is_camera_frame and not is_place:
                 print("Applying surface-based TCP adjustment in robot frame...")
-                adjusted_position = self._adjust_tcp_for_surface_robot_frame(
-                     target_position, depth_image, object_mask, tcp_standoff_m, search_radius_m
-                )
+                adjusted_position = target_position#self._adjust_tcp_for_surface_robot_frame(
+                #      target_position, depth_image, object_mask, tcp_standoff_m, search_radius_m
+                # )
                 if adjusted_position is not None:
                     target_position = adjusted_position
                     print(f"TCP adjusted position: {target_position}")
@@ -2223,17 +2223,20 @@ class CuRoboMotionPlanner:
             print(traceback.format_exc())
             return False, None, None
         
-    def retract_gripper(self, distance=0.05):
+    def retract_gripper(self, distance=0.05, speed_factor=1.0):
         pose = self.arm.get_position(is_radian=True)
-        print(pose)
+        if pose[0] != 0:  # Check if get_position was successful
+            print(f"Failed to get robot position: {pose}")
+            return False
+            
         x, y, z, r, p, w = pose[1]
         success = True
         print(f"------------------ z: {z}")
         if z < 500 and x < 400:
-            success = self.arm.set_position(x, y, z + distance * 1000, r, p, w, is_radian=True, wait=True, timeout=10.0) == 0
+            success = self.arm.set_position(x, y, z + distance * 1000, r, p, w, is_radian=True, wait=True, timeout=10.0, speed=50) == 0
         
         if success:
-            success = self.arm.set_servo_angle(servo_id=None, angle=self.initial_position, is_radian=True, wait=True) == 0
+            success = self.arm.set_servo_angle(servo_id=None, angle=self.initial_position, is_radian=True, wait=True, speed=1.0) == 0
 
         return success
         
@@ -4164,7 +4167,7 @@ class CuRoboMotionPlanner:
                 return False
             
             pivot_to_grasp = current_pos_flat - pivot_point_flat
-            pivot_to_grasp *= 0.9
+            # pivot_to_grasp *= 1.05
             actual_radius = np.linalg.norm(pivot_to_grasp)
             
             print(f"Pivot point: {pivot_point_flat}")

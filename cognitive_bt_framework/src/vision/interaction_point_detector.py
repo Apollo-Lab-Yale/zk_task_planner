@@ -47,7 +47,7 @@ class RobustInteractionDetector:
         depth_data: Optional[np.ndarray] = None,
         apply_center_shift: bool = True,
         edge_threshold: float = 15.0,
-        shift_factor: float = 0.25,
+        shift_factor: float = 0.4,
         min_distance: int = 20,  # Added parameter for minimum distance between points
         fast_mode: bool = True,   # Enable fast mode by default
         depth_plane_only: bool = True  # NEW: Use only depth plane detection method

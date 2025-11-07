@@ -1,0 +1,10 @@
+task_name,total_attempts,user_success_count,user_success_rate,user_success_with_motion_count,user_success_with_motion_rate,avg_planning_time,avg_inference_time,avg_execution_time,avg_total_time
+move the towel to the paper bag then open the bottle,10,5,50.0%,5,50.0%,8.19s,0.00s,148.45s,156.64s
+move the towel to the paper bag then open the cabinet on the right,10,7,70.0%,7,70.0%,7.86s,0.00s,229.66s,237.53s
+move the towel to the paper bag then open the pen,10,6,60.0%,6,60.0%,11.67s,0.00s,152.89s,164.55s
+open the bottle,10,8,80.0%,8,80.0%,6.54s,0.00s,89.95s,96.49s
+open the bottle and put the cap in the paper bag,10,7,70.0%,7,70.0%,7.21s,0.00s,116.84s,124.05s
+open the cabinet on the right,11,9,81.8%,9,81.8%,4.11s,0.00s,153.67s,157.78s
+open the pen,10,7,70.0%,7,70.0%,7.69s,0.00s,71.35s,79.03s
+open the pen then put the cap in the paper bag,10,4,40.0%,4,40.0%,9.95s,0.00s,116.04s,125.99s
+take the towel out of the cabinet on the right,10,3,30.0%,3,30.0%,7.24s,0.00s,168.97s,176.21s

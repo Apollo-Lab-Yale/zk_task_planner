@@ -413,6 +413,10 @@ class TaskPlanner:
                         robot_interface=robot_interface,
                         camera_interface=camera_interface
                     )
+                    
+                    # Pass data recorder to skill executor for motion tracking
+                    if hasattr(self.skill_executor, 'set_data_recorder'):
+                        self.skill_executor.set_data_recorder(self.data_recorder)
                 
                 # Start motion recording right before robot execution
                 if should_record and self.data_recorder:
@@ -818,7 +822,13 @@ def test_task_planner():
         test_tasks = [
             # "move the paper bag to the stove and open the bottle",
             # "open the bottle and put the cap in the bag."
-            "move the towel to the counter then open the bottle"
+            # "remove the towel to the paper bag then open the cabinet on the right"
+            # "open the cabinet on the right then move the towel from the cabinet to the paper bag"
+            # "open the pen and put the cap in the paper bag"
+            # "move the towel to the paper bag then open the bottle"
+            # "take the towel out of the cabinet on the right"
+            # "move the towel to the paper bag then open the cabinet on the right"
+            "move the towel to the paper bag then open the pen"
             # "turn on the kitchen light", 
             # "open the bottle and pour water",
             # "clean up the counter and close all cabinets"

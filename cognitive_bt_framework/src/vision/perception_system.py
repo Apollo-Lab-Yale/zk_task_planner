@@ -352,7 +352,7 @@ class PerceptionSystem:
                 # Continue with rest of processing...
                 # Only compute regions of interest for highest confidence detection if toggle is enabled
                 if not roi_highest_confidence_only or i == highest_confidence_idx:
-                    obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=15, min_distance=40, apply_center_shift=True)
+                    obj_info.points = self.detect_regions_of_interest(image, obj_info, max_points=15, min_distance=25, apply_center_shift=True)
                     print("Detected regions of interest")
                 else:
                     # Set empty points for non-highest confidence detections when toggle is enabled

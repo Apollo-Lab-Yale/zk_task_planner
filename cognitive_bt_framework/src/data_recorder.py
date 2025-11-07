@@ -93,6 +93,9 @@ class TaskExecutionRecord:
     skills_generated: List[Dict[str, Any]]
     llm_responses: Dict[str, str]  # Store raw LLM responses
     
+    # Executed skills with complete action data including ObjectInfo
+    executed_skills: List[Dict[str, Any]]
+    
     # Points of interest and images
     points_of_interest: List[PointOfInterestRecord]
     environment_image_path: str
@@ -175,6 +178,10 @@ class DataRecorder:
         self.robot_interface = None
         self.camera_interface = None
         
+        # Image validation parameters
+        self.min_brightness_threshold = 10  # Minimum average pixel value to consider image valid
+        self.min_std_threshold = 5  # Minimum standard deviation to avoid completely uniform images
+        
     def start_recording_session(self, natural_language_task: str, task_name: str = None, 
                                robot_ip: str = "192.168.1.224", 
                                camera_type: str = "realsense", execution_mode: str = "real") -> str:
@@ -221,6 +228,7 @@ class DataRecorder:
             task_decomposition=[],
             skills_generated=[],
             llm_responses={},
+            executed_skills=[],
             points_of_interest=[],
             environment_image_path="",
             surface_images_paths=[],
@@ -285,6 +293,53 @@ class DataRecorder:
             self.current_record.failure_messages = failure_messages or []
             self.current_record.robot_errors = robot_errors or []
     
+    def record_executed_skill(self, skill_command: str, target_object: str, instantiated_skill):
+        """Record an executed skill with complete action data including ObjectInfo"""
+        if not self.current_record:
+            return
+        
+        try:
+            # Serialize the InstantiatedSkill object including ExecutableActions with ObjectInfo
+            skill_data = {
+                'skill_command': skill_command,
+                'target_object': target_object,
+                'skill_name': getattr(instantiated_skill, 'skill_name', 'unknown'),
+                'action_sequence': []
+            }
+            
+            # Serialize each ExecutableAction in the sequence
+            if hasattr(instantiated_skill, 'action_sequence'):
+                for action in instantiated_skill.action_sequence:
+                    action_data = {
+                        'action_type': action.action_type,
+                        'position': action.position.tolist() if action.position is not None else None,
+                        'orientation': action.orientation.tolist() if action.orientation is not None else None,
+                        'pixel_position': action.pixel_position,
+                        'parameters': action.parameters,
+                        'is_top_down_grasp': action.is_top_down_grasp,
+                        'is_side_grasp': action.is_side_grasp
+                    }
+                    
+                    # Serialize ObjectInfo if present
+                    if hasattr(action, 'object_info') and action.object_info is not None:
+                        object_info_data = {
+                            'bbox': action.object_info.bbox.tolist() if hasattr(action.object_info, 'bbox') and action.object_info.bbox is not None else None,
+                            'mask_available': hasattr(action.object_info, 'mask') and action.object_info.mask is not None,
+                            'points_available': hasattr(action.object_info, 'points') and action.object_info.points is not None,
+                            'image_available': hasattr(action.object_info, 'image') and action.object_info.image is not None,
+                            'surface_masks_available': hasattr(action.object_info, 'surface_masks') and action.object_info.surface_masks is not None
+                        }
+                        action_data['object_info'] = object_info_data
+                    else:
+                        action_data['object_info'] = None
+                    
+                    skill_data['action_sequence'].append(action_data)
+            
+            self.current_record.executed_skills.append(skill_data)
+            
+        except Exception as e:
+            print(f"Warning: Failed to record executed skill data: {e}")
+    
     def record_environment_image(self, image: np.ndarray) -> str:
         """
         Record environment image and return path
@@ -298,16 +353,22 @@ class DataRecorder:
         if self.current_session_id is None:
             raise RuntimeError("No active recording session")
         
+        # Validate image before saving
+        if not self._is_valid_image(image):
+            print("Warning: Environment image appears to be black/empty, skipping save")
+            return ""
+        
         image_filename = f"{self.current_session_id}_environment.jpg"
         image_path = self.images_dir / image_filename
         
-        # Convert RGB to BGR for OpenCV
+        # Save as RGB using PIL to avoid color space conversion issues
         if len(image.shape) == 3 and image.shape[2] == 3:
-            image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            # Convert numpy array to PIL Image and save as RGB
+            pil_image = Image.fromarray(image.astype(np.uint8))
+            pil_image.save(str(image_path), 'JPEG', quality=95)
         else:
-            image_bgr = image
-        
-        cv2.imwrite(str(image_path), image_bgr)
+            # Fallback for grayscale or other formats
+            cv2.imwrite(str(image_path), image)
         
         if self.current_record:
             self.current_record.environment_image_path = str(image_path)
@@ -330,16 +391,22 @@ class DataRecorder:
         saved_paths = []
         
         for surface_name, image in surface_images.items():
+            # Validate image before saving
+            if not self._is_valid_image(image):
+                print(f"Warning: Surface image '{surface_name}' appears to be black/empty, skipping")
+                continue
+                
             image_filename = f"{self.current_session_id}_surface_{surface_name}.jpg"
             image_path = self.images_dir / image_filename
             
-            # Convert RGB to BGR for OpenCV
+            # Save as RGB using PIL to avoid color space conversion issues
             if len(image.shape) == 3 and image.shape[2] == 3:
-                image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+                # Convert numpy array to PIL Image and save as RGB
+                pil_image = Image.fromarray(image.astype(np.uint8))
+                pil_image.save(str(image_path), 'JPEG', quality=95)
             else:
-                image_bgr = image
-            
-            cv2.imwrite(str(image_path), image_bgr)
+                # Fallback for grayscale or other formats
+                cv2.imwrite(str(image_path), image)
             saved_paths.append(str(image_path))
         
         if self.current_record:
@@ -457,8 +524,28 @@ class DataRecorder:
             print("Motion recording already started")
             return True
         
+        # Warm up camera before starting recording to avoid black images
+        if self.camera_interface and hasattr(self.camera_interface, 'get_frames'):
+            print("Warming up camera before starting motion recording...")
+            for i in range(5):  # Try to get 5 valid frames
+                try:
+                    frames = self.camera_interface.get_frames()
+                    if frames:
+                        rgb_image, _ = frames
+                        if rgb_image is not None and self._is_valid_image(rgb_image):
+                            print(f"Camera warmed up successfully after {i+1} attempts")
+                            break
+                    time.sleep(0.1)  # Short delay between attempts
+                except Exception as e:
+                    print(f"Camera warmup attempt {i+1} failed: {e}")
+                    time.sleep(0.1)
+            else:
+                print("Warning: Camera warmup incomplete, may record black images initially")
+
         self.is_recording_motion = True
         self.stop_recording_event.clear()
+        # Start paused to wait for motion tracking signals
+        self.pause_recording_event.set()
         
         # Start motion recording thread
         self.motion_recording_thread = threading.Thread(
@@ -469,6 +556,7 @@ class DataRecorder:
         
         status = "with robot data" if self.robot_connected else "camera only"
         print(f"Started motion recording at {self.recording_timestep}s intervals ({status})")
+        print("Motion recording is paused - waiting for motion tracking signals from skill executor")
         return True
     
     def stop_motion_recording(self):
@@ -499,6 +587,29 @@ class DataRecorder:
         if self.is_recording_motion:
             self.pause_recording_event.clear()
             print("Motion recording resumed (robot motion detected)")
+    
+    def start_robot_motion(self, action_name: str = "unknown"):
+        """
+        Signal that robot is starting a motion (called from skill executor/motion planner)
+        
+        Args:
+            action_name: Name/type of the action being executed
+        """
+        if self.is_recording_motion:
+            self.pause_recording_event.clear()
+            print(f"Robot motion started: {action_name}")
+    
+    def end_robot_motion(self, action_name: str = "unknown"):
+        """
+        Signal that robot motion has ended (called from skill executor/motion planner)
+        
+        Args:
+            action_name: Name/type of the action that was executed
+        """
+        if self.is_recording_motion:
+            # Continue recording for a short period after motion ends to capture final state
+            print(f"Robot motion ended: {action_name}")
+            # Note: We don't pause immediately to capture the final settled state
     
     def is_robot_moving(self, current_joint_positions: List[float]) -> bool:
         """
@@ -534,6 +645,31 @@ class DataRecorder:
         
         return is_moving
     
+    def _is_valid_image(self, image: np.ndarray) -> bool:
+        """
+        Check if image is valid (not black/empty)
+        
+        Args:
+            image: RGB image array
+            
+        Returns:
+            True if image contains valid data, False if black/empty
+        """
+        if image is None or image.size == 0:
+            return False
+        
+        # Check if image has reasonable brightness (not all black)
+        mean_brightness = np.mean(image)
+        if mean_brightness < self.min_brightness_threshold:
+            return False
+        
+        # Check if image has some variation (not completely uniform)
+        std_dev = np.std(image)
+        if std_dev < self.min_std_threshold:
+            return False
+        
+        return True
+    
     def _motion_recording_loop(self):
         """Main loop for motion data recording (runs in separate thread)"""
         while not self.stop_recording_event.is_set():
@@ -556,7 +692,7 @@ class DataRecorder:
                     try:
                         robot_state = self.robot_interface.get_robot_joint_state()
                         if robot_state is not None and len(robot_state) > 0:
-                            joint_positions = robot_state[:6] if len(robot_state) >= 6 else robot_state
+                            joint_positions = robot_state[:7] if len(robot_state) >= 7 else robot_state
                             joint_commands = joint_positions.copy()  # Assume commands match positions for now
                             
                             # Get gripper state using dedicated xArm SDK method
@@ -580,6 +716,7 @@ class DataRecorder:
                         print(f"Error getting robot joint state: {e}")
                 
                 # Skip recording if robot is not moving and has been stationary for too long
+                # Note: With motion tracking hooks, this logic is less critical but kept as backup
                 if not robot_is_moving:
                     time_since_motion = time.time() - self.last_motion_time
                     if time_since_motion > self.stationary_timeout and self.last_motion_time > 0:
@@ -600,10 +737,12 @@ class DataRecorder:
                             # Save images with timestamp
                             timestamp_str = f"{time.time():.3f}"
                             
-                            if rgb_image is not None:
+                            if rgb_image is not None and self._is_valid_image(rgb_image):
                                 rgb_filename = f"{self.current_session_id}_rgb_{timestamp_str}.jpg"
                                 rgb_path = self.motion_images_dir / rgb_filename
-                                cv2.imwrite(str(rgb_path), cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR))
+                                # Save RGB image using PIL to preserve RGB format
+                                pil_image = Image.fromarray(rgb_image.astype(np.uint8))
+                                pil_image.save(str(rgb_path), 'JPEG', quality=95)
                                 rgb_image_path = str(rgb_path)
                             
                             if depth_image is not None:
@@ -615,6 +754,11 @@ class DataRecorder:
                     
                     except Exception as e:
                         print(f"Error capturing camera frames: {e}")
+                
+                # Skip recording if no valid camera data (prevents black/empty image records)
+                if rgb_image_path is None:
+                    time.sleep(self.recording_timestep)
+                    continue
                 
                 # Create motion data record
                 motion_record = MotionDataRecord(
@@ -697,20 +841,20 @@ class DataRecorder:
         # Save images and get paths
         image_paths = {}
         
-        if wrist_image is not None:
-            # Resize to 224x224 for OpenVLA compatibility
-            wrist_resized = cv2.resize(wrist_image, (224, 224))
+        if wrist_image is not None and self._is_valid_image(wrist_image):
             wrist_filename = f"{self.current_session_id}_wrist_{timestamp_str}.jpg"
             wrist_path = self.motion_images_dir / wrist_filename
-            cv2.imwrite(str(wrist_path), cv2.cvtColor(wrist_resized, cv2.COLOR_RGB2BGR))
+            # Save RGB image using PIL to preserve RGB format (keep original resolution)
+            pil_image = Image.fromarray(wrist_image.astype(np.uint8))
+            pil_image.save(str(wrist_path), 'JPEG', quality=95)
             image_paths["wrist_cam"] = str(wrist_path)
         
-        if external_image is not None:
-            # Resize to 224x224 for OpenVLA compatibility
-            external_resized = cv2.resize(external_image, (224, 224))
+        if external_image is not None and self._is_valid_image(external_image):
             external_filename = f"{self.current_session_id}_external_{timestamp_str}.jpg"
             external_path = self.motion_images_dir / external_filename
-            cv2.imwrite(str(external_path), cv2.cvtColor(external_resized, cv2.COLOR_RGB2BGR))
+            # Save RGB image using PIL to preserve RGB format (keep original resolution)
+            pil_image = Image.fromarray(external_image.astype(np.uint8))
+            pil_image.save(str(external_path), 'JPEG', quality=95)
             image_paths["external_cam"] = str(external_path)
         
         # Create robot state

@@ -42,6 +42,8 @@ class Skill:
     image_id: str
     points_of_interest: Dict[str, PointOfInterest]  # Dictionary of labeled points
     explanations: List[str]
+    surface_info: Optional[Dict[str, Any]] = None  # Dictionary of surface information for replay
+    object_bbox: Optional[List[int]] = None  # Object bounding box [x, y, w, h] for pivot calculation
 
 class SkillGenerator:
     def __init__(self, llm_interface, skills_dir: str = "stored_skills"):
@@ -86,6 +88,14 @@ class SkillGenerator:
                         skill_data["points_of_interest"] = points
                     else:
                         skill_data["points_of_interest"] = {}
+                        
+                    # Handle surface_info field for backward compatibility
+                    if "surface_info" not in skill_data:
+                        skill_data["surface_info"] = None
+                        
+                    # Handle object_bbox field for backward compatibility
+                    if "object_bbox" not in skill_data:
+                        skill_data["object_bbox"] = None
                         
                     skill = Skill(**skill_data)
                     self.skills_cache[skill.name] = skill
@@ -1264,12 +1274,16 @@ class SkillGenerator:
         
         image_id = f"{abstract_action}_{target_object}_{timestamp}_{point_hash:06x}"
         
-        # Reset tracking for this generation
-        self.last_generation_files = {
-            'skill_paths': [],
-            'image_paths': [],
-            'image_id': image_id
-        }
+        # Initialize tracking for this generation if not already started
+        if not hasattr(self, 'last_generation_files') or not self.last_generation_files.get('skill_paths'):
+            self.last_generation_files = {
+                'skill_paths': [],
+                'image_paths': [],
+                'image_id': image_id
+            }
+        
+        # Update image_id to track latest generation
+        self.last_generation_files['image_id'] = image_id
         
         if object_info is None:
             if self.debug:
@@ -1810,6 +1824,51 @@ Only select interaction points within the segmented region.
             print("Error parsing skill definition")
             return None
 
+        # Extract surface information and object bounding box for skill replay
+        surface_info = None
+        object_bbox = None
+        
+        if object_info is not None:
+            # Extract object bounding box if available
+            if object_info.bbox is not None:
+                # Store bounding box as [x, y, w, h] format
+                object_bbox = list(object_info.bbox)
+            elif hasattr(object_info, 'mask') and object_info.mask is not None:
+                # Calculate bounding box from object segmentation mask
+                y_indices, x_indices = np.where(object_info.mask)
+                if len(x_indices) > 0 and len(y_indices) > 0:
+                    x_min, x_max = np.min(x_indices), np.max(x_indices)
+                    y_min, y_max = np.min(y_indices), np.max(y_indices)
+                    object_bbox = [int(x_min), int(y_min), int(x_max - x_min), int(y_max - y_min)]
+            
+            # Extract surface information
+            if object_info.surface_masks is not None:
+                surface_info = {}
+                for surface_name, surface_mask in object_info.surface_masks.items():
+                    # Extract alphabetical ID if it's in the format "surface_abc"
+                    if "_" in surface_name:
+                        alpha_id = surface_name.split("_")[1]
+                    else:
+                        alpha_id = surface_name
+                    
+                    # Store surface information needed for replay
+                    y_coords, x_coords = np.where(surface_mask)
+                    if len(y_coords) > 0:
+                        centroid_y = int(np.mean(y_coords))
+                        centroid_x = int(np.mean(x_coords))
+                        
+                        # Calculate surface normal if depth is available
+                        normal = None
+                        if hasattr(object_info, 'depth_image') and object_info.depth_image is not None:
+                            normal = self._calculate_surface_normals(surface_mask, object_info.depth_image, object_info.camera_intrinsics)
+                        
+                        surface_info[alpha_id] = {
+                            'surface_name': surface_name,
+                            'centroid': [centroid_x, centroid_y],
+                            'area': int(np.sum(surface_mask)),
+                            'normal': normal  # (nx, ny, nz) or None
+                        }
+
         # Create skill using the skill_data
         skill = Skill(
             name=skill_data.get('skill_name', f"{abstract_action}_{target_object}_generic_{hash(image_id) & 0xFFFFFF:06x}"),
@@ -1821,7 +1880,9 @@ Only select interaction points within the segmented region.
             constraints=skill_data.get('constraints', []),
             explanations=skill_data.get('explanations', []),
             image_id=image_id,
-            points_of_interest=points_of_interest
+            points_of_interest=points_of_interest,
+            surface_info=surface_info,
+            object_bbox=object_bbox
         )
         
         # Store the processed object_info with the skill for future reference
@@ -2015,7 +2076,10 @@ Only select interaction points within the segmented region.
                 prerequisites=base_skill.prerequisites,
                 constraints=base_skill.constraints,
                 image_id=new_image_id,
-                points_of_interest=new_points
+                points_of_interest=new_points,
+                explanations=base_skill.explanations,
+                surface_info=base_skill.surface_info,  # Inherit surface info from base skill
+                object_bbox=base_skill.object_bbox  # Inherit object bounding box from base skill
             )
             
             adapted_skill_path = self._store_skill(adapted_skill)
@@ -2042,6 +2106,16 @@ Only select interaction points within the segmented region.
             Dictionary containing skill paths, image paths, and image ID
         """
         return self.last_generation_files.copy()
+    
+    def reset_generation_tracking(self):
+        """
+        Reset skill generation file tracking for a new task sequence
+        """
+        self.last_generation_files = {
+            'skill_paths': [],
+            'image_paths': [],
+            'image_id': None
+        }
     
     def list_skills(self) -> List[str]:
         """Return a list of all available skill names"""

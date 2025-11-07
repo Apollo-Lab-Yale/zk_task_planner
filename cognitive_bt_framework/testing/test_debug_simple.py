@@ -1,47 +1,53 @@
-#!/usr/bin/env python3
-
-import numpy as np
-import sys
 import os
+import sys
+import time
+sys.path.append(os.path.join(os.path.dirname(__file__), '…/…/…'))
 
-# Add the src directory to the path
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
+from xarm.wrapper import XArmAPI
+from configparser import ConfigParser
+parser = ConfigParser()
+parser.read('…/robot.conf')
+try:
+    ip = parser.get('xArm', 'ip')
+except:
+    ip = input('Please input the xArm ip address[10.1.10.199]:')
+    if not ip:
+        ip = '192.168.1.224'
 
-from vision.interaction_point_detector import RobustInteractionDetector
+arm = XArmAPI(ip)
+time.sleep(0.5)
 
-def test_debug_functionality():
-    """Simple test to verify debug functionality works."""
-    print("Testing debug functionality...")
-    
-    # Create simple test data
-    rgb = np.ones((100, 100, 3), dtype=np.uint8) * 128
-    depth = np.random.rand(100, 100) * 50 + 100
-    mask = np.ones((100, 100), dtype=bool)
-    
-    # Add a simple surface (flat region)
-    depth[40:60, 40:60] = 150  # Flat square
-    
-    # Initialize detector with debug
-    detector = RobustInteractionDetector(
-        debug=True, 
-        save_debug_images=True, 
-        debug_output_dir="simple_debug"
-    )
-    
-    # Detect points
-    points = detector.detect_interaction_points(
-        image=rgb,
-        mask=mask,
-        depth_data=depth,
-        max_points=5
-    )
-    
-    print(f"Detected {len(points)} points")
-    for i, point in enumerate(points):
-        print(f"Point {i+1}: ({point.x}, {point.y}) - {point.interaction_type.value} - Score: {point.score:.3f}")
-    
-    return points
+print('Cleaning warnings...')
+code = arm.clean_warn()
+print('clean_warn, code={}'.format(code))
 
-if __name__ == "__main__":
-    test_debug_functionality()
-    print("Debug test completed!")
+print('Cleaning errors...')
+code = arm.clean_error()
+print('clean_error, code={}'.format(code))
+
+print('Enabling motion...')
+code = arm.motion_enable(True)
+print('motion_enable, code={}'.format(code))
+
+print('Enabling gripper...')
+code = arm.set_gripper_enable(True)
+print('set_gripper_enable, code={}'.format(code))
+
+print('Setting mode to 0...')
+code = arm.set_mode(0)
+print('set_mode, code={}'.format(code))
+
+print('Setting state to 0...')
+code = arm.set_state(0)
+print('set_state, code={}'.format(code))
+
+print('Opening gripper...')
+code = arm.set_gripper_position(800, wait=True)
+print('set_gripper_position (open), code={}'.format(code))
+time.sleep(1)
+
+print('Closing gripper...')
+code = arm.set_gripper_position(0, wait=True)
+print('set_gripper_position (close), code={}'.format(code))
+time.sleep(1)
+

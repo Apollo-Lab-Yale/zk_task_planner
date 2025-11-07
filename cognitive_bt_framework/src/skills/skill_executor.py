@@ -35,7 +35,7 @@ from cognitive_bt_framework.src.robot_interface.xarm_curobo_interface import CuR
 # Import the updated stereo ArUco detector
 
 
-DETECTION_RETRIES = 3
+DETECTION_RETRIES = 10
 
 class DebugVisualizer:
     def __init__(self):
@@ -109,7 +109,8 @@ class DebugVisualizer:
 
 class DirectSkillExecutor:
     def __init__(self, robot_ip="192.168.1.224", camera_params=None, show_debug_windows=True, 
-                 calibrate_transform=True, use_zed_camera=True, fast_mode=False):
+                 calibrate_transform=True, use_zed_camera=True, fast_mode=True, 
+                 depth_capture_delay=0.0):
         """
         Initialize the direct skill executor with configurable camera selection
         
@@ -120,6 +121,7 @@ class DirectSkillExecutor:
             calibrate_transform: Whether to perform camera-to-robot transform calibration on startup
             use_zed_camera: If True, use ZED camera as primary. If False, use RealSense camera as primary
             fast_mode: If True, skip extensive verification and use minimal debugging
+            depth_capture_delay: Delay in seconds before capturing depth data for skill execution
         """
         self.use_zed_camera = use_zed_camera
         camera_type = "ZED" if use_zed_camera else "RealSense"
@@ -139,6 +141,7 @@ class DirectSkillExecutor:
         self.show_debug_windows = show_debug_windows and not fast_mode  # Disable debug in fast mode
         self.calibrate_transform = calibrate_transform and not fast_mode  # Skip calibration in fast mode
         self.fast_mode = fast_mode
+        self.depth_capture_delay = depth_capture_delay
         self.action_timeout = 240
         
         # Transform calibration (only relevant when using ZED camera)
@@ -160,8 +163,12 @@ class DirectSkillExecutor:
         self.perception_system = None
         self.current_object_info = None  # Store current object detection info for pivot calculations
         self.current_interaction_point_pixel = None  # Store pixel coordinates of interaction point
+        self.current_interaction_point_world = None  # Store 3D world coordinates of interaction point
         
         # Camera references (will be set based on use_zed_camera flag)
+        
+        # Data recording integration
+        self.data_recorder = None
         self.main_camera = None
         self.secondary_camera = None
         
@@ -1338,7 +1345,6 @@ class DirectSkillExecutor:
         """Execute a skill action using the CuRobo motion planner with camera poses"""
         try:
             start_time = time.time()
-            
             def is_timeout_approaching():
                 elapsed = time.time() - start_time
                 remaining = timeout - elapsed
@@ -1354,13 +1360,23 @@ class DirectSkillExecutor:
                 time.sleep(0.5)
             # Handle gripper actions directly
             if action.action_type == 'close_gripper':
+                if self.data_recorder:
+                    self.data_recorder.start_robot_motion(f"close_gripper")
                 force = action.parameters.get('force', 10.0)
-                return self.motion_planner.close_gripper(wait=True, timeout=100.0)
+                result = self.motion_planner.close_gripper(wait=True, timeout=100.0)
+                if self.data_recorder:
+                    self.data_recorder.end_robot_motion(f"close_gripper")
+                return result
                     
             elif action.action_type == 'open_gripper':
+                if self.data_recorder:
+                    self.data_recorder.start_robot_motion(f"open_gripper")
                 self.motion_planner.open_gripper(wait=True, timeout=100)
                 time.sleep(1)
-                return self.motion_planner.open_gripper(wait=True, timeout=100)
+                result = self.motion_planner.open_gripper(wait=True, timeout=100)
+                if self.data_recorder:
+                    self.data_recorder.end_robot_motion(f"open_gripper")
+                return result
                     
             elif action.action_type == 'retract_gripper':
                 # Move gripper back by specified distance
@@ -1369,7 +1385,12 @@ class DirectSkillExecutor:
                 
                 # Get current pose
                 pose = self.motion_planner.get_robot_tcp_pose()
-                success = self.motion_planner.retract_gripper()
+                if self.data_recorder:
+                    self.data_recorder.start_robot_motion(f"retract_gripper")
+                speed_factor = 2.0 if self.fast_mode else 1.5  # Increased retract speeds
+                success = self.motion_planner.retract_gripper(speed_factor=speed_factor)
+                if self.data_recorder:
+                    self.data_recorder.end_robot_motion(f"retract_gripper")
                 return success
                 if pose is None:
                     self.logger.error("Could not get current TCP pose for retraction")
@@ -1393,8 +1414,8 @@ class DirectSkillExecutor:
             # Handle twist action
             elif action.action_type == 'twist':
                 direction = action.parameters.get('direction', 'clockwise')
-                angular_velocity = action.parameters.get('angular_velocity', 0.8)
-                rotation_angle = 2 * np.pi#action.parameters.get('rotation_angle', 2 * np.pi)  # Default 90 degrees
+                angular_velocity = 2#action.parameters.get('angular_velocity', 1.5)
+                rotation_angle = np.pi#action.parameters.get('rotation_angle', 2 * np.pi)  # Default 90 degrees
                 
                 self.logger.info(f"Executing twist {direction} with angle {rotation_angle:.2f} rad")
                 
@@ -1405,12 +1426,16 @@ class DirectSkillExecutor:
                     return False
                 
                 # Execute the twist motion
+                if self.data_recorder:
+                    self.data_recorder.start_robot_motion(f"twist_{direction}")
                 success = self.motion_planner.execute_wrist_twist(
                     direction=direction,
                     rotation_angle=rotation_angle,
                     speed_factor=angular_velocity,
                     timeout=min(remaining_time, 30.0)
                 )
+                if self.data_recorder:
+                    self.data_recorder.end_robot_motion(f"twist_{direction}")
                 
                 return success
             
@@ -1432,10 +1457,15 @@ class DirectSkillExecutor:
                 
             # Execute based on action type
             if action.action_type == 'move_gripper_to_pose':
-                # Store interaction point pixel coordinates for later pivot calculations
+                # Store interaction point coordinates for later pivot calculations
                 if action.pixel_position is not None:
                     self.current_interaction_point_pixel = action.pixel_position
                     self.logger.info(f"Stored interaction point pixel coordinates: {self.current_interaction_point_pixel}")
+                
+                # Store 3D world coordinates of interaction point for pivot calculations
+                if action.position is not None:
+                    self.current_interaction_point_world = action.position.tolist() if isinstance(action.position, np.ndarray) else action.position
+                    self.logger.info(f"Stored interaction point world coordinates: {self.current_interaction_point_world}")
                 
                 # Position handling depends on camera type
                 target_position = action.position.tolist() if isinstance(action.position, np.ndarray) else action.position
@@ -1495,6 +1525,15 @@ class DirectSkillExecutor:
                 else:
                     self.logger.info("No object_info available for surface adjustment")
                 
+                # Start motion tracking
+                if self.data_recorder:
+                    # Get object name from ObjectInfo.name
+                    object_name = 'unknown_object'
+                    if hasattr(action, 'object_info') and action.object_info and hasattr(action.object_info, 'name'):
+                        object_name = action.object_info.name
+                    
+                    self.data_recorder.start_robot_motion(f"{action.action_type}_{object_name}")
+                
                 success, _, _ = self.motion_planner.move_to_pose_with_preparation(
                     target_position=adjusted_position,
                     target_orientation=target_orientation,
@@ -1509,6 +1548,15 @@ class DirectSkillExecutor:
                     tcp_standoff_m=0.00,
                     search_radius_m=search_radius if is_top_down else 0.05
                 )
+                
+                # End motion tracking
+                if self.data_recorder:
+                    # Get object name from ObjectInfo.name
+                    object_name = 'unknown_object'
+                    if hasattr(action, 'object_info') and action.object_info and hasattr(action.object_info, 'name'):
+                        object_name = action.object_info.name
+                    
+                    self.data_recorder.end_robot_motion(f"{action.action_type}_{object_name}")
                 
                 return success
                 
@@ -1560,44 +1608,71 @@ class DirectSkillExecutor:
                         # COORDINATE SYSTEM: Y+ = right, Y- = left, X- = forward/top, X+ = back/bottom
                         
                         # Use actual object bounding box if available
-                        if hasattr(self, 'current_object_info') and self.current_object_info and self.current_object_info.bbox:
-                            bbox = self.current_object_info.bbox  # [x, y, w, h] format in pixels
-                            bbox_x, bbox_y, bbox_w, bbox_h = bbox
+                        if hasattr(self, 'current_object_info') and self.current_object_info:
+                            bbox = None
+                            if self.current_object_info.bbox:
+                                bbox = self.current_object_info.bbox  # [x, y, w, h] format in pixels
+                            elif hasattr(self.current_object_info, 'mask') and self.current_object_info.mask is not None:
+                                # Fallback: calculate bounding box from segmentation mask
+                                mask = self.current_object_info.mask
+                                # Find contours in the mask
+                                contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                                if contours:
+                                    # Get bounding box from largest contour
+                                    largest_contour = max(contours, key=cv2.contourArea)
+                                    x, y, w, h = cv2.boundingRect(largest_contour)
+                                    bbox = [x, y, w, h]
+                                    self.logger.info(f"Calculated bounding box from segmentation mask: {bbox}")
                             
-                            # Convert pixel coordinates to world coordinates
-                            pixel_to_meter = self.estimate_pixel_to_meter_ratio(current_position)
-                            
-                            # Calculate actual distances using stored interaction point if available
-                            if hasattr(self, 'current_interaction_point_pixel') and self.current_interaction_point_pixel:
-                                # Use actual interaction point pixel coordinates
-                                interaction_px, interaction_py = self.current_interaction_point_pixel
+                            if bbox:
+                                bbox_x, bbox_y, bbox_w, bbox_h = bbox
                                 
-                                # CAMERA FRAME: X+ = right, Y+ = down
-                                # Calculate actual distances from interaction point to object edges
-                                if hinge_location == 'left':
-                                    # Distance from interaction point to LEFT edge (bbox_x)
-                                    pixel_distance = interaction_px - bbox_x
-                                    offset_distance = pixel_distance * pixel_to_meter 
-                                    # For left hinge: pivot to the left (more positive Y direction)
-                                    pivot_point = [current_position[0], current_position[1] + offset_distance, current_position[2]]
-                                elif hinge_location == 'right':
-                                    # Distance from interaction point to RIGHT edge (bbox_x + bbox_w)
-                                    pixel_distance = (bbox_x + bbox_w) - interaction_px
-                                    offset_distance = pixel_distance * pixel_to_meter
-                                    # For right hinge: per user requirement current_y - pivot_y > 0, so pivot more negative Y
-                                    pivot_point = [current_position[0], current_position[1] - offset_distance, current_position[2]]
-                                elif hinge_location == 'top':
-                                    # Distance from interaction point to TOP edge (bbox_y)
-                                    pixel_distance = interaction_py - bbox_y
-                                    offset_distance = pixel_distance * pixel_to_meter
-                                    pivot_point = [current_position[0] - offset_distance, current_position[1], current_position[2]]
-                                elif hinge_location == 'bottom':
-                                    # Distance from interaction point to BOTTOM edge (bbox_y + bbox_h)
-                                    pixel_distance = (bbox_y + bbox_h) - interaction_py
-                                    offset_distance = pixel_distance * pixel_to_meter
-                                    pivot_point = [current_position[0] + offset_distance, current_position[1], current_position[2]]
+                                # Convert pixel coordinates to world coordinates
+                                pixel_to_meter = self.estimate_pixel_to_meter_ratio(current_position)
+                                
+                                # Calculate pivot point using 3D world coordinates instead of pixel conversion
+                                if hasattr(self, 'current_interaction_point_world') and self.current_interaction_point_world:
+                                    # Use 3D world coordinates of interaction point for accurate pivot calculation
+                                    interaction_world_x, interaction_world_y, interaction_world_z = self.current_interaction_point_world
                                     
-                                self.logger.info(f"Using actual interaction point {self.current_interaction_point_pixel} for pivot calculation: pixel_distance={pixel_distance}, offset={offset_distance:.3f}m")
+                                    # Calculate 3D offset from interaction point to hinge edge using bounding box dimensions
+                                    # Convert bounding box dimensions to world units
+                                    bbox_width_world = bbox_w * pixel_to_meter
+                                    bbox_height_world = bbox_h * pixel_to_meter
+                                    
+                                    # Get interaction point pixel coordinates for offset calculation
+                                    if hasattr(self, 'current_interaction_point_pixel') and self.current_interaction_point_pixel:
+                                        interaction_px, interaction_py = self.current_interaction_point_pixel
+                                        
+                                        # CAMERA FRAME: X+ = right, Y+ = down
+                                        # ROBOT FRAME: Y+ = right, Y- = left, X- = forward/top, X+ = back/bottom
+                                        
+                                        # Calculate world position of the specific bounding box edge
+                                        if hinge_location == 'left':
+                                            # Left edge: offset from interaction point to left edge of bbox
+                                            pixel_offset_x = bbox_x - interaction_px
+                                            world_offset_y = pixel_offset_x * pixel_to_meter  # Camera X -> Robot Y
+                                            pivot_point = [interaction_world_x, interaction_world_y + world_offset_y, interaction_world_z]
+                                        elif hinge_location == 'right':
+                                            # Right edge: offset from interaction point to right edge of bbox
+                                            pixel_offset_x = (bbox_x + bbox_w) - interaction_px
+                                            world_offset_y = pixel_offset_x * pixel_to_meter  # Camera X -> Robot Y
+                                            pivot_point = [interaction_world_x, interaction_world_y + world_offset_y, interaction_world_z]
+                                        elif hinge_location == 'top':
+                                            # Top edge: offset from interaction point to top edge of bbox
+                                            pixel_offset_y = bbox_y - interaction_py
+                                            world_offset_x = pixel_offset_y * pixel_to_meter  # Camera Y -> Robot X (inverted)
+                                            pivot_point = [interaction_world_x - world_offset_x, interaction_world_y, interaction_world_z]
+                                        elif hinge_location == 'bottom':
+                                            # Bottom edge: offset from interaction point to bottom edge of bbox
+                                            pixel_offset_y = (bbox_y + bbox_h) - interaction_py
+                                            world_offset_x = pixel_offset_y * pixel_to_meter  # Camera Y -> Robot X (inverted)
+                                            pivot_point = [interaction_world_x - world_offset_x, interaction_world_y, interaction_world_z]
+                                            
+                                        self.logger.info(f"Calculated pivot using 3D world coordinates: interaction_point={self.current_interaction_point_world}, hinge={hinge_location}, pivot={pivot_point}, offset={world_offset_y if 'world_offset_y' in locals() else world_offset_x:.3f}m")
+                                    else:
+                                        self.logger.warning("No interaction point pixel coordinates available for offset calculation")
+                                        pivot_point = None
                             else:
                                 # Fallback: use middle of the specified edge of bounding box
                                 self.logger.info("No interaction point stored, using middle of bounding box edge")
@@ -1608,7 +1683,7 @@ class DirectSkillExecutor:
                                 elif hinge_location == 'right':
                                     # Distance from center to right edge
                                     offset_distance = bbox_w * 0.5 * pixel_to_meter
-                                    pivot_point = [current_position[0], current_position[1] + offset_distance, current_position[2]]
+                                    pivot_point = [current_position[0], current_position[1] - offset_distance, current_position[2]]
                                 elif hinge_location == 'top':
                                     # Distance from center to top edge
                                     offset_distance = bbox_h * 0.5 * pixel_to_meter
@@ -1623,12 +1698,12 @@ class DirectSkillExecutor:
                             # Fallback to reasonable estimates if no bounding box available
                             self.logger.warning("No object bounding box available, using estimated distances")
                             if hinge_location == 'left':
-                                offset_distance = 0.25  # 25cm fallback  
-                                # For left hinge: pivot to the left (more positive Y direction) 
-                                pivot_point = [current_position[0], current_position[1] + offset_distance, current_position[2]]
+                                offset_distance = 0.33  # 25cm fallback  
+                                # For left hinge: pivot to the left (negative Y direction) 
+                                pivot_point = [current_position[0], current_position[1] - offset_distance, current_position[2]]
                             elif hinge_location == 'right':
-                                offset_distance = 0.4   # 40cm fallback
-                                # For right hinge: per user requirement current_y - pivot_y > 0, so pivot more negative Y
+                                offset_distance = 0.33   # 25cm fallback (reduced from 0.4m)
+                                # For right hinge: pivot should be at the far right edge of object (negative Y direction)
                                 pivot_point = [current_position[0], current_position[1] - offset_distance, current_position[2]]
                             elif hinge_location == 'top':
                                 offset_distance = 0.3   # 30cm fallback
@@ -1722,7 +1797,7 @@ class DirectSkillExecutor:
                             current_position=current_position,
                             current_orientation=current_orientation,
                             radius=radius,
-                            arc_angle_degrees=55.0,  # Use conservative angle like in test
+                            arc_angle_degrees=70.0,  # Use conservative angle like in test
                             segments=5,
                             speed_factor=0.05,  # Use ultra conservative speed like in test
                             is_quat=False,  # Match test method setting
@@ -2024,6 +2099,10 @@ class DirectSkillExecutor:
                     
                 self.logger.info(f"Action {i} completed successfully")
             
+            # Record executed skill data including ObjectInfo
+            if self.data_recorder:
+                self.data_recorder.record_executed_skill(skill_command, target_object, skill)
+            
             # Log success and timing
             elapsed_time = time.time() - start_time
             success_msg = f"Successfully executed {skill_command} using {camera_type} camera in {elapsed_time:.2f}s"
@@ -2062,10 +2141,16 @@ class DirectSkillExecutor:
             # List to track executed skills for context
             executed_skills = []
             
+            # Reset skill generation file tracking for new sequence
+            if hasattr(self, 'skill_handler') and self.skill_handler:
+                if hasattr(self.skill_handler, 'skill_generator') and self.skill_handler.skill_generator:
+                    self.skill_handler.skill_generator.reset_generation_tracking()
+                    self.logger.info("Reset skill generation file tracking for new task sequence")
+            
             # Execute skills in sequence
             for i, (skill_name, parameters) in enumerate(skill_sequence):
                 self.logger.info(f"Executing skill {i+1}/{len(skill_sequence)}: {skill_name} {parameters}")
-                
+                time.sleep(1)
                 # Handle detect_object skill - perform detection and store result
                 if skill_name.lower() == 'detect_object':
                     target_object = parameters.strip()
@@ -2247,6 +2332,11 @@ class DirectSkillExecutor:
             
         finally:
             self.execution_start_time = None
+    
+    def set_data_recorder(self, data_recorder):
+        """Set the data recorder for motion tracking"""
+        self.data_recorder = data_recorder
+        self.logger.info("Data recorder set for motion tracking")
     
     def shutdown(self):
         """Clean shutdown of the system"""
@@ -2577,6 +2667,1030 @@ class DirectSkillExecutor:
             self.logger.error(f"Error in top-down grasp adjustment: {e}")
             return target_position
 
+    def set_data_recorder(self, data_recorder):
+        """
+        Set the data recorder for motion tracking during skill execution
+        
+        Args:
+            data_recorder: DataRecorder instance for tracking motion data
+        """
+        self.data_recorder = data_recorder
+        self.logger.info("Data recorder set for motion tracking")
+
+    def execute_stored_skill(self, skill_json_path: str) -> Tuple[bool, Optional[str]]:
+        """
+        Execute a stored skill from a JSON file
+        
+        Args:
+            skill_json_path: Path to the skill JSON file
+            
+        Returns:
+            Tuple of (success, error_message)
+        """
+        try:
+            import json
+            import cv2
+            import os
+            
+            # Load the skill JSON file
+            with open(skill_json_path, 'r') as f:
+                skill_data = json.load(f)
+            
+            # Set current skill name for placement detection
+            skill_filename = os.path.basename(skill_json_path)
+            self.current_skill_name = skill_data.get('name', skill_filename.replace('.json', ''))
+            self.logger.info(f"Executing stored skill: {self.current_skill_name}")
+            
+            # Extract the primitive sequence from the skill data
+            if 'primitive_sequence' not in skill_data:
+                return False, f"No primitive_sequence found in skill file: {skill_json_path}"
+            
+            primitive_sequence = skill_data['primitive_sequence']
+            points_of_interest = skill_data.get('points_of_interest', {})
+            surface_info = skill_data.get('surface_info', {})
+            object_bbox = skill_data.get('object_bbox', None)
+            image_id = skill_data.get('image_id', '')
+            
+            self.logger.info(f"Executing stored skill: {skill_data.get('name', 'unknown')}")
+            self.logger.info(f"Primitive sequence: {primitive_sequence}")
+            self.logger.info(f"Image ID: {image_id}")
+            if surface_info:
+                self.logger.info(f"Surface info available: {list(surface_info.keys())}")
+            if object_bbox:
+                self.logger.info(f"Object bounding box available: {object_bbox}")
+            
+            # Set up current_object_info with stored bounding box for pivot calculation
+            if object_bbox is not None:
+                # Create a mock ObjectInfo with the stored bounding box
+                from types import SimpleNamespace
+                self.current_object_info = SimpleNamespace()
+                self.current_object_info.bbox = object_bbox
+                self.current_object_info.mask = None  # Could be populated if needed
+                self.logger.info(f"Set current_object_info with stored bounding box: {object_bbox}")
+            else:
+                self.current_object_info = None
+                self.logger.info("No object bounding box available from stored skill")
+            
+            # For now, use stored pixel coordinates with live camera depth
+            # This is a compromise solution until we have proper 3D coordinates stored
+            self.logger.info("Using stored skill coordinates with live camera depth")
+            
+            # Always capture fresh camera images for each skill execution
+            # This ensures depth data reflects current environment state after previous skill changes
+            if self.depth_capture_delay > 0:
+                self.logger.info(f"Waiting {self.depth_capture_delay} seconds before capturing depth data...")
+                time.sleep(self.depth_capture_delay)
+            
+            self.logger.info("Capturing fresh camera frames for current environment state...")
+            try:
+                if hasattr(self.camera, 'get_frames'):
+                    frames = self.camera.get_frames()
+                    if frames:
+                        self.latest_color_image, self.latest_depth_image = frames
+                        self.logger.info("Successfully captured fresh camera frames for current skill")
+                    else:
+                        self.logger.error("Failed to capture camera frames")
+                        return False, "Could not capture camera frames"
+                else:
+                    self.logger.error("Camera does not have get_frames method")
+                    return False, "Camera get_frames method not available"
+            except Exception as e:
+                self.logger.error(f"Error capturing camera frames: {e}")
+                return False, f"Error capturing frames: {str(e)}"
+            
+            # Fallback to original behavior if no stored images
+            for primitive in primitive_sequence:
+                self.logger.info(f"Executing primitive: {primitive}")
+                success = self.execute_primitive_command(primitive, points_of_interest, surface_info)
+                if not success:
+                    return False, f"Failed to execute primitive: {primitive}"
+            
+            return True, None
+                
+        except Exception as e:
+            return False, f"Failed to execute stored skill {skill_json_path}: {str(e)}"
+        finally:
+            # Clear current skill name and object info
+            self.current_skill_name = None
+            self.current_object_info = None
+
+    def _load_stored_skill_images(self, skill_json_path: str, image_id: str) -> Optional[Dict[str, np.ndarray]]:
+        """
+        Load stored images associated with a skill
+        
+        Args:
+            skill_json_path: Path to the skill JSON file
+            image_id: Image ID from the skill data
+            
+        Returns:
+            Dictionary with 'rgb' and 'depth' images, or None if failed
+        """
+        try:
+            import cv2
+            import os
+            
+            # Determine images directory path
+            skill_dir = os.path.dirname(skill_json_path)
+            images_dir = os.path.join(skill_dir, 'images')
+            
+            # Construct image file paths
+            rgb_path = os.path.join(images_dir, f"{image_id}.png")
+            depth_path = os.path.join(images_dir, f"depth_image_{image_id}.png")
+            
+            self.logger.info(f"Looking for RGB image: {rgb_path}")
+            self.logger.info(f"Looking for depth image: {depth_path}")
+            
+            # Load RGB image
+            if not os.path.exists(rgb_path):
+                self.logger.error(f"RGB image not found: {rgb_path}")
+                return None
+                
+            rgb_image = cv2.imread(rgb_path)
+            if rgb_image is None:
+                self.logger.error(f"Failed to load RGB image: {rgb_path}")
+                return None
+            
+            # Convert BGR to RGB
+            rgb_image = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2RGB)
+            
+            # Load depth image
+            if not os.path.exists(depth_path):
+                self.logger.error(f"Depth image not found: {depth_path}")
+                return None
+                
+            depth_image = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+            if depth_image is None:
+                self.logger.error(f"Failed to load depth image: {depth_path}")
+                return None
+            
+            # Handle depth image format - stored images are often saved as RGB for visualization
+            if len(depth_image.shape) == 3:
+                if depth_image.shape[2] == 3:
+                    # For visualized depth images, convert to grayscale first
+                    depth_image = cv2.cvtColor(depth_image, cv2.COLOR_BGR2GRAY)
+                elif depth_image.shape[2] == 1:
+                    depth_image = depth_image[:, :, 0]
+                
+            # Since these are stored depth images that were converted for visualization,
+            # we need to convert them back to proper depth values
+            # The depth scale is typically applied during visualization, so we may need to reverse it
+            if depth_image.dtype == np.uint8:
+                # Convert 8-bit grayscale back to depth values
+                # This is an approximation - the original depth scaling may be lost
+                depth_image = depth_image.astype(np.uint16) * 65535 // 255
+            elif depth_image.dtype != np.uint16:
+                depth_image = depth_image.astype(np.uint16)
+            
+            self.logger.info(f"Successfully loaded stored images - RGB: {rgb_image.shape}, Depth: {depth_image.shape}")
+            
+            return {
+                'rgb': rgb_image,
+                'depth': depth_image
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error loading stored skill images: {e}")
+            return None
+
+    def execute_primitive_command(self, primitive: str, points_of_interest: dict, surface_info: dict = None) -> bool:
+        """
+        Execute a single primitive command with points of interest and surface information
+        
+        Args:
+            primitive: Primitive command string (e.g., "move_gripper_to_pose('tio', true, false)")
+            points_of_interest: Dictionary of available points of interest
+            surface_info: Dictionary of available surface information (optional)
+            
+        Returns:
+            Boolean indicating success
+        """
+        try:
+            # Parse the primitive command
+            import re
+            
+            if primitive.strip().startswith("move_gripper_to_pose("):
+                # Extract parameters from move_gripper_to_pose command
+                match = re.match(r"move_gripper_to_pose\('([^']+)',\s*(\w+),\s*(\w+)\)", primitive.strip())
+                if match:
+                    poi_name = match.group(1)
+                    is_top_down = match.group(2).lower() == 'true'
+                    is_side_grasp = match.group(3).lower() == 'true'
+                    
+                    if poi_name in points_of_interest:
+                        poi = points_of_interest[poi_name]
+                        pixel_coords = poi.get('pixel_coords', [])
+                        
+                        if len(pixel_coords) >= 2:
+                            # Store pixel coordinates for pivot calculations (matches original skill execution)
+                            self.current_interaction_point_pixel = pixel_coords
+                            self.logger.info(f"Set interaction point pixel coordinates for pivot calculation: {self.current_interaction_point_pixel}")
+                            
+                            # Convert to normalized coordinates for robot interface
+                            if hasattr(self, 'latest_color_image') and self.latest_color_image is not None:
+                                h, w = self.latest_color_image.shape[:2]
+                                norm_x = pixel_coords[0] / w
+                                norm_y = pixel_coords[1] / h
+                            else:
+                                # Use stored position if available
+                                position = poi.get('position', [])
+                                if len(position) >= 2:
+                                    norm_x, norm_y = position[0], position[1]
+                                else:
+                                    self.logger.error(f"Cannot determine position for POI: {poi_name}")
+                                    return False
+                            
+                            # Execute the movement based on the parameters
+                            # Signal motion start to data recorder
+                            if hasattr(self, 'data_recorder') and self.data_recorder:
+                                self.data_recorder.start_robot_motion("move_gripper_to_pose")
+                            
+                            # Check if this specific primitive is a placement movement
+                            is_placement_movement = False
+                            if hasattr(self, 'current_skill_name') and self.current_skill_name:
+                                skill_has_place = 'place' in self.current_skill_name.lower()
+                                # For stored skills, if the skill itself is a placement skill, treat move_gripper_to_pose as placement
+                                # POI names in stored skills are often generic identifiers, so we rely on skill name
+                                is_placement_movement = skill_has_place
+                                self.logger.info(f"Placement movement check - Skill name: '{self.current_skill_name}', has place: {skill_has_place}, applying placement offset: {is_placement_movement}")
+                            
+                            result = self._execute_grasp_movement(norm_x, norm_y, is_top_down, is_side_grasp, is_placement_movement)
+                            
+                            # Signal motion end to data recorder
+                            if hasattr(self, 'data_recorder') and self.data_recorder:
+                                self.data_recorder.end_robot_motion("move_gripper_to_pose")
+                            
+                            return result
+                        else:
+                            self.logger.error(f"Invalid pixel coordinates for POI: {poi_name}")
+                            return False
+                    else:
+                        self.logger.error(f"Point of interest not found: {poi_name}")
+                        return False
+                else:
+                    self.logger.error(f"Cannot parse move_gripper_to_pose command: {primitive}")
+                    return False
+                    
+            elif primitive.strip() == "close_gripper()":
+                self.logger.info("Attempting to close gripper...")
+                # Signal motion start to data recorder
+                if hasattr(self, 'data_recorder') and self.data_recorder:
+                    self.data_recorder.start_robot_motion("close_gripper")
+                    
+                success = self.motion_planner.close_gripper()
+                
+                # Signal motion end to data recorder
+                if hasattr(self, 'data_recorder') and self.data_recorder:
+                    self.data_recorder.end_robot_motion("close_gripper")
+                    
+                if success:
+                    self.logger.info("Gripper closed successfully")
+                else:
+                    self.logger.error("Failed to close gripper")
+                return success
+                
+            elif primitive.strip() == "open_gripper()":
+                self.logger.info("Attempting to open gripper...")
+                # Signal motion start to data recorder
+                if hasattr(self, 'data_recorder') and self.data_recorder:
+                    self.data_recorder.start_robot_motion("open_gripper")
+                    
+                success = self.motion_planner.open_gripper()
+                
+                # Signal motion end to data recorder
+                if hasattr(self, 'data_recorder') and self.data_recorder:
+                    self.data_recorder.end_robot_motion("open_gripper")
+                    
+                if success:
+                    self.logger.info("Gripper opened successfully")
+                else:
+                    self.logger.error("Failed to open gripper")
+                return success
+                
+            elif primitive.strip() == "retract_gripper()":
+                # Retract gripper by moving up 10cm
+                self.logger.info("Retracting gripper...")
+                # Signal motion start to data recorder
+                if hasattr(self, 'data_recorder') and self.data_recorder:
+                    self.data_recorder.start_robot_motion("retract_gripper")
+                    
+                speed_factor = 2.0 if self.fast_mode else 1.5  # Increased retract speeds
+                success = self.motion_planner.retract_gripper(distance=0.1, speed_factor=speed_factor)
+                
+                # Signal motion end to data recorder
+                if hasattr(self, 'data_recorder') and self.data_recorder:
+                    self.data_recorder.end_robot_motion("retract_gripper")
+                    
+                return success
+                
+            elif primitive.strip().startswith("twist("):
+                # Extract direction from twist command
+                match = re.match(r"twist\('([^']+)'\)", primitive.strip())
+                if match:
+                    direction = match.group(1)
+                    self.logger.info(f"Executing twist in direction: {direction}")
+                    
+                    # Execute wrist twist motion
+                    if direction.lower() in ['counterclockwise', 'counter_clockwise']:
+                        twist_direction = "counterclockwise"
+                    elif direction.lower() == 'clockwise':
+                        twist_direction = "clockwise"
+                    else:
+                        self.logger.error(f"Unknown twist direction: {direction}")
+                        return False
+                    
+                    # Signal motion start to data recorder
+                    if hasattr(self, 'data_recorder') and self.data_recorder:
+                        self.data_recorder.start_robot_motion(f"twist_{twist_direction}")
+                    
+                    # Execute wrist twist with a moderate rotation (π/4 radians = 45 degrees)
+                    success = self.motion_planner.execute_wrist_twist(
+                        direction=twist_direction,
+                        rotation_angle=np.pi,  # 45 degrees 
+                        speed_factor=1
+                    )
+                    
+                    # Signal motion end to data recorder
+                    if hasattr(self, 'data_recorder') and self.data_recorder:
+                        self.data_recorder.end_robot_motion(f"twist_{twist_direction}")
+                    
+                    return success
+                else:
+                    self.logger.error(f"Cannot parse twist command: {primitive}")
+                    return False
+                    
+            elif primitive.strip().startswith("pull("):
+                # Parse pull command with pivot support
+                # Format: pull('point', 'direction', is_button, has_pivot, 'hinge_location')
+                match = re.match(r"pull\('([^']+)',\s*'([^']+)',\s*(\w+),\s*(\w+),\s*'([^']*)'\)", primitive.strip())
+                if match:
+                    poi_name = match.group(1)
+                    force_direction = match.group(2)
+                    is_button = match.group(3).lower() == 'true'
+                    has_pivot = match.group(4).lower() == 'true' 
+                    hinge_location = match.group(5)
+                    
+                    self.logger.info(f"Executing pull: poi={poi_name}, direction={force_direction}, button={is_button}, pivot={has_pivot}, hinge={hinge_location}")
+                    
+                    # Check if poi_name is a surface ID rather than a point of interest
+                    if surface_info and poi_name in surface_info:
+                        # Use surface information
+                        surface_data = surface_info[poi_name]
+                        centroid = surface_data.get('centroid', [])
+                        surface_normal = surface_data.get('normal', None)
+                        
+                        if len(centroid) >= 2:
+                            # Convert centroid pixel coordinates to normalized coordinates
+                            if hasattr(self, 'latest_color_image') and self.latest_color_image is not None:
+                                h, w = self.latest_color_image.shape[:2]
+                                norm_x = centroid[0] / w
+                                norm_y = centroid[1] / h
+                            else:
+                                self.logger.error(f"Cannot determine image dimensions for surface centroid")
+                                return False
+                            
+                            self.logger.info(f"Using surface '{poi_name}' with centroid at ({centroid[0]}, {centroid[1]}) -> normalized ({norm_x:.3f}, {norm_y:.3f})")
+                            if surface_normal:
+                                self.logger.info(f"Surface normal: {surface_normal}")
+                            
+                            # Signal motion start to data recorder  
+                            if hasattr(self, 'data_recorder') and self.data_recorder:
+                                self.data_recorder.start_robot_motion(f"pull_{poi_name}")
+                            
+                            # Execute pull movement with surface normal information
+                            success = self._execute_pull_action(
+                                norm_x, norm_y, 
+                                force_direction, 
+                                is_button, 
+                                has_pivot, 
+                                hinge_location,
+                                surface_normal=surface_normal
+                            )
+                            
+                            # Signal motion end to data recorder
+                            if hasattr(self, 'data_recorder') and self.data_recorder:
+                                self.data_recorder.end_robot_motion(f"pull_{poi_name}")
+                            
+                            return success
+                        else:
+                            self.logger.error(f"Invalid surface centroid for surface: {poi_name}")
+                            return False
+                    
+                    elif poi_name in points_of_interest:
+                        poi = points_of_interest[poi_name]
+                        pixel_coords = poi.get('pixel_coords', [])
+                        
+                        if len(pixel_coords) >= 2:
+                            # Convert pixel coordinates to normalized coordinates
+                            if hasattr(self, 'latest_color_image') and self.latest_color_image is not None:
+                                h, w = self.latest_color_image.shape[:2]
+                                norm_x = pixel_coords[0] / w
+                                norm_y = pixel_coords[1] / h
+                            else:
+                                # Use position if available
+                                position = poi.get('position', [])
+                                if len(position) >= 2:
+                                    norm_x, norm_y = position[0], position[1]
+                                else:
+                                    self.logger.error(f"Cannot determine position for POI: {poi_name}")
+                                    return False
+                            
+                            # Signal motion start to data recorder  
+                            if hasattr(self, 'data_recorder') and self.data_recorder:
+                                self.data_recorder.start_robot_motion(f"pull_{poi_name}")
+                            
+                            # Execute pull movement using the action execution logic
+                            success = self._execute_pull_action(
+                                norm_x, norm_y, 
+                                force_direction, 
+                                is_button, 
+                                has_pivot, 
+                                hinge_location
+                            )
+                            
+                            # Signal motion end to data recorder
+                            if hasattr(self, 'data_recorder') and self.data_recorder:
+                                self.data_recorder.end_robot_motion(f"pull_{poi_name}")
+                            
+                            return success
+                        else:
+                            self.logger.error(f"Invalid pixel coordinates for POI: {poi_name}")
+                            return False
+                    else:
+                        self.logger.error(f"Point of interest not found: {poi_name}")
+                        return False
+                else:
+                    self.logger.error(f"Cannot parse pull command: {primitive}")
+                    return False
+                    
+            elif primitive.strip().startswith("push("):
+                # Parse push command with pivot support
+                # Format: push('point', 'direction', is_button, has_pivot, 'hinge_location')
+                match = re.match(r"push\('([^']+)',\s*'([^']+)',\s*(\w+),\s*(\w+),\s*'([^']*)'\)", primitive.strip())
+                if match:
+                    poi_name = match.group(1)
+                    force_direction = match.group(2)
+                    is_button = match.group(3).lower() == 'true'
+                    has_pivot = match.group(4).lower() == 'true' 
+                    hinge_location = match.group(5)
+                    
+                    self.logger.info(f"Executing push: poi={poi_name}, direction={force_direction}, button={is_button}, pivot={has_pivot}, hinge={hinge_location}")
+                    
+                    # Check if poi_name is a surface ID rather than a point of interest
+                    if surface_info and poi_name in surface_info:
+                        # Use surface information
+                        surface_data = surface_info[poi_name]
+                        centroid = surface_data.get('centroid', [])
+                        surface_normal = surface_data.get('normal', None)
+                        
+                        if len(centroid) >= 2:
+                            # Convert centroid pixel coordinates to normalized coordinates
+                            if hasattr(self, 'latest_color_image') and self.latest_color_image is not None:
+                                h, w = self.latest_color_image.shape[:2]
+                                norm_x = centroid[0] / w
+                                norm_y = centroid[1] / h
+                            else:
+                                self.logger.error(f"Cannot determine image dimensions for surface centroid")
+                                return False
+                            
+                            self.logger.info(f"Using surface '{poi_name}' with centroid at ({centroid[0]}, {centroid[1]}) -> normalized ({norm_x:.3f}, {norm_y:.3f})")
+                            if surface_normal:
+                                self.logger.info(f"Surface normal: {surface_normal}")
+                            
+                            # Signal motion start to data recorder  
+                            if hasattr(self, 'data_recorder') and self.data_recorder:
+                                self.data_recorder.start_robot_motion(f"push_{poi_name}")
+                            
+                            # Execute push movement with surface normal information
+                            success = self._execute_push_action(
+                                norm_x, norm_y, 
+                                force_direction, 
+                                is_button, 
+                                has_pivot, 
+                                hinge_location,
+                                surface_normal=surface_normal
+                            )
+                            
+                            # Signal motion end to data recorder
+                            if hasattr(self, 'data_recorder') and self.data_recorder:
+                                self.data_recorder.end_robot_motion(f"push_{poi_name}")
+                            
+                            return success
+                        else:
+                            self.logger.error(f"Invalid surface centroid for surface: {poi_name}")
+                            return False
+                    
+                    elif poi_name in points_of_interest:
+                        poi = points_of_interest[poi_name]
+                        pixel_coords = poi.get('pixel_coords', [])
+                        
+                        if len(pixel_coords) >= 2:
+                            # Convert pixel coordinates to normalized coordinates
+                            if hasattr(self, 'latest_color_image') and self.latest_color_image is not None:
+                                h, w = self.latest_color_image.shape[:2]
+                                norm_x = pixel_coords[0] / w
+                                norm_y = pixel_coords[1] / h
+                            else:
+                                # Use position if available
+                                position = poi.get('position', [])
+                                if len(position) >= 2:
+                                    norm_x, norm_y = position[0], position[1]
+                                else:
+                                    self.logger.error(f"Cannot determine position for POI: {poi_name}")
+                                    return False
+                            
+                            # Signal motion start to data recorder  
+                            if hasattr(self, 'data_recorder') and self.data_recorder:
+                                self.data_recorder.start_robot_motion(f"push_{poi_name}")
+                            
+                            # Execute push movement using the action execution logic
+                            success = self._execute_push_action(
+                                norm_x, norm_y, 
+                                force_direction, 
+                                is_button, 
+                                has_pivot, 
+                                hinge_location
+                            )
+                            
+                            # Signal motion end to data recorder
+                            if hasattr(self, 'data_recorder') and self.data_recorder:
+                                self.data_recorder.end_robot_motion(f"push_{poi_name}")
+                            
+                            return success
+                        else:
+                            self.logger.error(f"Invalid pixel coordinates for POI: {poi_name}")
+                            return False
+                    else:
+                        self.logger.error(f"Point of interest not found: {poi_name}")
+                        return False
+                else:
+                    self.logger.error(f"Cannot parse push command: {primitive}")
+                    return False
+                
+            else:
+                self.logger.error(f"Unknown primitive command: {primitive}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error executing primitive command {primitive}: {e}")
+            return False
+
+    def _execute_pull_action(self, norm_x: float, norm_y: float, force_direction: str, 
+                            is_button: bool, has_pivot: bool, hinge_location: str, surface_normal=None) -> bool:
+        """
+        Execute a pull action using the existing pull/push logic from action execution
+        """
+        try:
+            # Move to the target position first
+            success = self._execute_grasp_movement(norm_x, norm_y, False, True, False)
+            if not success:
+                self.logger.error("Failed to move to pull position")
+                return False
+            
+            # Calculate pivot point if needed
+            pivot_point = None
+            if has_pivot and hinge_location and hinge_location in ['top', 'bottom', 'left', 'right']:
+                self.logger.info(f"Using hinge location: {hinge_location}")
+                
+                # Get current gripper position
+                current_pose = self.motion_planner.get_robot_tcp_pose()
+                if current_pose is not None:
+                    current_position, _ = current_pose
+                    
+                    # Flatten the position array if it's nested
+                    if hasattr(current_position, 'flatten'):
+                        current_position = current_position.flatten()
+                    elif isinstance(current_position, (list, tuple)) and len(current_position) > 0:
+                        if isinstance(current_position[0], (list, tuple, np.ndarray)):
+                            current_position = current_position[0]
+                    
+                    # Calculate pivot point based on hinge location using actual object bounding box
+                    # COORDINATE SYSTEM: Y+ = right, Y- = left, X- = forward/top, X+ = back/bottom
+                    
+                    # Use actual object bounding box if available (from stored skill data)
+                    if hasattr(self, 'current_object_info') and self.current_object_info and self.current_object_info.bbox:
+                        bbox = self.current_object_info.bbox  # [x, y, w, h] format in pixels
+                        self.logger.info(f"Using stored object bounding box for pivot calculation: {bbox}")
+                        
+                        bbox_x, bbox_y, bbox_w, bbox_h = bbox
+                        
+                        # Convert pixel coordinates to world coordinates
+                        pixel_to_meter = self.estimate_pixel_to_meter_ratio(current_position)
+                        
+                        # Calculate pivot point using 3D world coordinates instead of pixel conversion
+                        if hasattr(self, 'current_interaction_point_world') and self.current_interaction_point_world:
+                            # Use 3D world coordinates of interaction point for accurate pivot calculation
+                            interaction_world_x, interaction_world_y, interaction_world_z = self.current_interaction_point_world
+                            
+                            # Calculate 3D offset from interaction point to hinge edge using bounding box dimensions
+                            # Convert bounding box dimensions to world units
+                            bbox_width_world = bbox_w * pixel_to_meter
+                            bbox_height_world = bbox_h * pixel_to_meter
+                            
+                            # Get interaction point pixel coordinates for offset calculation
+                            if hasattr(self, 'current_interaction_point_pixel') and self.current_interaction_point_pixel:
+                                interaction_px, interaction_py = self.current_interaction_point_pixel
+                                
+                                # CAMERA FRAME: X+ = right, Y+ = down
+                                # ROBOT FRAME: Y+ = right, Y- = left, X- = forward/top, X+ = back/bottom
+                                
+                                # Calculate world position of the specific bounding box edge
+                                if hinge_location == 'left':
+                                    # Left edge: offset from interaction point to left edge of bbox
+                                    pixel_offset_x = bbox_x - interaction_px
+                                    world_offset_y = pixel_offset_x * pixel_to_meter  # Camera X -> Robot Y
+                                    pivot_point = [interaction_world_x, interaction_world_y - world_offset_y, interaction_world_z]  # Left = negative Y
+                                elif hinge_location == 'right':
+                                    # Right edge: offset from interaction point to right edge of bbox
+                                    pixel_offset_x = (bbox_x + bbox_w) - interaction_px
+                                    world_offset_y = pixel_offset_x * pixel_to_meter  # Camera X -> Robot Y
+                                    pivot_point = [interaction_world_x, interaction_world_y - world_offset_y, interaction_world_z]  # Right = negative Y
+                                elif hinge_location == 'top':
+                                    # Top edge: offset from interaction point to top edge of bbox
+                                    pixel_offset_y = bbox_y - interaction_py
+                                    world_offset_x = pixel_offset_y * pixel_to_meter  # Camera Y -> Robot X (inverted)
+                                    pivot_point = [interaction_world_x - world_offset_x, interaction_world_y, interaction_world_z]  # Top = negative X
+                                elif hinge_location == 'bottom':
+                                    # Bottom edge: offset from interaction point to bottom edge of bbox
+                                    pixel_offset_y = (bbox_y + bbox_h) - interaction_py
+                                    world_offset_x = pixel_offset_y * pixel_to_meter  # Camera Y -> Robot X (inverted)
+                                    pivot_point = [interaction_world_x + world_offset_x, interaction_world_y, interaction_world_z]  # Bottom = positive X
+                                    
+                                self.logger.info(f"Calculated pivot using 3D world coordinates: interaction_point={self.current_interaction_point_world}, hinge={hinge_location}, pivot={pivot_point}, offset={world_offset_y if 'world_offset_y' in locals() else world_offset_x:.3f}m")
+                            else:
+                                self.logger.warning("No interaction point pixel coordinates available for offset calculation")
+                                pivot_point = None
+                        else:
+                            # Fallback: use middle of the specified edge of bounding box
+                            self.logger.info("No interaction point stored, using middle of bounding box edge")
+                            if hinge_location == 'left':
+                                # Distance from center to left edge
+                                offset_distance = bbox_w * 0.5 * pixel_to_meter
+                                pivot_point = [current_position[0], current_position[1] - offset_distance, current_position[2]]
+                            elif hinge_location == 'right':
+                                # Distance from center to right edge
+                                offset_distance = bbox_w * 0.5 * pixel_to_meter
+                                pivot_point = [current_position[0], current_position[1] - offset_distance, current_position[2]]
+                            elif hinge_location == 'top':
+                                # Distance from center to top edge
+                                offset_distance = bbox_h * 0.5 * pixel_to_meter
+                                pivot_point = [current_position[0] - offset_distance, current_position[1], current_position[2]]
+                            elif hinge_location == 'bottom':
+                                # Distance from center to bottom edge
+                                offset_distance = bbox_h * 0.5 * pixel_to_meter
+                                pivot_point = [current_position[0] + offset_distance, current_position[1], current_position[2]]
+                            
+                            self.logger.info(f"Using object bounding box for pivot calculation: bbox={bbox}, offset={offset_distance:.3f}m")
+                    else:
+                        # Fallback to reasonable estimates if no bounding box available
+                        self.logger.warning("No object bounding box available, using estimated distances")
+                        if hinge_location == 'left':
+                            offset_distance = 0.33  # 33cm fallback  
+                            # For left hinge: pivot to the left (negative Y direction) 
+                            pivot_point = [current_position[0], current_position[1] - offset_distance, current_position[2]]
+                        elif hinge_location == 'right':
+                            offset_distance = 0.33   # 33cm fallback
+                            # For right hinge: pivot should be at the far right edge of object (negative Y direction)
+                            pivot_point = [current_position[0], current_position[1] - offset_distance, current_position[2]]
+                        elif hinge_location == 'top':
+                            offset_distance = 0.3   # 30cm fallback
+                            pivot_point = [current_position[0] - offset_distance, current_position[1], current_position[2]]
+                        elif hinge_location == 'bottom':
+                            offset_distance = 0.3   # 30cm fallback
+                            pivot_point = [current_position[0] + offset_distance, current_position[1], current_position[2]]
+                    
+                    self.logger.info(f"Hinge pivot point calculated: gripper={current_position}, hinge={hinge_location}, pivot={pivot_point}")
+            
+            # Execute pull using existing motion planner logic
+            distance = 0.15  # Standard pull distance
+            
+            if pivot_point is not None:
+                # Use pivoted pull
+                current_pose = self.motion_planner.get_tcp_pose_api()
+                if current_pose is not None:
+                    current_position, current_orientation = current_pose
+                    pivot_point_array = np.array(pivot_point)
+                    
+                    # Calculate radius based on hinge location
+                    if hinge_location and hinge_location in ['top', 'bottom', 'left', 'right']:
+                        # For hinge location, the radius should be the distance from interaction point to hinge edge
+                        # The current_position is the interaction point, pivot_point is calculated hinge location
+                        radius = np.linalg.norm(np.array(current_position) - pivot_point_array)
+                        self.logger.info(f"Using hinge-based radius calculation: hinge_location={hinge_location}, radius={radius:.3f}")
+                    else:
+                        # Legacy radius calculation (distance from current position to pivot)
+                        radius = np.linalg.norm(np.array(current_position) - pivot_point_array)
+                        self.logger.info(f"Using legacy pivot radius calculation: radius={radius:.3f}")
+                    
+                    success = self.motion_planner.execute_pivot_pull_direct_xarm(
+                        pivot_point=pivot_point_array,
+                        current_position=current_position,
+                        current_orientation=current_orientation,
+                        radius=radius,
+                        arc_angle_degrees=70.0,  # Use conservative angle like in test
+                        segments=5,
+                        speed_factor=0.05,  # Use ultra conservative speed like in test
+                        is_quat=False,  # Match test method setting
+                        hinge_location=hinge_location,  # Pass hinge location for logging
+                        is_push=False  # Pass the actual push/pull action type
+                    )
+                else:
+                    self.logger.error("Could not get current pose for pivoted pull")
+                    success = False
+            else:
+                # Use standard pull with surface normal if available
+                success, _, _ = self.motion_planner.plan_push_pull(
+                    distance=distance,
+                    is_push=False,
+                    custom_normal=surface_normal,
+                    force_magnitude=10.0
+                )
+            
+            return success
+            
+        except Exception as e:
+            self.logger.error(f"Error executing pull action: {e}")
+            return False
+
+    def _execute_push_action(self, norm_x: float, norm_y: float, force_direction: str, 
+                            is_button: bool, has_pivot: bool, hinge_location: str, surface_normal=None) -> bool:
+        """
+        Execute a push action using the existing push/pull logic from action execution
+        """
+        try:
+            # Move to the target position first
+            success = self._execute_grasp_movement(norm_x, norm_y, False, True, False)
+            if not success:
+                self.logger.error("Failed to move to push position")
+                return False
+            
+            # Calculate pivot point if needed (same logic as pull)
+            pivot_point = None
+            if has_pivot and hinge_location and hinge_location in ['top', 'bottom', 'left', 'right']:
+                self.logger.info(f"Using hinge location: {hinge_location}")
+                
+                # Get current gripper position
+                current_pose = self.motion_planner.get_robot_tcp_pose()
+                if current_pose is not None:
+                    current_position, _ = current_pose
+                    
+                    # Flatten the position array if it's nested
+                    if hasattr(current_position, 'flatten'):
+                        current_position = current_position.flatten()
+                    elif isinstance(current_position, (list, tuple)) and len(current_position) > 0:
+                        if isinstance(current_position[0], (list, tuple, np.ndarray)):
+                            current_position = current_position[0]
+                    
+                    # Use actual object bounding box if available (from stored skill data)
+                    if hasattr(self, 'current_object_info') and self.current_object_info and self.current_object_info.bbox:
+                        bbox = self.current_object_info.bbox  # [x, y, w, h] format in pixels
+                        self.logger.info(f"Using stored object bounding box for pivot calculation: {bbox}")
+                        
+                        bbox_x, bbox_y, bbox_w, bbox_h = bbox
+                        
+                        # Convert pixel coordinates to world coordinates
+                        pixel_to_meter = self.estimate_pixel_to_meter_ratio(current_position)
+                        
+                        # Calculate pivot point using 3D world coordinates instead of pixel conversion
+                        if hasattr(self, 'current_interaction_point_world') and self.current_interaction_point_world:
+                            # Use 3D world coordinates of interaction point for accurate pivot calculation
+                            interaction_world_x, interaction_world_y, interaction_world_z = self.current_interaction_point_world
+                            
+                            # Calculate 3D offset from interaction point to hinge edge using bounding box dimensions
+                            # Convert bounding box dimensions to world units
+                            bbox_width_world = bbox_w * pixel_to_meter
+                            bbox_height_world = bbox_h * pixel_to_meter
+                            
+                            # Get interaction point pixel coordinates for offset calculation
+                            if hasattr(self, 'current_interaction_point_pixel') and self.current_interaction_point_pixel:
+                                interaction_px, interaction_py = self.current_interaction_point_pixel
+                                
+                                # CAMERA FRAME: X+ = right, Y+ = down
+                                # ROBOT FRAME: Y+ = right, Y- = left, X- = forward/top, X+ = back/bottom
+                                
+                                # Calculate world position of the specific bounding box edge
+                                if hinge_location == 'left':
+                                    # Left edge: offset from interaction point to left edge of bbox
+                                    pixel_offset_x = bbox_x - interaction_px
+                                    world_offset_y = pixel_offset_x * pixel_to_meter  # Camera X -> Robot Y
+                                    pivot_point = [interaction_world_x, interaction_world_y - world_offset_y, interaction_world_z]  # Left = negative Y
+                                elif hinge_location == 'right':
+                                    # Right edge: offset from interaction point to right edge of bbox
+                                    pixel_offset_x = (bbox_x + bbox_w) - interaction_px
+                                    world_offset_y = pixel_offset_x * pixel_to_meter  # Camera X -> Robot Y
+                                    pivot_point = [interaction_world_x, interaction_world_y - world_offset_y, interaction_world_z]  # Right = negative Y
+                                elif hinge_location == 'top':
+                                    # Top edge: offset from interaction point to top edge of bbox
+                                    pixel_offset_y = bbox_y - interaction_py
+                                    world_offset_x = pixel_offset_y * pixel_to_meter  # Camera Y -> Robot X (inverted)
+                                    pivot_point = [interaction_world_x - world_offset_x, interaction_world_y, interaction_world_z]  # Top = negative X
+                                elif hinge_location == 'bottom':
+                                    # Bottom edge: offset from interaction point to bottom edge of bbox
+                                    pixel_offset_y = (bbox_y + bbox_h) - interaction_py
+                                    world_offset_x = pixel_offset_y * pixel_to_meter  # Camera Y -> Robot X (inverted)
+                                    pivot_point = [interaction_world_x + world_offset_x, interaction_world_y, interaction_world_z]  # Bottom = positive X
+                                    
+                                self.logger.info(f"Calculated pivot using 3D world coordinates: interaction_point={self.current_interaction_point_world}, hinge={hinge_location}, pivot={pivot_point}, offset={world_offset_y if 'world_offset_y' in locals() else world_offset_x:.3f}m")
+                            else:
+                                self.logger.warning("No interaction point pixel coordinates available for offset calculation")
+                                pivot_point = None
+                        else:
+                            # Fallback: use middle of the specified edge of bounding box
+                            self.logger.info("No interaction point stored, using middle of bounding box edge")
+                            if hinge_location == 'left':
+                                # Distance from center to left edge
+                                offset_distance = bbox_w * 0.5 * pixel_to_meter
+                                pivot_point = [current_position[0], current_position[1] - offset_distance, current_position[2]]
+                            elif hinge_location == 'right':
+                                # Distance from center to right edge
+                                offset_distance = bbox_w * 0.5 * pixel_to_meter
+                                pivot_point = [current_position[0], current_position[1] - offset_distance, current_position[2]]
+                            elif hinge_location == 'top':
+                                # Distance from center to top edge
+                                offset_distance = bbox_h * 0.5 * pixel_to_meter
+                                pivot_point = [current_position[0] - offset_distance, current_position[1], current_position[2]]
+                            elif hinge_location == 'bottom':
+                                # Distance from center to bottom edge
+                                offset_distance = bbox_h * 0.5 * pixel_to_meter
+                                pivot_point = [current_position[0] + offset_distance, current_position[1], current_position[2]]
+                            
+                            self.logger.info(f"Using object bounding box for pivot calculation: bbox={bbox}, offset={offset_distance:.3f}m")
+                    else:
+                        # Fallback to reasonable estimates if no bounding box available
+                        self.logger.warning("No object bounding box available, using estimated distances")
+                        if hinge_location == 'left':
+                            offset_distance = 0.33  # 33cm fallback  
+                            # For left hinge: pivot to the left (negative Y direction) 
+                            pivot_point = [current_position[0], current_position[1] - offset_distance, current_position[2]]
+                        elif hinge_location == 'right':
+                            offset_distance = 0.33   # 33cm fallback
+                            # For right hinge: pivot should be at the far right edge of object (negative Y direction)
+                            pivot_point = [current_position[0], current_position[1] - offset_distance, current_position[2]]
+                        elif hinge_location == 'top':
+                            offset_distance = 0.3   # 30cm fallback
+                            pivot_point = [current_position[0] - offset_distance, current_position[1], current_position[2]]
+                        elif hinge_location == 'bottom':
+                            offset_distance = 0.3   # 30cm fallback
+                            pivot_point = [current_position[0] + offset_distance, current_position[1], current_position[2]]
+                    
+                    self.logger.info(f"Hinge pivot point calculated: gripper={current_position}, hinge={hinge_location}, pivot={pivot_point}")
+                else:
+                    self.logger.error("Could not get current robot pose for pivot calculation")
+            
+            # Execute push using existing motion planner logic
+            distance = 0.15  # Standard push distance
+            
+            if pivot_point is not None:
+                # Use pivoted push (though pivot push is less common than pivot pull)
+                current_pose = self.motion_planner.get_tcp_pose_api()
+                if current_pose is not None:
+                    current_position, current_orientation = current_pose
+                    pivot_point_array = np.array(pivot_point)
+                    
+                    # For pivoted push, we use the same method but with is_push=True
+                    success = self.motion_planner.execute_pivot_pull_direct_xarm(
+                        pivot_point=pivot_point_array,
+                        current_position=current_position,
+                        current_orientation=current_orientation,
+                        radius=np.linalg.norm(np.array(current_position[:2]) - pivot_point_array[:2]),
+                        arc_angle_degrees=70.0,  # Use conservative angle like in test
+                        segments=5,
+                        speed_factor=0.05,  # Use ultra conservative speed like in test
+                        is_quat=False,  # Match test method setting
+                        hinge_location=hinge_location,  # Pass hinge location for logging
+                        is_push=True  # Pass the actual push/pull action type
+                    )
+                else:
+                    self.logger.error("Could not get current pose for pivoted push")
+                    success = False
+            else:
+                # Use standard push with surface normal if available
+                success, _, _ = self.motion_planner.plan_push_pull(
+                    distance=distance,
+                    is_push=True,
+                    custom_normal=surface_normal,
+                    force_magnitude=10.0
+                )
+            
+            return success
+            
+        except Exception as e:
+            self.logger.error(f"Error executing push action: {e}")
+            return False
+
+    def _execute_grasp_movement(self, norm_x: float, norm_y: float, is_top_down: bool, is_side_grasp: bool, is_placement: bool = None) -> bool:
+        """
+        Execute a grasp movement to the specified normalized coordinates
+        
+        Args:
+            norm_x: Normalized X coordinate (0-1)
+            norm_y: Normalized Y coordinate (0-1)
+            is_top_down: Whether this is a top-down grasp
+            is_side_grasp: Whether this is a side grasp
+            is_placement: Whether this is a placement action (auto-detected if None)
+            
+        Returns:
+            Boolean indicating success
+        """
+        try:
+            # Check if we have images available (either stored or live)
+            if self.latest_color_image is None or self.latest_depth_image is None:
+                self.logger.error("No images available for grasp movement (neither stored nor live)")
+                return False
+            
+            # Convert normalized coordinates to pixel coordinates
+            h, w = self.latest_color_image.shape[:2]
+            pixel_x = int(norm_x * w)
+            pixel_y = int(norm_y * h)
+            
+            # Use perception system to convert pixel coordinates to 3D position (camera frame)
+            target_position_camera, confidence = self.perception_system._estimate_point_pose(
+                (pixel_x, pixel_y), 
+                self.latest_depth_image
+            )
+            
+            if target_position_camera is None:
+                self.logger.error("Failed to convert pixel coordinates to 3D position")
+                return False
+            
+            self.logger.info(f"Target 3D position (camera frame): {target_position_camera}, confidence: {confidence}")
+            
+            # Convert from camera frame to robot base frame
+            target_position_robot, target_orientation_robot = self.motion_planner.convert_cam_pose_to_base(
+                target_position_camera,
+                [0, 0, 0, 1],  # Identity quaternion for position-only transformation
+                do_translation=True
+            )
+            
+            self.logger.info(f"Target 3D position (robot frame): {target_position_robot}")
+            
+            # Use robot frame coordinates for motion planning
+            target_position = target_position_robot
+            
+            # Use the explicitly passed placement flag (no auto-detection at this level)
+            if is_placement is None:
+                is_placement = False
+            
+            # Calculate approach pose based on grasp type
+            if is_top_down:
+                # Top-down grasp: approach from above with vertical orientation
+                approach_position = target_position.copy()
+                if is_placement:
+                    # For placement, approach from higher to ensure clearance
+                    approach_position[2] += 0.08  # Approach from 8cm above for placement
+                    self.logger.info("Added 8cm z-offset for placement action")
+                # else:
+                #     # For grasping, smaller offset
+                #     approach_position[2] += 0.05  # Approach from 5cm above for grasping
+                
+                # Top-down orientation (gripper pointing down)
+                approach_orientation = [0, 1, 0, 0]  # 180 degrees around X-axis
+                
+            elif is_side_grasp:
+                # Side grasp: approach from the side
+                approach_position = target_position.copy()
+                if is_placement:
+                    # For placement, approach from higher and to the side
+                    # approach_position[0] -= 0.03  # Approach from 3cm to the side
+                    approach_position[2] += 0.05  # Approach from 5cm above for placement
+                    self.logger.info("Added side and z-offset for side placement action")
+                # else:
+                #     # For grasping
+                #     approach_position[0] -= 0.03  # Approach from 3cm to the side
+                
+                # Side grasp orientation (gripper horizontal)
+                approach_orientation = (0, 0.7071, 0, 0.7071)  # Identity quaternion
+                
+            else:
+                # Default approach
+                approach_position = target_position.copy()
+                if is_placement:
+                    approach_position[2] += 0.06  # Approach from 6cm above for placement
+                    self.logger.info("Added 6cm z-offset for default placement action")
+                else:
+                    approach_position[2] += 0.03  # Approach from 3cm above for grasping
+                approach_orientation = (0, 0.7071, 0, 0.7071)  # Identity quaternion
+            
+            # Execute the movement with separate position and orientation
+            self.logger.info(f"Moving to position: {approach_position}, orientation: {approach_orientation}")
+            speed_factor = 2.0 if self.fast_mode else 1.0
+            success = self.motion_planner.move_to_pose(
+                target_position=approach_position,
+                target_orientation=approach_orientation, 
+                speed_factor=speed_factor, 
+                execute=True
+            )
+            
+            if success:
+                self.logger.info("Grasp movement executed successfully")
+                return True
+            else:
+                self.logger.error("Failed to execute grasp movement")
+                return False
+            
+        except Exception as e:
+            self.logger.error(f"Error executing grasp movement: {e}")
+            return False
+
 
 def main():
     """Example usage of the direct skill executor with simplified ArUco interface"""
@@ -2614,7 +3728,7 @@ def main():
         
         # Move to home position
         print("Moving to home position...")
-        executor.move_to_home()
+        # executor.move_to_home()
         
         # Execute a skill using the selected camera
         print(f"Executing skill with {camera_type} camera...")

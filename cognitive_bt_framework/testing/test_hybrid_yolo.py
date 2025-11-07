@@ -95,7 +95,7 @@ def main():
     parser.add_argument('--classes', type=str, nargs='+', 
                         default=[],
                         help='Initial class prompts for detection (can be changed at runtime)')
-    parser.add_argument('--conf', type=float, default=0.3, 
+    parser.add_argument('--conf', type=float, default=0.1, 
                         help='Confidence threshold for detection')
     parser.add_argument('--width', type=int, default=640, help='Camera width')
     parser.add_argument('--height', type=int, default=480, help='Camera height')

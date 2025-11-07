@@ -153,3 +153,6 @@ data/
 *.ply
 test_skills/
 task_execution_data/
+
+*.tar.*
+*.zip
