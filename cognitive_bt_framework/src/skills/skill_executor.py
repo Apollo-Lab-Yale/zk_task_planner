@@ -2007,7 +2007,7 @@ class DirectSkillExecutor:
                     color_image,
                     depth_image,
                     object_info,
-                    task_context=task_context
+                    # task_context=self.task_context
                 )
                 
                 skill_time = time.time() - start_skill_time
