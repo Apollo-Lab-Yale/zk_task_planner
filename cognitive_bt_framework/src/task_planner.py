@@ -25,27 +25,32 @@ from cognitive_bt_framework.src.llm_interface.llm_interface_openai import LLMInt
 # Import data recording system
 from cognitive_bt_framework.src.data_recorder import DataRecorder
 
+# Import LLM query logger
+from cognitive_bt_framework.src.llm_interface.llm_query_logger import LLMQueryLogger
+
 
 class TaskPlanner:
     """
     High-level task planner that decomposes complex tasks into executable skill sequences
     """
     
-    def __init__(self, 
+    def __init__(self,
                  robot_ip: str = "192.168.1.224",
                  use_llm: bool = True,
                  enable_data_recording: bool = False,
                  recording_timestep: float = 0.1,
-                 collect_openvla_data: bool = False):
+                 collect_openvla_data: bool = False,
+                 enable_llm_logging: bool = False):
         """
         Initialize the task planner with proper tool integration
-        
+
         Args:
             robot_ip: IP address of the robot
             use_llm: Whether to use LLM for task decomposition (required for dynamic planning)
             enable_data_recording: Whether to enable comprehensive data recording (default: False for development)
             recording_timestep: Time interval for motion data recording during execution (seconds)
             collect_openvla_data: Whether to collect OpenVLA-compatible demonstration data during execution
+            enable_llm_logging: Whether to log all LLM queries and responses (default: False)
         """
         self.logger = logging.getLogger(__name__)
         self.robot_ip = robot_ip
@@ -53,7 +58,13 @@ class TaskPlanner:
         self.enable_data_recording = enable_data_recording
         self.recording_timestep = recording_timestep
         self.collect_openvla_data = collect_openvla_data
-        
+        self.enable_llm_logging = enable_llm_logging
+
+        # Initialize LLM query logger (shared across all components)
+        self.llm_query_logger = LLMQueryLogger(enabled=enable_llm_logging)
+        if enable_llm_logging:
+            self.logger.info("LLM query logging enabled")
+
         # Initialize skill executor (it handles everything: camera, perception, skill generation, execution)
         self.skill_executor = DirectSkillExecutor(
             robot_ip=robot_ip,
@@ -61,15 +72,16 @@ class TaskPlanner:
             use_zed_camera=False,  # Use RealSense
             show_debug_windows=False,
             calibrate_transform=False,
-            fast_mode=True
+            fast_mode=True,
+            llm_query_logger=self.llm_query_logger
         )
-        
+
         # Get camera reference for environment capture (for LLM context)
         self.camera = self.skill_executor.camera
-        
+
         # Initialize LLM interface for task decomposition only
         if self.use_llm:
-            self.llm = LLMInterfaceOpenAI()
+            self.llm = LLMInterfaceOpenAI(query_logger=self.llm_query_logger)
         
         # Initialize data recording system
         if self.enable_data_recording:
@@ -257,7 +269,7 @@ class TaskPlanner:
         
         try:
             # Get LLM response with vision
-            response = self.llm.get_response_with_image(prompt, image_b64)
+            response = self.llm.get_response_with_image(prompt, image_b64, caller="TaskPlanner.task_decomposition")
             
             # Record raw LLM response if data recording is enabled
             if self.data_recorder:
@@ -598,6 +610,17 @@ class TaskPlanner:
             # Disabling recording
             self.logger.info("Data recording disabled")
         
+    def set_llm_logging(self, enabled: bool):
+        """
+        Enable or disable LLM query logging at runtime
+
+        Args:
+            enabled: True to enable LLM logging, False to disable
+        """
+        self.enable_llm_logging = enabled
+        self.llm_query_logger.set_enabled(enabled)
+        self.logger.info(f"LLM query logging {'enabled' if enabled else 'disabled'}")
+
     def is_data_recording_enabled(self) -> bool:
         """
         Check if data recording is currently enabled
@@ -809,7 +832,8 @@ def test_task_planner():
             use_llm=True, 
             enable_data_recording=True, 
             recording_timestep=0.2,
-            collect_openvla_data=True  # Enable OpenVLA data collection
+            collect_openvla_data=True,  # Enable OpenVLA data collection
+            enable_llm_logging=True
         )
         
         # Test available skills
@@ -821,15 +845,15 @@ def test_task_planner():
         # Test task decomposition with dynamic LLM planning
         test_tasks = [
             # "move the paper bag to the stove and open the bottle",
-            # "open the bottle and put the cap in the bag."
+            # "open the bottle and put the cap in the paper bag."
             # "remove the towel to the paper bag then open the cabinet on the right"
             # "open the cabinet on the right then move the towel from the cabinet to the paper bag"
             # "open the pen and put the cap in the paper bag"
             # "move the towel to the paper bag then open the bottle"
             # "take the towel out of the cabinet on the right"
             # "move the towel to the paper bag then open the cabinet on the right"
-            "move the towel to the paper bag then open the pen"
-            # "turn on the kitchen light", 
+            # "move the towel to the paper bag then open the bottle"
+            "open the bottle then place the cap in the paper bag",
             # "open the bottle and pour water",
             # "clean up the counter and close all cabinets"
         ]

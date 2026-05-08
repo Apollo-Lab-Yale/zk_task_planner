@@ -499,8 +499,8 @@ class RobustInteractionDetector:
             kernel = np.ones((kernel_size, kernel_size), np.float32) / (kernel_size**2)
             local_mean = cv2.filter2D(depth, -1, kernel)
             
-            # Find protrusions (where depth is greater than local mean)
-            protrusion_map = depth - local_mean
+            # Find protrusions (where depth is less than local mean = closer to camera)
+            protrusion_map = local_mean - depth
             protrusion_map[~mask] = 0
             
             # Calculate local statistics for adaptive thresholding
@@ -567,42 +567,42 @@ class RobustInteractionDetector:
             
             local_mean = cv2.filter2D(depth.astype(np.float32), -1, kernel)
             
-            # Detect both indentations AND protrusions
-            depression_map = local_mean - depth  # Indentations (positive values)
-            protrusion_map = depth - local_mean  # Protrusions (positive values) 
-            
-            # Process indentations
-            depression_map[~mask] = 0
+            # Detect both protrusions AND indentations
+            protrusion_map = local_mean - depth  # Protrusions: positive when closer to camera than surroundings
+            indentation_map = depth - local_mean  # Indentations: positive when further from camera than surroundings
+
+            # Mask out invalid regions
             protrusion_map[~mask] = 0
-            
+            indentation_map[~mask] = 0
+
             # Find significant features for this scale
-            valid_depressions = depression_map[mask & (depression_map > 0)]
             valid_protrusions = protrusion_map[mask & (protrusion_map > 0)]
-            
+            valid_indentations = indentation_map[mask & (indentation_map > 0)]
+
             if self.debug:
-                print(f"[DEBUG V2]   {scale_name}: {len(valid_depressions)} depression pixels, {len(valid_protrusions)} protrusion pixels")
-            
-            # Process depressions (indentations)
-            if len(valid_depressions) > 0:
-                # Use adaptive threshold based on local statistics
-                dep_mean = np.mean(valid_depressions)
-                dep_std = np.std(valid_depressions)
-                threshold = max(np.percentile(valid_depressions, 90), dep_mean + 1.5 * dep_std)
-                
-                significant_depressions = (depression_map > threshold) & mask
-                self._process_depth_features(depression_map, significant_depressions, 
-                                           "indentation", scale_name, all_candidates)
-            
-            # Process protrusions (raised features)
+                print(f"[DEBUG V2]   {scale_name}: {len(valid_protrusions)} protrusion pixels, {len(valid_indentations)} indentation pixels")
+
+            # Process protrusions (raised features, closer to camera)
             if len(valid_protrusions) > 0:
                 # Use adaptive threshold based on local statistics
                 prot_mean = np.mean(valid_protrusions)
                 prot_std = np.std(valid_protrusions)
                 threshold = max(np.percentile(valid_protrusions, 90), prot_mean + 1.5 * prot_std)
-                
+
                 significant_protrusions = (protrusion_map > threshold) & mask
                 self._process_depth_features(protrusion_map, significant_protrusions,
                                            "protrusion", scale_name, all_candidates)
+
+            # Process indentations (recessed features, further from camera)
+            if len(valid_indentations) > 0:
+                # Use adaptive threshold based on local statistics
+                ind_mean = np.mean(valid_indentations)
+                ind_std = np.std(valid_indentations)
+                threshold = max(np.percentile(valid_indentations, 90), ind_mean + 1.5 * ind_std)
+
+                significant_indentations = (indentation_map > threshold) & mask
+                self._process_depth_features(indentation_map, significant_indentations,
+                                           "indentation", scale_name, all_candidates)
         
         # Rank all candidates and select the best ones
         all_candidates.sort(key=lambda x: x['quality_score'], reverse=True)

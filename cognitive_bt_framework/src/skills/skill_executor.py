@@ -108,12 +108,12 @@ class DebugVisualizer:
 
 
 class DirectSkillExecutor:
-    def __init__(self, robot_ip="192.168.1.224", camera_params=None, show_debug_windows=True, 
-                 calibrate_transform=True, use_zed_camera=True, fast_mode=True, 
-                 depth_capture_delay=0.0):
+    def __init__(self, robot_ip="192.168.1.224", camera_params=None, show_debug_windows=True,
+                 calibrate_transform=True, use_zed_camera=True, fast_mode=True,
+                 depth_capture_delay=0.0, llm_query_logger=None):
         """
         Initialize the direct skill executor with configurable camera selection
-        
+
         Args:
             robot_ip: IP address of the xArm robot
             camera_params: Camera configuration parameters
@@ -122,7 +122,9 @@ class DirectSkillExecutor:
             use_zed_camera: If True, use ZED camera as primary. If False, use RealSense camera as primary
             fast_mode: If True, skip extensive verification and use minimal debugging
             depth_capture_delay: Delay in seconds before capturing depth data for skill execution
+            llm_query_logger: Optional LLMQueryLogger instance for logging LLM queries and responses
         """
+        self.llm_query_logger = llm_query_logger
         self.use_zed_camera = use_zed_camera
         camera_type = "ZED" if use_zed_camera else "RealSense"
         print(f'Starting direct skill execution system initialization with {camera_type} camera')
@@ -153,7 +155,7 @@ class DirectSkillExecutor:
         self.valid_skills = {
             'open': 1, 'close': 1, 'pickup': 1,
             'place': 2, 'switchon': 1, 'switchoff': 1,
-            'twist': 1, 'detect_object': 1  # Add detect_object to valid skills
+            'twist': 1, 'detect_object': 1, "drop": 1  # Add detect_object and drop to valid skills
         }
         
         # Initialize image handling
@@ -839,7 +841,7 @@ class DirectSkillExecutor:
             )
             
             # Initialize LLM and skill handler components
-            llm_interface = LLMInterfaceOpenAI()
+            llm_interface = LLMInterfaceOpenAI(query_logger=self.llm_query_logger)
             skill_generator = SkillGenerator(llm_interface=llm_interface)
             self.skill_handler = SkillHandler(skill_generator, self.perception_system)
             
@@ -1377,7 +1379,17 @@ class DirectSkillExecutor:
                 if self.data_recorder:
                     self.data_recorder.end_robot_motion(f"open_gripper")
                 return result
-                    
+
+            elif action.action_type == 'drop':
+                # Drop action is simply opening the gripper to release the held object
+                if self.data_recorder:
+                    self.data_recorder.start_robot_motion(f"drop")
+                self.logger.info("Executing drop action - opening gripper to release object")
+                result = self.motion_planner.open_gripper(wait=True, timeout=100)
+                if self.data_recorder:
+                    self.data_recorder.end_robot_motion(f"drop")
+                return result
+
             elif action.action_type == 'retract_gripper':
                 # Move gripper back by specified distance
                 distance = 0.1
@@ -1415,7 +1427,7 @@ class DirectSkillExecutor:
             elif action.action_type == 'twist':
                 direction = action.parameters.get('direction', 'clockwise')
                 angular_velocity = 2#action.parameters.get('angular_velocity', 1.5)
-                rotation_angle = np.pi#action.parameters.get('rotation_angle', 2 * np.pi)  # Default 90 degrees
+                rotation_angle = (2 * np.pi) - 1.0#action.parameters.get('rotation_angle', 2 * np.pi)  # Default 90 degrees
                 
                 self.logger.info(f"Executing twist {direction} with angle {rotation_angle:.2f} rad")
                 
@@ -1531,31 +1543,39 @@ class DirectSkillExecutor:
                     object_name = 'unknown_object'
                     if hasattr(action, 'object_info') and action.object_info and hasattr(action.object_info, 'name'):
                         object_name = action.object_info.name
-                    
+
                     self.data_recorder.start_robot_motion(f"{action.action_type}_{object_name}")
-                
-                success, _, _ = self.motion_planner.move_to_pose_with_preparation(
+
+                # Determine orientation based on grasp type
+                # Use fixed orientations: top-down (180, 0, 0) or side grasp (160, -87, 20)
+                is_side_grasp = action.is_side_grasp if hasattr(action, 'is_side_grasp') else False
+                if is_top_down:
+                    grasp_orientation = None  # Will use force_top_down flag
+                elif is_side_grasp:
+                    grasp_orientation = 'side_grasp'  # Signal to use fixed side grasp orientation
+                else:
+                    grasp_orientation = 'side_grasp'  # Default to side grasp if not top-down
+
+                # Use direct xArm interface instead of CuRobo trajectory planning
+                # CuRobo is only used for frame transformation (convert_cam_pose_to_base)
+                success = self.motion_planner.move_to_pose_direct(
                     target_position=adjusted_position,
-                    target_orientation=target_orientation,
-                    execute=True,
-                    planning_timeout=min(remaining_time * 0.8, 10.0),
-                    speed_factor=1.0,
+                    target_orientation=grasp_orientation,
+                    force_top_down=is_top_down,
+                    speed=100,  # mm/s
+                    acc=1000,   # mm/s²
                     is_camera_frame=True,
                     is_place=is_place,
-                    depth_image=self.latest_depth_image,
-                    object_mask=object_mask,  # Pass object mask for better surface detection
-                    adjust_tcp_for_surface=is_top_down,
-                    tcp_standoff_m=0.00,
-                    search_radius_m=search_radius if is_top_down else 0.05
+                    wait=True
                 )
-                
+
                 # End motion tracking
                 if self.data_recorder:
                     # Get object name from ObjectInfo.name
                     object_name = 'unknown_object'
                     if hasattr(action, 'object_info') and action.object_info and hasattr(action.object_info, 'name'):
                         object_name = action.object_info.name
-                    
+
                     self.data_recorder.end_robot_motion(f"{action.action_type}_{object_name}")
                 
                 return success
@@ -1563,8 +1583,7 @@ class DirectSkillExecutor:
             elif action.action_type in ['push', 'pull']:
                 # Handle push/pull actions
                 distance = action.parameters.get('distance', 0.1)
-                force_magnitude = action.parameters.get('force_magnitude', 10.0)
-                
+
                 if action.parameters.get('is_button', False):
                     distance = 0.01
                     self.motion_planner.close_gripper()
@@ -1797,7 +1816,7 @@ class DirectSkillExecutor:
                             current_position=current_position,
                             current_orientation=current_orientation,
                             radius=radius,
-                            arc_angle_degrees=70.0,  # Use conservative angle like in test
+                            arc_angle_degrees=75.0,  # Use conservative angle like in test
                             segments=5,
                             speed_factor=0.05,  # Use ultra conservative speed like in test
                             is_quat=False,  # Match test method setting
@@ -2022,7 +2041,10 @@ class DirectSkillExecutor:
                 error_msg = f"Skill generation failed: {traceback.format_exc()}"
                 self.logger.error(error_msg)
                 return False, error_msg
-            
+
+            # Save manipulation specification file
+            self.save_manipulation_spec(skill_command, target_object, skill)
+
             # Generate and display SAM mask visualization
             sam_vis = None
             if hasattr(self.perception_system, 'segmenter') and self.perception_system.segmenter is not None:
@@ -2276,7 +2298,10 @@ class DirectSkillExecutor:
                         return False, error_msg
                     
                     self.logger.info(f"Successfully generated skill {i+1}")
-                    
+
+                    # Save manipulation specification file
+                    self.save_manipulation_spec(skill_command, target_object, skill, task_context=task_context)
+
                     # Execute the skill immediately
                     # Get camera transform for execution
                     if self.use_zed_camera and self.zed_to_robot_transform is not None:
@@ -2333,6 +2358,184 @@ class DirectSkillExecutor:
         finally:
             self.execution_start_time = None
     
+    def save_manipulation_spec(self, skill_command: str, target_object: str, skill, task_context: str = None):
+        """
+        Save a manipulation specification file containing the primitive sequence
+        and instantiated parameters converted to the world (robot base) frame.
+
+        Args:
+            skill_command: The skill command string (e.g., "pickup cup")
+            target_object: Name of the target object
+            skill: InstantiatedSkill instance with action_sequence
+            task_context: Optional task context string
+        """
+        try:
+            from pathlib import Path
+            import os
+
+            # Create output directory
+            spec_dir = Path("manipulation_specs")
+            spec_dir.mkdir(exist_ok=True)
+
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = spec_dir / f"manip_spec_{timestamp}_{skill_command.replace(' ', '_')}.json"
+
+            # Build primitive sequence list
+            primitive_sequence = []
+            for i, action in enumerate(skill.action_sequence):
+                primitive_sequence.append({
+                    "index": i,
+                    "action_type": action.action_type,
+                    "raw_parameters": {
+                        k: v.tolist() if isinstance(v, np.ndarray) else v
+                        for k, v in action.parameters.items()
+                        if k != 'surface_normal' and k != 'pivot_position' and k != 'object_bbox' and k != 'object_info'
+                    }
+                })
+
+            # Build instantiated parameters for each action in world frame
+            instantiated_actions = []
+            for i, action in enumerate(skill.action_sequence):
+                action_spec = {
+                    "index": i,
+                    "action_type": action.action_type,
+                }
+
+                # Continuous parameters (positions, orientations, forces)
+                continuous_params = {}
+
+                # Convert position from camera frame to world frame
+                if action.position is not None:
+                    cam_position = action.position.tolist() if isinstance(action.position, np.ndarray) else action.position
+                    continuous_params["position_camera_frame"] = cam_position
+
+                    try:
+                        world_pos, world_ori = self.motion_planner.convert_cam_pose_to_base(
+                            action.position,
+                            [0, 0, 0, 1],  # identity orientation for position-only conversion
+                            do_translation=True,
+                            debug=False
+                        )
+                        continuous_params["position_world_frame"] = (
+                            world_pos.tolist() if isinstance(world_pos, np.ndarray) else world_pos
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"Could not convert position to world frame for action {i}: {e}")
+                        continuous_params["position_world_frame"] = None
+
+                # Convert orientation
+                if action.orientation is not None:
+                    ori = action.orientation.tolist() if isinstance(action.orientation, np.ndarray) else action.orientation
+                    continuous_params["orientation_camera_frame"] = ori
+
+                    # Convert orientation to world frame
+                    if action.position is not None:
+                        try:
+                            _, world_ori = self.motion_planner.convert_cam_pose_to_base(
+                                action.position,
+                                action.orientation,
+                                do_translation=True,
+                                debug=False
+                            )
+                            continuous_params["orientation_world_frame"] = (
+                                world_ori.tolist() if isinstance(world_ori, np.ndarray) else world_ori
+                            )
+                        except Exception as e:
+                            self.logger.warning(f"Could not convert orientation to world frame for action {i}: {e}")
+                            continuous_params["orientation_world_frame"] = None
+
+                # Surface normal in world frame
+                surface_normal = action.parameters.get('surface_normal', None)
+                if surface_normal is not None:
+                    sn = surface_normal.tolist() if isinstance(surface_normal, np.ndarray) else surface_normal
+                    continuous_params["surface_normal_camera_frame"] = sn
+
+                    try:
+                        # Transform normal as a direction vector (no translation)
+                        world_normal, _ = self.motion_planner.convert_cam_pose_to_base(
+                            surface_normal, [0, 0, 0, 1], do_translation=False, debug=False
+                        )
+                        continuous_params["surface_normal_world_frame"] = (
+                            world_normal.tolist() if isinstance(world_normal, np.ndarray) else world_normal
+                        )
+                    except Exception as e:
+                        continuous_params["surface_normal_world_frame"] = None
+
+                # Pivot position in world frame
+                pivot_pos = action.parameters.get('pivot_position', None)
+                if pivot_pos is not None:
+                    pp = pivot_pos.tolist() if isinstance(pivot_pos, np.ndarray) else pivot_pos
+                    continuous_params["pivot_position_camera_frame"] = pp
+
+                    try:
+                        world_pivot, _ = self.motion_planner.convert_cam_pose_to_base(
+                            pivot_pos, [0, 0, 0, 1], do_translation=True, debug=False
+                        )
+                        continuous_params["pivot_position_world_frame"] = (
+                            world_pivot.tolist() if isinstance(world_pivot, np.ndarray) else world_pivot
+                        )
+                    except Exception as e:
+                        continuous_params["pivot_position_world_frame"] = None
+
+                # Other continuous params
+                if 'speed' in action.parameters:
+                    continuous_params["speed"] = action.parameters['speed']
+                if 'angular_velocity' in action.parameters:
+                    continuous_params["angular_velocity"] = action.parameters['angular_velocity']
+                if 'rotation_angle' in action.parameters:
+                    continuous_params["rotation_angle"] = action.parameters['rotation_angle']
+
+                # Discrete parameters (action types, grasp types, boolean flags, labels)
+                discrete_params = {}
+                if action.action_type == 'move_gripper_to_pose':
+                    discrete_params["is_top_down_grasp"] = action.is_top_down_grasp
+                    discrete_params["is_side_grasp"] = action.is_side_grasp
+
+                if 'is_parallel' in action.parameters:
+                    discrete_params["is_parallel"] = action.parameters['is_parallel']
+                if 'is_button' in action.parameters:
+                    discrete_params["is_button"] = action.parameters['is_button']
+                if 'has_pivot' in action.parameters:
+                    discrete_params["has_pivot"] = action.parameters['has_pivot']
+                if 'surface_label' in action.parameters:
+                    discrete_params["surface_label"] = action.parameters['surface_label']
+                if 'surface_keywords' in action.parameters:
+                    discrete_params["surface_keywords"] = action.parameters['surface_keywords']
+                if 'hinge_location' in action.parameters:
+                    discrete_params["hinge_location"] = action.parameters['hinge_location']
+                if 'direction' in action.parameters:
+                    discrete_params["direction"] = action.parameters['direction']
+                if 'point_label' in action.parameters:
+                    discrete_params["point_label"] = action.parameters['point_label']
+
+                if action.pixel_position is not None:
+                    discrete_params["pixel_position"] = list(action.pixel_position)
+
+                action_spec["continuous_parameters"] = continuous_params
+                action_spec["discrete_parameters"] = discrete_params
+                instantiated_actions.append(action_spec)
+
+            # Assemble full spec
+            spec = {
+                "timestamp": timestamp,
+                "skill_command": skill_command,
+                "skill_name": skill.skill_name,
+                "target_object": target_object,
+                "task_context": task_context,
+                "object_pixel_pose": list(skill.object_pixel_pose) if skill.object_pixel_pose else None,
+                "primitive_sequence": primitive_sequence,
+                "instantiated_actions": instantiated_actions,
+            }
+
+            with open(filename, 'w') as f:
+                json.dump(spec, f, indent=2, default=str)
+
+            self.logger.info(f"Saved manipulation specification to {filename}")
+
+        except Exception as e:
+            self.logger.error(f"Failed to save manipulation specification: {e}")
+            traceback.print_exc()
+
     def set_data_recorder(self, data_recorder):
         """Set the data recorder for motion tracking"""
         self.data_recorder = data_recorder
@@ -3401,8 +3604,7 @@ class DirectSkillExecutor:
                 success, _, _ = self.motion_planner.plan_push_pull(
                     distance=distance,
                     is_push=False,
-                    custom_normal=surface_normal,
-                    force_magnitude=10.0
+                    custom_normal=surface_normal
                 )
             
             return success
@@ -3567,8 +3769,7 @@ class DirectSkillExecutor:
                 success, _, _ = self.motion_planner.plan_push_pull(
                     distance=distance,
                     is_push=True,
-                    custom_normal=surface_normal,
-                    force_magnitude=10.0
+                    custom_normal=surface_normal
                 )
             
             return success
@@ -3631,55 +3832,44 @@ class DirectSkillExecutor:
                 is_placement = False
             
             # Calculate approach pose based on grasp type
+            # Use fixed orientations: top-down (180, 0, 0) or side grasp (160, -87, 20)
+            approach_position = target_position.copy()
+
             if is_top_down:
                 # Top-down grasp: approach from above with vertical orientation
-                approach_position = target_position.copy()
                 if is_placement:
-                    # For placement, approach from higher to ensure clearance
-                    approach_position[2] += 0.08  # Approach from 8cm above for placement
-                    self.logger.info("Added 8cm z-offset for placement action")
-                # else:
-                #     # For grasping, smaller offset
-                #     approach_position[2] += 0.05  # Approach from 5cm above for grasping
-                
-                # Top-down orientation (gripper pointing down)
-                approach_orientation = [0, 1, 0, 0]  # 180 degrees around X-axis
-                
+                    self.logger.info("Top-down placement action")
+                # Use None orientation with force_top_down=True to get (180, 0, 0) RPY
+                approach_orientation = None
+
             elif is_side_grasp:
                 # Side grasp: approach from the side
-                approach_position = target_position.copy()
                 if is_placement:
-                    # For placement, approach from higher and to the side
-                    # approach_position[0] -= 0.03  # Approach from 3cm to the side
-                    approach_position[2] += 0.05  # Approach from 5cm above for placement
-                    self.logger.info("Added side and z-offset for side placement action")
-                # else:
-                #     # For grasping
-                #     approach_position[0] -= 0.03  # Approach from 3cm to the side
-                
-                # Side grasp orientation (gripper horizontal)
-                approach_orientation = (0, 0.7071, 0, 0.7071)  # Identity quaternion
-                
+                    self.logger.info("Side grasp placement action")
+                # Use 'side_grasp' string to get fixed (160, -87, 20) RPY
+                approach_orientation = 'side_grasp'
+
             else:
-                # Default approach
-                approach_position = target_position.copy()
+                # Default to side grasp orientation
                 if is_placement:
-                    approach_position[2] += 0.06  # Approach from 6cm above for placement
-                    self.logger.info("Added 6cm z-offset for default placement action")
-                else:
-                    approach_position[2] += 0.03  # Approach from 3cm above for grasping
-                approach_orientation = (0, 0.7071, 0, 0.7071)  # Identity quaternion
-            
-            # Execute the movement with separate position and orientation
-            self.logger.info(f"Moving to position: {approach_position}, orientation: {approach_orientation}")
-            speed_factor = 2.0 if self.fast_mode else 1.0
-            success = self.motion_planner.move_to_pose(
+                    self.logger.info("Default placement action (using side grasp orientation)")
+                approach_orientation = 'side_grasp'
+
+            # Execute the movement using direct xArm interface (no CuRobo trajectory planning)
+            # Frame transformation already done above via convert_cam_pose_to_base
+            self.logger.info(f"Moving to position: {approach_position}, orientation: {approach_orientation}, is_top_down: {is_top_down}")
+            speed = 200 if self.fast_mode else 100  # mm/s
+            success = self.motion_planner.move_to_pose_direct(
                 target_position=approach_position,
-                target_orientation=approach_orientation, 
-                speed_factor=speed_factor, 
-                execute=True
+                target_orientation=approach_orientation,
+                force_top_down=is_top_down,
+                speed=speed,
+                acc=1000,
+                is_camera_frame=False,  # Already in robot frame
+                is_place=is_placement,
+                wait=True
             )
-            
+
             if success:
                 self.logger.info("Grasp movement executed successfully")
                 return True
@@ -3732,7 +3922,7 @@ def main():
         
         # Execute a skill using the selected camera
         print(f"Executing skill with {camera_type} camera...")
-        success, message = executor.execute_skill("open", "bottle")
+        success, message = executor.execute_skill("pickup", "bottle")
         
         if success:
             print(f"Skill execution successful: {message}")

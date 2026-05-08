@@ -438,9 +438,7 @@ class SkillHandler:
             
             # Create parameters dictionary
             action_params = {
-                'force_magnitude': self._get_force_magnitude(skill_parameters.get('force_threshold', 'medium')),
                 'speed': self._get_speed_value(skill_parameters.get('speed_requirement', 'medium')),
-                'precision': skill_parameters.get('precision_required', 'medium'),
                 'is_parallel': parameters.get('force_direction', 'perpendicular') == 'parallel',
                 'is_button': parameters.get('is_button', False),
                 'has_pivot': parameters.get('has_pivot', False),
@@ -510,7 +508,6 @@ class SkillHandler:
             # Create parameters dictionary
             action_params = {
                 'speed': self._get_speed_value(skill_parameters.get('speed_requirement', 'medium')),
-                'precision': skill_parameters.get('precision_required', 'medium'),
                 'point_label': point_label
             }
             
@@ -549,7 +546,6 @@ class SkillHandler:
             action_params = {
                 'direction': direction,
                 'angular_velocity': self._get_angular_velocity(skill_parameters.get('speed_requirement', 'medium')),
-                'precision': skill_parameters.get('precision_required', 'medium'),
                 'rotation_angle': self._get_default_rotation_angle()  # Default rotation amount
             }
             
@@ -584,15 +580,6 @@ class SkillHandler:
             return None
 
     
-    def _get_force_magnitude(self, force_threshold: str) -> float:
-        """Convert force threshold to concrete value"""
-        force_values = {
-            'low': 5.0,
-            'medium': 10.0,
-            'high': 20.0
-        }
-        return force_values.get(force_threshold.lower(), 10.0)
-
     def _get_speed_value(self, speed_requirement: str) -> float:
         """Convert speed requirement to concrete value"""
         speed_values = {
@@ -625,23 +612,6 @@ class SkillHandler:
         # Convert abstract parameters to concrete values
         if 'speed_requirement' in skill_parameters:
             execution_params['max_speed'] = self._get_speed_value(skill_parameters['speed_requirement'])
-            
-        if 'precision_required' in skill_parameters:
-            precision = skill_parameters['precision_required'].lower()
-            execution_params['position_tolerance'] = {
-                'low': 0.02,    # 2 cm
-                'medium': 0.01, # 1 cm
-                'high': 0.005   # 5 mm
-            }.get(precision, 0.01)
-            
-            execution_params['orientation_tolerance'] = {
-                'low': 0.1,    # ~5.7 degrees
-                'medium': 0.05, # ~2.9 degrees
-                'high': 0.02   # ~1.1 degrees
-            }.get(precision, 0.05)
-            
-        if 'force_threshold' in skill_parameters:
-            execution_params['max_force'] = self._get_force_magnitude(skill_parameters['force_threshold'])
             
         # Add object-specific parameters
         execution_params['object_pose'] = object_pose
@@ -1156,8 +1126,8 @@ class SkillHandler:
         y_axis = np.cross(z_axis, temp)
         y_axis = y_axis / np.linalg.norm(y_axis)
         
-        # Calculate x-axis
-        x_axis = np.cross(y_axis, z_axis)
+        # Calculate x-axis (z × y for right-handed coordinate frame)
+        x_axis = np.cross(z_axis, y_axis)
         x_axis = x_axis / np.linalg.norm(x_axis)
         
         # If parallel, adjust the approach direction

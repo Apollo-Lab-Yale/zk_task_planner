@@ -1,130 +1,60 @@
-\section{Technical Details: Object Detection and Parameter Creation Pipeline}
-\label{sec:technical_details}
-
-This section provides detailed algorithmic descriptions of the core components within our perception system, specifically focusing on the hybrid object detection approach, region of interest detection, and surface segmentation methods that enable robust parameter generation for skill primitives.
-
-
 \subsection{Hybrid YOLO Implementation}
 \label{subsec:hybrid_yolo}
 
-Our perception system employs a novel hybrid approach that combines YOLOWorld for object detection with FastSAM for precise segmentation, addressing the limitations of traditional single-model approaches in robotic manipulation tasks.
+Our perception system employs a novel hybrid approach that combines YOLOWorld for object detection with FastSAM for instance segmentation.
 
 \subsubsection{YOLOWorld and FastSAM Integration}
 \label{subsubsec:yolo_fastsam_integration}
 
-The hybrid detection pipeline operates by leveraging the complementary strengths of YOLOWorld's open-vocabulary detection capabilities and FastSAM's high-quality segmentation masks. YOLOWorld first identifies object instances and their bounding boxes in the scene, providing class-agnostic detection with customizable vocabulary. For each detected object above the confidence threshold $\tau_c$, we extract the corresponding bounding box region and apply FastSAM segmentation to obtain precise object masks.
+ YOLOWorld first identifies object instances and their bounding boxes in the scene, providing class-agnostic detection with customizable vocabulary. For each detected object above the confidence threshold $\tau_c$, we extract the corresponding bounding box region and apply FastSAM segmentation to obtain object masks.
 
-This two-stage approach addresses a key limitation of using either model independently: YOLOWorld excels at detecting diverse object categories but provides only bounding box annotations, while FastSAM generates high-quality segmentation masks but lacks object classification capabilities. By combining them, we achieve both accurate object detection and precise pixel-level segmentation.
-
-\subsubsection{Coordinate Transformation and Scaling}
-\label{subsubsec:coordinate_transformation}
-
-A critical aspect of the hybrid approach is handling coordinate transformations between YOLOWorld's resized input space and the original camera coordinate system. Given an original image of dimensions $(W_{orig}, H_{orig})$ and YOLO's square input size $S_{yolo}$, the transformation is:
-
-\begin{align}
-    \text{scale}_x &= \frac{W_{orig}}{S_{yolo}}, \quad \text{scale}_y = \frac{H_{orig}}{S_{yolo}} \\
-    \mathbf{b}_{camera} &= (\text{scale}_x \cdot x_1, \text{scale}_y \cdot y_1, \text{scale}_x \cdot x_2, \text{scale}_y \cdot y_2)
-\end{align}
-
-where $\mathbf{b}_{camera}$ represents the bounding box coordinates in the original camera frame.
-
-\subsubsection{Parallel Mask Extraction}
-\label{subsubsec:parallel_mask_extraction}
-
-To minimize computational overhead, we employ a parallel processing strategy for mask extraction. Each detected bounding box is processed independently using FastSAM, with a ThreadPoolExecutor managing concurrent segmentation tasks limited to $\min(|\mathcal{B}|, 4)$ threads, where $|\mathcal{B}|$ is the number of detected objects. For each bounding box region $I_{crop}$, FastSAM generates multiple candidate masks, and we select the mask with the largest area as the most likely representation of the target object.
-
-The parallel execution reduces total processing time from sequential processing $\sum_{i=1}^{|\mathcal{B}|} t_{seg}^i$ to approximately $\max_{i=1}^{|\mathcal{B}|} t_{seg}^i + t_{overhead}$, where $t_{seg}^i$ is the segmentation time for detection $i$. The extracted masks are then projected back to full image coordinates and combined with the original detection metadata to create comprehensive object representations containing both classification and precise spatial information.
+ For each bounding box region, FastSAM generates multiple candidate masks, and we select the mask with the largest area as the most likely representation of the target object. The extracted masks are then projected back to full image coordinates and combined with the original detection metadata to create object representations containing both classification and spatial information.
 
 
 \subsection{Region of Interest Detection}
 \label{subsec:roi_detection}
 
-The region of interest (ROI) detection system identifies manipulable interaction points within detected object masks using a robust multi-modal approach that combines geometric, topological, and depth-based analysis.
+The region of interest (ROI) detection system identifies interaction points within detected object masks using a multi-modal approach that combines contour-based geometric analysis with depth-based 3D feature detection.
 
 \subsubsection{Contour-Based Feature Extraction}
 \label{subsubsec:contour_features}
 
-The geometric feature extraction stage identifies structurally significant points on object boundaries that typically correspond to manipulable features. We employ two complementary detection methods:
-
-\textbf{Corner Detection:} Harris corner detection is applied to object contours to identify sharp geometric transitions that often correspond to graspable edges, handles, or structural features. Corners represent points where the local image gradient changes rapidly in multiple directions, making them geometrically stable and visually distinctive. The Harris corner response function is computed as:
-
-\begin{align}
-    R = \det(M) - k \cdot \text{trace}(M)^2
-\end{align}
-
-where $M$ is the structure tensor computed from image gradients, and $k$ is a sensitivity parameter. Points with high corner response values ($R > \tau_{corner}$) are retained as corner features with confidence scores proportional to their response strength.
-
-\textbf{Curvature Analysis:} High curvature points along object contours indicate significant shape changes that often correspond to functional features such as handles, knobs, or graspable protrusions. Curvature $\kappa$ at each contour point is estimated using discrete approximation:
-
-\begin{align}
-    \kappa(s) = \frac{|\mathbf{r}'(s) \times \mathbf{r}''(s)|}{|\mathbf{r}'(s)|^3}
-\end{align}
-
-where $\mathbf{r}(s)$ parameterizes the contour. Points exceeding the curvature threshold ($\kappa > \tau_{curv}$) are classified as high-curvature features, with confidence scores based on local curvature magnitude and consistency across neighboring points.
+Harris corner detection is applied to object contours to identify sharp geometric transitions that often correspond to graspable edges, handles, or structural features. Points with high corner response values are retained with confidence scores proportional to their response strength. Complementing corner detection, curvature analysis identifies high-curvature points along object contours that indicate significant shape changes corresponding to functional features such as handles, knobs, or graspable protrusions. Points exceeding a curvature threshold are classified as interaction candidates with confidence scores based on local curvature magnitude.
 
 \subsubsection{Depth-Based Analysis}
 \label{subsubsec:depth_analysis}
 
-The depth analysis stage complements geometric features by identifying 3D structural discontinuities that may not be apparent in 2D image analysis alone. This component detects:
+The depth analysis stage identifies 3D structural features that may not be apparent in 2D image analysis alone.
 
-\textbf{Depth Discontinuities:} Abrupt changes in depth values often correspond to object boundaries, handles, or protruding features that afford manipulation. We compute the depth gradient magnitude:
+\textbf{Depth Discontinuities:} Sobel gradient computation on the depth image detects abrupt depth changes corresponding to object boundaries, handles, or protruding features. Each detected edge point is scored by its gradient magnitude normalized against the maximum gradient within the object mask, yielding $s_i \in [0, 1]$.
 
-\begin{align}
-    |\nabla D| = \sqrt{\left(\frac{\partial D}{\partial x}\right)^2 + \left(\frac{\partial D}{\partial y}\right)^2}
-\end{align}
+\textbf{Protrusions and Indentations:} Multi-scale convolution at three kernel sizes computes local mean depth within the object mask. Regions where depth is significantly less than the local mean (closer to the camera than their surroundings) are identified as protrusions, while regions where depth significantly exceeds the local mean (further from the camera) are identified as indentations. Each detected feature point is scored by its depth prominence, the magnitude of deviation from the local mean, scaled and clamped to $[0, 1]$. A second detection pass using Gaussian kernels at multiple scales performs connected component analysis on the thresholded deviation maps, scoring each region by a combination of three factors: the mean depth prominence within the region, the shape compactness measured by the isoperimetric ratio $4\pi A / P^2$ (where $A$ is the region area and $P$ its perimeter), and a consistency term inversely proportional to the standard deviation of depth values within the region.
 
-Points where $|\nabla D| > \sigma_{depth}$ are identified as depth discontinuities. These features are particularly valuable for detecting handles, edges, or raised surfaces that provide natural grasping or pushing points.
-
-\textbf{Local Depth Extrema:} Local maxima and minima in the depth map within the object mask correspond to protruding or recessed features. These are identified using morphological operations and provide additional interaction candidates, particularly for objects with complex 3D geometry.
-
-\subsubsection{Multi-Modal Fusion and Point Scoring}
+\subsubsection{Point Filtering and Re-Scoring}
 \label{subsubsec:multimodal_fusion}
 
-The fusion stage combines geometric and depth-based features while eliminating redundant detections through non-maximum suppression (NMS). The NMS process ensures spatial diversity among selected points by suppressing features within distance $d_{min}$ of higher-confidence detections.
-
-\textbf{Confidence Score Computation:} Each interaction point receives a composite confidence score $s_i$ computed as:
+All detected points from all methods are pooled and filtered through greedy non-maximum suppression (NMS), which iterates through points in descending score order and suppresses any point within a minimum pixel distance of an already-selected higher-scoring point. After NMS, each surviving point's score is refined as a weighted combination:
 
 \begin{align}
-    s_i = w_{geom} \cdot s_{geom}^i + w_{depth} \cdot s_{depth}^i + w_{spatial} \cdot s_{spatial}^i
+    s_i = w_b \cdot s_{base}^i + w_t \cdot s_{tex}^i + w_d \cdot s_{depth}^i + w_e \cdot s_{edge}^i
 \end{align}
 
-where:
-\begin{itemize}
-    \item $s_{geom}^i$ represents the geometric feature strength (corner response or curvature magnitude)
-    \item $s_{depth}^i$ quantifies the depth feature significance (gradient magnitude or extrema prominence)
-    \item $s_{spatial}^i$ encodes spatial priors based on object center distance and boundary proximity
-    \item $w_{geom}$, $w_{depth}$, $w_{spatial}$ are learned or empirically determined weights
-\end{itemize}
+where $s_{base}^i$ is the original detection score from the method that produced the point, $s_{tex}^i$ is a texture penalty computed from the Laplacian response that penalizes points on highly textured regions where depth estimates are less reliable, $s_{depth}^i$ is a depth reliability term inversely proportional to local depth gradient magnitude, and $s_{edge}^i$ is a boundary distance term favoring points near but not on the object contour. The re-scored points are ranked and the top-$k$ candidates are selected for primitive parameter generation.
 
-\textbf{Point Type Classification:} Each detected feature is classified into one of several interaction types:
-\begin{itemize}
-    \item \texttt{corner}: Sharp geometric transitions suitable for precision grasping
-    \item \texttt{edge}: Linear features appropriate for sliding or pushing motions  
-    \item \texttt{handle}: Protruding features optimal for grasping and manipulation
-    \item \texttt{surface}: Flat regions suitable for pushing or support operations
-    \item \texttt{boundary}: Object boundary points for containment-based interactions
-\end{itemize}
-
-\textbf{Ranking and Selection:} The final interaction points are ranked by their composite confidence scores, with the top-$k$ points selected for primitive parameter generation. The ranking considers both individual feature strength and spatial distribution to ensure coverage of diverse interaction modalities. Points are also filtered based on 3D accessibility constraints, removing candidates that are occluded or positioned at extreme angles relative to the robot's workspace.
-
-\subsubsection{3D Point Generation and Backprojection}
+\subsubsection{3D Point Generation}
 \label{subsubsec:3d_point_generation}
 
-Selected 2D interaction points are converted to 3D coordinates using camera intrinsics and depth information. The backprojection function transforms pixel coordinates $(u, v)$ with depth $z$ to 3D world coordinates:
+Selected 2D interaction points are converted to 3D coordinates using the pinhole camera model. Given pixel coordinates $(u, v)$ and the corresponding depth value $z$, the 3D position is computed via backprojection using the camera intrinsic matrix $\mathbf{K}$ with focal lengths $(f_x, f_y)$ and principal point $(c_x, c_y)$. This 3D representation enables spatial reasoning about interaction points during skill generation and provides the coordinates used for robot motion planning.
 
-\begin{align}
-    \text{backproject}(u, v, z, \mathbf{K}) = z \cdot \begin{bmatrix} \frac{u - c_x}{f_x} \\ \frac{v - c_y}{f_y} \\ 1 \end{bmatrix}
-\end{align}
+\subsubsection{Surface Mask Generation and Filtering}
+\label{subsubsec:surface_filtering}
 
-where $\mathbf{K}$ is the camera intrinsic matrix with focal lengths $(f_x, f_y)$ and principal point $(c_x, c_y)$. This 3D representation enables spatial reasoning about interaction points and their relationships to environmental surfaces during skill generation.
+Candidate surface masks are generated by applying FastSAM in prompt-free segmentation mode to the scene image. The resulting masks are filtered by area to retain only functionally relevant surfaces, removing both small noise artifacts and overly large background regions. Each validated surface receives a unique alphabetical identifier used to reference the surface in primitive parameter specifications.
 
+For each validated surface mask, a 3D point cloud is extracted using the same backprojection described in Section~\ref{subsubsec:3d_point_generation}, with depth values filtered to the valid range and downsampled for efficiency. Surface normal estimation is then performed using RANSAC plane fitting on this point cloud. The algorithm repeatedly samples three random points, computes a candidate plane normal from their cross product, and counts how many points in the cloud lie within a distance threshold $\delta_{max}$ of the candidate plane. After $T$ iterations, the plane hypothesis with the most inliers is selected as the best-fit model, and its normal vector $\hat{\mathbf{n}}_s$ is taken as the surface normal. The fitting confidence is the inlier ratio $c_{fit} = N_{inlier}^* / N_{total}$, which directly reflects how well the surface conforms to a planar model.
 
-\subsection{Surface Detection and Normal Estimation}
-\label{subsec:surface_detection}
+The surface normal $\hat{\mathbf{n}}_s$ and centroid $\mathbf{c}_s$ provide the spatial characterization required for primitive parameter generation. The normal determines approach direction for push and pull primitives---perpendicular approach aligns the end-effector along $\hat{\mathbf{n}}_s$, while parallel approach uses a direction orthogonal to $\hat{\mathbf{n}}_s$ within the surface plane. The centroid serves as the default contact point when no specific interaction point is specified.
 
-The surface detection system identifies and labels environmental surfaces while excluding the target object, providing spatial anchors for primitive parameter generation. The approach leverages FastSAM's "segment everything" capability by first inverting the target object mask to create an environmental mask $M_{env} = \neg M_{obj}$, ensuring that detected surfaces represent genuine environmental features rather than parts of the target object. The masked scene image $I_{masked} = I \odot M_{env}$ is processed to generate comprehensive scene segmentation, producing candidate surface masks for tables, walls, containers, and other supporting surfaces.
-
-Surface filtering retains only meaningful surfaces based on area criteria, removing noise artifacts while preserving functionally relevant surfaces. Each validated surface receives a unique alphabetical identifier and is characterized through RANSAC-based plane fitting on 3D point clouds extracted from depth data. This process yields surface normal vectors $\hat{\mathbf{n}}_s$ and center points $\mathbf{c}_s$ that provide complete spatial characterization essential for determining approach angles and force directions in primitive operations.
 
 
 \subsection{Parameter Generation and Primitive Execution}
@@ -140,26 +70,4 @@ The system generates two specialized visualizations for LLM input: a surface-foc
 \subsubsection{LLM Primitive Parameter Mapping}
 \label{subsubsec:llm_parameter_mapping}
 
-The LLM receives structured prompts that explicitly map visual elements to primitive parameters. Surface labels from the first image correspond to push/pull targets, while interaction point circles from the second image provide gripper positioning coordinates. The system defines the available primitive set and their parameters:
-
-\textbf{Positioning Primitives:}
-\texttt{move\_gripper\_to\_pose(point\_label, is\_top\_down\_grasp, is\_side\_grasp)} positions the gripper at specified interaction points with orientation constraints determining approach angles.
-
-\textbf{Force-Based Primitives:}
-\texttt{push(surface\_label, force\_direction, is\_button, has\_pivot, hinge\_location)} and \texttt{pull(surface\_label, force\_direction, is\_button, has\_pivot, hinge\_location)} apply forces to surfaces with direction specification (\texttt{perpendicular} or \texttt{parallel} to surface normals) and pivot parameters for rotational motion.
-
-\textbf{Control Primitives:}
-\texttt{close\_gripper()}, \texttt{open\_gripper()}, \texttt{retract\_gripper()}, and \texttt{twist(direction)} provide fundamental manipulation capabilities with directional control for rotational operations.
-
-The LLM outputs structured JSON containing primitive sequences with parameters populated using only the provided visual labels, ensuring all generated parameters correspond to validated spatial locations from the perception pipeline.
-
-\subsubsection{Primitive Execution Pipeline}
-\label{subsubsec:primitive_execution}
-
-The skill execution system translates LLM-generated primitive sequences into robot actions through a motion planning pipeline utilizing CuRobo for collision-aware trajectory generation and the xArm API for direct robot control. The \texttt{DirectSkillExecutor} manages the execution context, validating parameters and coordinating between high-level primitives and low-level motion control.
-
-Positioning primitives utilize CuRobo's GPU-accelerated motion planning to generate collision-free trajectories, with fallback to direct xArm API waypoint control when planning fails. Force-based primitives implement hybrid position-force control, applying specified forces along computed directions while monitoring for successful object manipulation. For rotational objects, specialized pivot algorithms compute arc trajectories around specified hinge locations. The twist primitive operates through isolated wrist joint control, with rotation direction and axis determined by gripper orientation parameters.
-
-Parameter effects directly influence execution behavior: grasp orientation parameters (\texttt{is\_top\_down\_grasp}, \texttt{is\_side\_grasp}) determine approach trajectories and effective rotation axes, force direction parameters control contact force application relative to surface geometry, and hinge location specifications enable proper pivot motion computation for door and drawer operations. The execution pipeline maintains safety through velocity limiting, collision monitoring, and adaptive force control while ensuring parameter fidelity from perception through physical execution.
-
-
+The LLM receives structured prompts that explicitly map visual elements to primitive parameters. Surface labels from the first image correspond to push/pull targets, while interaction point circles from the second image provide gripper positioning coordinates.

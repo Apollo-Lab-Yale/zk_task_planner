@@ -156,3 +156,5 @@ task_execution_data/
 
 *.tar.*
 *.zip
+llm_logs/
+manipulation_specs/

@@ -11,17 +11,20 @@ import base64
 import numpy as np
 import asyncio
 import uuid
+import time
 from cognitive_bt_framework.utils import BOOL_PREDS, RELATIONAL_PREDS
+from cognitive_bt_framework.src.llm_interface.llm_query_logger import LLMQueryLogger
 
 
 class LLMInterfaceOpenAI:
-    def __init__(self, model_name="o3"):
+    def __init__(self, model_name="o3", query_logger: Optional[LLMQueryLogger] = None):
         self.client = OpenAI(api_key=get_openai_key())
         self.async_client = AsyncOpenAI(api_key=get_openai_key())
         self.model_name = model_name
         self.is_realtime = "realtime" in model_name
         self.conversation_history = []
         self.token_limit = 40000
+        self.query_logger = query_logger
 
     def add_to_history(self, role, content):
         new_message = {"role": role, "content": content}
@@ -269,11 +272,12 @@ class LLMInterfaceOpenAI:
 
     @sleep_and_retry
     @limits(calls=100, period=60)
-    async def query_llm(self, prompt):
+    async def query_llm(self, prompt, caller: str = "unknown"):
         if self.is_realtime:
             return await self.query_llm_realtime(prompt)
-        
+
         try:
+            start_time = time.time()
             self.conversation_history.append(prompt)
             response = await self.async_client.chat.completions.create(
                 model=self.model_name,
@@ -285,16 +289,34 @@ class LLMInterfaceOpenAI:
                 'role': 'llm',
                 'content': response.choices[0].message.content
             }])
+            duration_ms = (time.time() - start_time) * 1000
+            result = response.choices[0].message.content
             print(response)
-            return response.choices[0].message.content
+            if self.query_logger:
+                self.query_logger.log_query(
+                    caller=caller,
+                    prompt=prompt,
+                    response=result,
+                    model=self.model_name,
+                    duration_ms=duration_ms
+                )
+            return result
         except Exception as e:
             print(f"Error querying LLM: {e}")
+            if self.query_logger:
+                self.query_logger.log_query(
+                    caller=caller,
+                    prompt=prompt,
+                    response=f"[ERROR: {e}]",
+                    model=self.model_name
+                )
             return None
         
     @sleep_and_retry
     @limits(calls=100, period=60)
-    def query_llm_sync(self, prompt):
+    def query_llm_sync(self, prompt, caller: str = "unknown"):
         try:
+            start_time = time.time()
             self.conversation_history.append(prompt)
             response = self.client.chat.completions.create(
                 model=self.model_name,
@@ -306,25 +328,42 @@ class LLMInterfaceOpenAI:
                 'role': 'llm',
                 'content': response.choices[0].message.content
             }])
+            duration_ms = (time.time() - start_time) * 1000
+            result = response.choices[0].message.content
             print(response)
-            return response.choices[0].message.content
+            if self.query_logger:
+                self.query_logger.log_query(
+                    caller=caller,
+                    prompt=prompt,
+                    response=result,
+                    model=self.model_name,
+                    duration_ms=duration_ms
+                )
+            return result
         except Exception as e:
             print(f"Error querying LLM: {e}")
+            if self.query_logger:
+                self.query_logger.log_query(
+                    caller=caller,
+                    prompt=prompt,
+                    response=f"[ERROR: {e}]",
+                    model=self.model_name
+                )
             return None
 
     async def get_task_decomposition(self, task, known_objects, context):
         prompt = self.generate_prompt_htn(task, known_objects, context)
-        decomposition = await self.query_llm(prompt)
+        decomposition = await self.query_llm(prompt, caller="LLMInterface.get_task_decomposition")
         return parse_llm_response(decomposition)
 
     async def get_task_decomposition_ordered(self, task, known_objects, context):
         prompt = self.generate_prompt_htn_ordered(task, known_objects, context)
-        decomposition = await self.query_llm(prompt)
+        decomposition = await self.query_llm(prompt, caller="LLMInterface.get_task_decomposition_ordered")
         return parse_llm_response_ordered(decomposition)
 
     async def get_task_id(self, task, context, states):
         prompt = self.generate_prompt_task_id(task, context, states)
-        ret = await self.query_llm(prompt)
+        ret = await self.query_llm(prompt, caller="LLMInterface.get_task_id")
         context_object = ret.split('\n')[1]
         task_id = ret.split('\n')[0]
         return task_id, context_object
@@ -333,7 +372,7 @@ class LLMInterfaceOpenAI:
                               context, complete_condition):
         prompt = self.generate_behavior_tree_prompt(big_task, task, actions, conditions, example, known_objects,
                                                   completed_subtasks, context, complete_condition)
-        behavior_tree_xml = await self.query_llm(prompt)
+        behavior_tree_xml = await self.query_llm(prompt, caller="LLMInterface.get_behavior_tree")
         return self._clean_behavior_tree(behavior_tree_xml)
 
     async def refine_behavior_tree(self, big_task, task, actions, conditions, original_bt_xml, user_feedback, known_objects,
@@ -341,7 +380,7 @@ class LLMInterfaceOpenAI:
         prompt = self.generate_behavior_tree_refinement_prompt(big_task, task, actions, conditions, original_bt_xml,
                                                              user_feedback, known_objects, completed_subtasks,
                                                              example, context, complete_condition, image_context)
-        refined_behavior_tree_xml = await self.query_llm(prompt)
+        refined_behavior_tree_xml = await self.query_llm(prompt, caller="LLMInterface.refine_behavior_tree")
         return self._clean_behavior_tree(refined_behavior_tree_xml)
 
     async def get_object_states(self, image: np.ndarray, mask_generator) -> Tuple[Dict, np.ndarray, Dict]:
@@ -350,19 +389,19 @@ class LLMInterfaceOpenAI:
         cv2.imwrite('labeled_image.png', labeled_image)
         if not np.any(masks):
             return {}, masks, metadata
-            
+
         prompt = self.generate_state_query(image, masks, metadata)
         text_type = 'input_text' if self.is_realtime else 'text'
         image_type = "image_url"
         messages = [{
-            "role": "user", 
+            "role": "user",
             "content": [
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{self._encode_image(labeled_image)}"}},
                 {"type": text_type, "text": prompt}
             ]
         }]
-        
-        response_text = await self.query_llm(messages)
+
+        response_text = await self.query_llm(messages, caller="LLMInterface.get_object_states")
         print(response_text)
         return self._process_object_states(response_text, masks, metadata, image)
 
@@ -397,14 +436,15 @@ class LLMInterfaceOpenAI:
         
         return object_states, masks, metadata
     
-    def get_response_with_image(self, prompt: str, image_b64: str) -> str:
+    def get_response_with_image(self, prompt: str, image_b64: str, caller: str = "unknown") -> str:
         """
         Get response from LLM with image input for task planning
-        
+
         Args:
             prompt: Text prompt for the LLM
             image_b64: Base64 encoded image
-            
+            caller: Identifier for who initiated the query
+
         Returns:
             LLM response text
         """
@@ -425,15 +465,33 @@ class LLMInterfaceOpenAI:
                 ]
             }
         ]
-        
+
         try:
+            start_time = time.time()
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
                 max_completion_tokens=4096
                 # Remove temperature parameter - use default (1.0) for o4-mini model
             )
-            return response.choices[0].message.content
+            duration_ms = (time.time() - start_time) * 1000
+            result = response.choices[0].message.content
+            if self.query_logger:
+                self.query_logger.log_query(
+                    caller=caller,
+                    prompt=messages,
+                    response=result,
+                    model=self.model_name,
+                    duration_ms=duration_ms
+                )
+            return result
         except Exception as e:
             print(f"Error in get_response_with_image: {e}")
+            if self.query_logger:
+                self.query_logger.log_query(
+                    caller=caller,
+                    prompt=messages,
+                    response=f"[ERROR: {e}]",
+                    model=self.model_name
+                )
             return None

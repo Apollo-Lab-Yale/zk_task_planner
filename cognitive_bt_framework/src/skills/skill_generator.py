@@ -1539,16 +1539,6 @@ Only select interaction points within the segmented region.
                 • ENSURE the twist direction matches the desired object motion
                 • CONSIDER the object's physical constraints and threading direction
 
-                --- OPENING MECHANISMS ---
-                
-                BUTTON-BASED OPENING:
-                • Some objects may open via button press rather than traditional handles
-                • For objects like microwaves, coffee makers, printers, electronic devices
-                • Look for buttons, touch panels, or pressure-sensitive areas
-                • Use push() with is_button=True for button activation
-                • Common button locations: front panel, side panel, top panel
-                • After button press, object may automatically open or unlock for manual opening
-            
 
                 --- CRITICAL RULES (IN ORDER OF IMPORTANCE) ---
                 
@@ -1595,13 +1585,6 @@ Only select interaction points within the segmented region.
                 ❌ WRONG GRASP SELECTION WILL CAUSE TASK FAILURE
                 ❌ Always consider object height and distance from robot base
                 ❌ Choose grasp type based on robot reach limitations and ergonomics
-
-                5. LID/CAP REMOVAL COMPLETION:
-                ✓ When opening containers with lids or caps, the skill must fully remove the lid/cap
-                ✓ Use retract_gripper() to move the lid/cap completely away from the container opening
-                ✓ Ensure the container opening is fully accessible after lid/cap removal
-                ✓ For twist-off lids/caps, combine twist() and retract_gripper() actions
-                ✓ The removal should be complete, not just partial loosening
 
 
                 !!! CRITICAL POINT AND PIVOT POINT LOCATION RULE !!!
@@ -1761,8 +1744,6 @@ Only select interaction points within the segmented region.
                         ...
                     ],
                     "parameters": {{
-                        "force_threshold": "medium",
-                        "precision_required": "medium",
                         "speed_requirement": "slow"
                     }},
                     "prerequisites": [
@@ -1816,7 +1797,7 @@ Only select interaction points within the segmented region.
 
         pprint.pp(point_descriptions)
         # Get response
-        skill_response = self.llm.query_llm_sync(combined_prompt)
+        skill_response = self.llm.query_llm_sync(combined_prompt, caller="SkillGenerator.generate_skill")
         try:
             skill_response = skill_response.replace('```json', '').replace('```', '')
             skill_data = json.loads(skill_response)
@@ -1969,7 +1950,7 @@ Only select interaction points within the segmented region.
             comparison_prompt[1]["content"].append(img_data)
         
         # Query LLM for all comparisons at once
-        comparison_response = self.llm.query_llm_sync(comparison_prompt)
+        comparison_response = self.llm.query_llm_sync(comparison_prompt, caller="SkillGenerator.find_similar_skill")
         
         try:
             # Parse the JSON response
@@ -2057,7 +2038,7 @@ Only select interaction points within the segmented region.
             ]}
         ]
         
-        adaptation_response = self.llm.query_llm_sync(adaptation_prompt)
+        adaptation_response = self.llm.query_llm_sync(adaptation_prompt, caller="SkillGenerator.adapt_skill")
         try:
             adapted_data = json.loads(adaptation_response)
             

@@ -1704,7 +1704,143 @@ class CuRoboMotionPlanner:
                     print("Trajectory execution failed")
                     
             return success, trajectory, dt
-        
+
+    def move_to_pose_direct(
+            self,
+            target_position,
+            target_orientation=None,
+            force_top_down=False,
+            speed=100,
+            acc=1000,
+            is_camera_frame=True,
+            is_place=False,
+            wait=True
+        ):
+            """
+            Move directly to a target pose using the xArm SDK without CuRobo planning.
+
+            This is a simpler, faster alternative to move_to_pose_with_preparation that
+            bypasses motion planning and directly commands the robot to move in a straight
+            line to the target pose.
+
+            Args:
+                target_position: Target position [x, y, z] in meters (camera or base frame)
+                target_orientation: Target orientation as quaternion [x, y, z, w] or None for top-down
+                force_top_down: If True, use top-down orientation regardless of target_orientation
+                speed: Movement speed in mm/s (default: 100)
+                acc: Movement acceleration in mm/s² (default: 1000)
+                is_camera_frame: If True, convert from camera frame to base frame
+                is_place: If True, add 0.1m to z height
+                wait: If True, wait for motion to complete
+
+            Returns:
+                bool: True if motion succeeded, False otherwise
+            """
+            if self.arm is None:
+                print("Error: xArm not connected")
+                return False
+
+            # Convert from camera frame to base frame if needed
+            if is_camera_frame:
+                print(f"Converting pose from camera frame to base frame...")
+                print(f"Original position: {target_position}, orientation: {target_orientation}")
+
+                # Store original orientation type for later (could be 'side_grasp' string)
+                original_orientation = target_orientation
+
+                # Handle special orientation cases - use dummy quaternion for frame conversion
+                # since we only need the position converted
+                if target_orientation is None or isinstance(target_orientation, str):
+                    # Use identity quaternion for position conversion only
+                    conversion_orientation = [0, 0, 0, 1]  # [x, y, z, w] identity
+                    if target_orientation is None:
+                        force_top_down = True
+                else:
+                    conversion_orientation = target_orientation
+
+                # Convert pose using the transformation (only position matters for fixed orientations)
+                converted_position, _ = self.convert_cam_pose_to_base(
+                    target_position, conversion_orientation
+                )
+
+                if converted_position is None:
+                    print("Failed to convert camera frame pose to base frame")
+                    return False
+
+                # Update target position, keep original orientation type
+                target_position = converted_position
+                target_orientation = original_orientation
+                print(f"Converted position: {target_position}, orientation: {target_orientation}")
+
+            # Apply place offset if needed
+            if is_place:
+                target_position = np.array(target_position)
+                target_position[2] += 0.1
+
+            # Determine orientation based on grasp type
+            # Use fixed orientations for reliability:
+            # - Top-down: RPY = (180, 0, 0) degrees
+            # - Side grasp: RPY = (160, -87, 20) degrees
+            if force_top_down or target_orientation is None:
+                # Top-down orientation: gripper pointing straight down
+                roll = np.radians(180.0)
+                pitch = np.radians(0.0)
+                yaw = np.radians(0.0)
+            elif isinstance(target_orientation, str) and target_orientation == 'side_grasp':
+                # Side grasp orientation: fixed angles
+                roll = np.radians(160.0)
+                pitch = np.radians(-87.0)
+                yaw = np.radians(20.0)
+            else:
+                # Convert quaternion to Euler angles (roll, pitch, yaw)
+                if isinstance(target_orientation, (list, tuple)):
+                    target_orientation = np.array(target_orientation)
+
+                # Quaternion is [x, y, z, w]
+                rot = Rotation.from_quat(target_orientation)
+                # Get Euler angles in 'xyz' convention (roll, pitch, yaw)
+                euler = rot.as_euler('xyz', degrees=False)
+                roll, pitch, yaw = euler
+
+            # Convert position from meters to millimeters for xArm SDK
+            x_mm = float(target_position[0]) * 1000.0
+            y_mm = float(target_position[1]) * 1000.0
+            z_mm = float(target_position[2]) * 1000.0
+
+            print(f"Moving directly to pose: x={x_mm:.1f}mm, y={y_mm:.1f}mm, z={z_mm:.1f}mm, "
+                  f"roll={np.degrees(roll):.1f}°, pitch={np.degrees(pitch):.1f}°, yaw={np.degrees(yaw):.1f}°")
+
+            # Prepare robot for execution
+            if not self.prepare_robot_for_execution():
+                print("Failed to prepare robot for execution")
+                return False
+
+            # Execute direct move using xArm SDK
+            try:
+                code = self.arm.set_position(
+                    x=x_mm,
+                    y=y_mm,
+                    z=z_mm,
+                    roll=roll,
+                    pitch=pitch,
+                    yaw=yaw,
+                    speed=speed,
+                    mvacc=acc,
+                    wait=wait,
+                    is_radian=True
+                )
+
+                if code == 0:
+                    print("Direct pose move completed successfully")
+                    return True
+                else:
+                    print(f"Direct pose move failed with error code: {code}")
+                    return False
+
+            except Exception as e:
+                print(f"Error during direct pose move: {str(e)}")
+                return False
+
     def plan_cartesian_path(
         self,
         start_position,
@@ -4245,7 +4381,7 @@ class CuRoboMotionPlanner:
                     orientation = [0.0, 0.0, 0.0]
                 
                 # TODO: Re-enable orientation tracking once position arc is working:
-                orientation[2] += np.degrees(angle)  # Rotate around Z-axis (yaw) to maintain pointing toward pivot
+                # orientation[2] += np.degrees(angle)  # Rotate around Z-axis (yaw) to maintain pointing toward pivot
                 waypoints.append((position, orientation))
                 print(f"Waypoint {i}: pos={position}, orientation= {orientation}, angle={np.degrees(angle):.1f}°")
             
@@ -4300,7 +4436,7 @@ class CuRoboMotionPlanner:
                     target_x = target_pos[0] * 1000  # Convert m to mm
                     target_y = target_pos[1] * 1000  
                     target_z = target_pos[2] * 1000
-                    move_speed = max(10, int(50 * speed_factor))
+                    move_speed = max(50, int(50 * speed_factor))
                     move_acc = max(50, int(100 * speed_factor))
                     
                     print(f"Moving to: x={target_x:.1f}mm, y={target_y:.1f}mm, z={target_z:.1f}mm")
