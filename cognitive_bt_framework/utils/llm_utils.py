@@ -26,6 +26,15 @@ def get_claude_key():
     except:
         raise "failed to find api key."
 
+def get_hf_key():
+    file_path = "/usr/config/hf_keys.txt"
+    try:
+        with open(file_path, 'r') as file:
+            first_line = file.readline()
+            return first_line.strip()
+    except:
+        raise "failed to find api key."
+
 def setup_openai():
     file_path = "/usr/config/llm_task_planning.txt"
     try:
@@ -129,3 +138,59 @@ def parse_llm_response_ordered(response):
             task_stack.pop()
 
     return tasks
+
+
+import re
+
+
+def parse_task_decomposition_and_context_with_subtask_context(output):
+    """
+    Parse the task decomposition, subtask-specific context, and overall context from the GPT model's output.
+    :param output: The raw output string from the GPT model.
+    :return: A dictionary with parsed task decomposition, subtask-specific context, and overall context.
+    """
+
+    # Split the output into lines
+    lines = output.strip().split("\n")
+
+    # Regular expressions to match subtasks, conditions, and subtask-specific context
+    subtask_pattern = re.compile(r'^-\s*([a-zA-Z0-9_]+)$')  # Subtasks start with '- ' followed by subtask name
+    condition_pattern = re.compile(r'^-\s*(?!Context:)(.+)$')  # Conditions start with '- ' and not 'Context:'
+    subtask_context_pattern = re.compile(r'^-\s*Context:\s*(.+)$')  # Subtask-specific context starts with '- Context:'
+
+    task_decomposition = {}
+    current_subtask = None
+
+    for line in lines:
+        line = line.strip()
+
+        if not line:
+            continue
+
+        # Check for subtask
+        subtask_match = subtask_pattern.match(line)
+        if subtask_match:
+            current_subtask = subtask_match.group(1)
+            task_decomposition[current_subtask] = {"conditions": [], "subtask_context": ""}
+            continue
+
+        # Check for subtask-specific context
+        subtask_context_match = subtask_context_pattern.match(line)
+        if subtask_context_match and current_subtask:
+            subtask_context = subtask_context_match.group(1).strip()
+            task_decomposition[current_subtask]["subtask_context"] = subtask_context
+            continue
+
+        # Check for condition
+        condition_match = condition_pattern.match(line)
+        if condition_match and current_subtask:
+            condition = condition_match.group(1).strip()
+            task_decomposition[current_subtask]["conditions"].append(condition)
+            continue
+
+    parsed_output = {
+        "task_decomposition": task_decomposition,
+        "context": ""  # Overall context is not part of the provided output, so it's left empty
+    }
+
+    return parsed_output

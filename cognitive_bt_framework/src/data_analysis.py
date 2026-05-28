@@ -1,11 +1,11 @@
+import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
 # Load the CSV data into a DataFrame
-# df = pd.read_csv('/home/liam/dev/cognitive_bt_framework/cognitive_bt_framework/data/run_data_09-01-2024-16-52-12.csv')
-# df = pd.read_csv('/home/liam/dev/cognitive_bt_framework/cognitive_bt_framework/data/run_data_08-31-2024-12-41-11.csv')
-df = pd.read_csv('/home/liam/dev/cognitive_bt_framework/cognitive_bt_framework/data/run_data_ablated_09-14-2024-18-42-14.csv')
+_data_dir = os.environ.get('COGNITIVE_BT_DATA_DIR', './data')
+df = pd.read_csv(os.path.join(_data_dir, 'run_data_ablated_09-14-2024-18-42-14.csv'))
 
 # Convert the Success column to boolean
 df['Success'] = df['Success'].astype('bool')

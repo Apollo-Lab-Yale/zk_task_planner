@@ -1,5 +1,3 @@
-
-
 class SubTask(object):
     def __init__(self, name, condition):
         self.name = name

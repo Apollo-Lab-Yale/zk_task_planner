@@ -149,3 +149,12 @@ cython_debug/
 Thumbs.db
 *.db
 data/
+*.pt
+*.ply
+test_skills/
+task_execution_data/
+
+*.tar.*
+*.zip
+llm_logs/
+manipulation_specs/

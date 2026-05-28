@@ -88,7 +88,8 @@ class AI2ThorSimEnv:
             "lookup": self.look_up,
             "lookdown": self.look_down,
             "scanroom": self.handle_scan_room,
-            "break": self.break_obj
+            "break": self.break_obj,
+
         }
         self.room_names = ['kitchen']#, 'livingroom', 'bedroom', 'bathroom']
         self.nav_thread = None
@@ -873,7 +874,6 @@ class AI2ThorSimEnv:
             if target not in self.room_names and not any(self.check_same_obj(target.lower(), obj.lower()) for obj in self.object_names) and target != 'None':
                 print(self.object_names)
                 return False, "There is no object named {} in this env to execute action.".format(target)
-            print(f"^^^^^^^^^^^^^^^ {target}")
 
             if 'scanroom' in act:
                 return self.handle_scan_room(target, memory)
@@ -935,7 +935,6 @@ class AI2ThorSimEnv:
         state = self.get_graph()
         to_remove = []
         success = False
-        print(f"^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^6 subg0l: {sub_goal}")
         if sub_goal is None:
             raise Exception('No goal set.')
             return True, ''

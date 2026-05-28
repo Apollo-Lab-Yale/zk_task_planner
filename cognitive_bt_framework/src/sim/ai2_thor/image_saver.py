@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import threading
 from PIL import Image
 import os
@@ -5,7 +7,7 @@ import time
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 
-DIR = "/home/liam/dev/cognitive_bt_framework/cognitive_bt_framework/data/videos"
+DIR = os.path.join(os.environ.get('COGNITIVE_BT_DATA_DIR', './data'), 'videos')
 
 class SaveImagesThread(threading.Thread):
     def __init__(self, controller, frame_rate=10, directory=DIR, planner="unknown", goal = "unknown"):

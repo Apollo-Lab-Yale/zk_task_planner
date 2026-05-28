@@ -1,4 +1,5 @@
 import csv
+import os
 from cognitive_bt_framework.src.sim.ai2_thor.ai2_thor_sim import AI2ThorSimEnv
 from cognitive_bt_framework.src.cbt_planner.cbtf import CognitiveBehaviorTreeFramework
 import time
@@ -47,7 +48,7 @@ goals_nl = {
     'apple': 'put the apple in the fridge'
 }
 ablate = True
-data_dir = '/home/liam/dev/cognitive_bt_framework/cognitive_bt_framework/data'
+data_dir = os.environ.get('COGNITIVE_BT_DATA_DIR', './data')
 ts = datetime.now().strftime("%m-%d-%Y-%H-%M-%S")
 output_csv = f'{data_dir}/run_data_{"ablated_" if ablate else ""}{ts}.csv'
 output_json_gz = f'{data_dir}/run_data_{"ablated_" if ablate else ""}{ts}.json.gz'

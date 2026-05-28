@@ -1,0 +1,13 @@
+task ,success,variant,notes
+open the cabinet on the right,TRUE,taped left handle,
+open the cabinet on the right,TRUE,taped left handle,
+open the cabinet on the right,TRUE,taped left handle,
+open the cabinet on the right,TRUE,taped left handle,
+open the cabinet on the right,FALSE,taped left handle,ik fail
+open the cabinet on the right,TRUE,taped left handle,
+open the cabinet on the right,FALSE,taped left handle,bad grasp pose selected
+open the cabinet on the right,TRUE,taped left handle,
+open the cabinet on the right,TRUE,taped left handle,
+open the cabinet on the right,TRUE,taped left handle,
+,,,
+move towel open cabinet,FALSE,ik fail,
