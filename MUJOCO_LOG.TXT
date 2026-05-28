@@ -1,6 +1,0 @@
-Tue Nov 19 09:08:15 2024
-ERROR: could not create window
-
-Wed Nov 20 10:04:10 2024
-WARNING: Nan, Inf or huge value in QACC at DOF 10. The simulation is unstable. Time = 0.2200.
-
