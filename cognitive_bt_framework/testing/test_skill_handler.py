@@ -1,4 +1,5 @@
 import asyncio
+import os
 import numpy as np
 import cv2
 from pathlib import Path
@@ -37,7 +38,7 @@ async def test_stove_interaction():
     )
     
     # Load image
-    image_path = "/home/liam/dev/zk_task_planner/cognitive_bt_framework/testing/top_view/img_00000.png"
+    image_path = os.path.join(os.environ.get('PROJECT_ROOT', '.'), 'cognitive_bt_framework/testing/top_view/img_00000.png')
     image = cv2.imread(image_path)
     if image is None:
         raise FileNotFoundError(f"Could not load image from {image_path}")

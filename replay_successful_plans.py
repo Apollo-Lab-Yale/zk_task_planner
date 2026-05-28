@@ -953,8 +953,8 @@ def find_successful_sessions(data_directory: str, task_filter: Optional[str] = N
 def main():
     """Main function for the replay script"""
     parser = argparse.ArgumentParser(description="Replay successful robot task plans")
-    parser.add_argument("--data-dir", 
-                       default="/home/liam/dev/zk_task_planner/cognitive_bt_framework/src/task_execution_data",
+    parser.add_argument("--data-dir",
+                       default=os.path.join(os.environ.get("PROJECT_ROOT", "."), "cognitive_bt_framework/src/task_execution_data"),
                        help="Directory containing session data")
     parser.add_argument("--session-file", 
                        help="Specific session file to replay (overrides batch mode)")

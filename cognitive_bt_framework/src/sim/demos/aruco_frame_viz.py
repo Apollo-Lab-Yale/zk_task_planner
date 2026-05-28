@@ -13,6 +13,7 @@ Requirements:
     pip install pybullet numpy scipy
 """
 
+import os
 import pybullet as p
 import pybullet_data
 import numpy as np
@@ -685,8 +686,8 @@ class ArucoFrameVisualizer:
 
 def main():
     parser = argparse.ArgumentParser(description="Visualize ArUco coordinate frames")
-    parser.add_argument("--urdf", help="Path to robot URDF file", 
-                       default="/home/liam/installs/curobo/src/curobo/content/assets/robot/xarm7/xarm7.urdf")
+    parser.add_argument("--urdf", help="Path to robot URDF file",
+                       default=os.environ.get("CUROBO_XARM7_URDF", ""))
     parser.add_argument("--joints", default="0.0021,-1.2677,-0.0341,0.8922,0.0197,1.5883,-0.0050", 
                        help="Joint positions (comma-separated)")
     parser.add_argument("--static", action="store_true", help="Run static demo with example transforms")

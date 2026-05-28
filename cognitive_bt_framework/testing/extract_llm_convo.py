@@ -1,5 +1,6 @@
 import json
 import html
+import os
 import xml.dom.minidom
 
 # Function to load conversation data from a properly formatted JSON file
@@ -141,5 +142,5 @@ def main(filepath, output_filepath):
 
 # Call the main function with your conversation JSON file path and output HTML file path
 conversation_file_path = 'conversation.json'  # Replace with your file path
-output_html_path = '/home/liam/dev/ZeroKnowledgeTaskPlanning-Website/index.html'  # Replace with your output file path
+output_html_path = os.environ.get('LLM_CONVO_HTML_OUTPUT', 'index.html')  # Replace with your output file path
 main(conversation_file_path, output_html_path)

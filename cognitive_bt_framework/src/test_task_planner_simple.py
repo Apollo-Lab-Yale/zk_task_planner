@@ -4,10 +4,11 @@ Simple test for Task Planner with RealSense camera
 """
 
 import sys
+import os
 import logging
 
 # Add the project root to Python path
-sys.path.append('/home/liam/dev/zk_task_planner/cognitive_bt_framework')
+sys.path.append(os.path.join(os.environ.get('PROJECT_ROOT', '.'), 'cognitive_bt_framework'))
 
 from src.task_planner import TaskPlanner
 

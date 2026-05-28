@@ -4,6 +4,7 @@ Enhanced Live ArUco Demo - Compatible with Unified Interface
 Added functionality to print ArUco poses in robot base frame
 """
 
+import os
 import numpy as np
 import time
 import threading
@@ -710,8 +711,8 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="ENHANCED Live ArUco Demo with Pose Printing")
-    parser.add_argument("--urdf", help="Path to robot URDF file", 
-                       default="/home/liam/installs/curobo/src/curobo/content/assets/robot/xarm7/xarm7.urdf")
+    parser.add_argument("--urdf", help="Path to robot URDF file",
+                       default=os.environ.get("CUROBO_XARM7_URDF", ""))
     parser.add_argument("--robot-ip", help="Robot IP address", default='192.168.1.224')
     parser.add_argument("--no-robot", action="store_true", help="Run without robot")
     

@@ -1,3 +1,4 @@
+import os
 from cognitive_bt_framework.src.vision.sam.sam import SAM2MaskGenerator, SAM2MaskConfig
 from cognitive_bt_framework.src.sim.robosuite.robosuite_sim import RobosuiteSimEnv
 
@@ -7,7 +8,7 @@ import time
 # Create memory-optimized configuration
 config = SAM2MaskConfig(
     model_cfg="configs/sam2.1/sam2.1_hiera_t.yaml",
-    checkpoint_path="/home/liam/dev/zk_task_planner/cognitive_bt_framework/src/vision/sam/sam2.1_hiera_tiny.pt",
+    checkpoint_path=os.environ.get('SAM2_CHECKPOINT', ''),
     max_image_size=1024,  # Limit image size
     points_per_batch=32,  # Reduce batch size
     points_per_side=16,   # Reduce points

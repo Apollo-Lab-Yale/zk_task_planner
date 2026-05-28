@@ -29,7 +29,7 @@ def preprocess_text(text):
     filtered_words = [word for word in words if word.lower() not in stop_words]
     return ' '.join(filtered_words)
 
-DEFAULT_DB_PATH = '/home/liam/dev/zk_task_planner/cognitive_bt_framework/src/'
+DEFAULT_DB_PATH = os.path.join(os.environ.get('PROJECT_ROOT', '.'), 'cognitive_bt_framework/src/')
 
 class CognitiveBehaviorTreeFramework:
     def __init__(self, robot_interface, ablate=False, actions=AI2THOR_ACTIONS_ANNOTATED , conditions=AI2THOR_PREDICATES, db_path=DEFAULT_DB_PATH, model_name= OPENAI_MODEL, sim=True):

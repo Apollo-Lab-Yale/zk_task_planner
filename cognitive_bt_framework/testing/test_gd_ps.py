@@ -5,8 +5,8 @@ import argparse
 import os
 from datetime import datetime
 
-DINO_CFG = '/home/liam/install/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py'
-DINO_CHKPT = '/home/liam/dev/zk_task_planner/cognitive_bt_framework/weights/groundingdino_swint_ogc.pth'
+DINO_CFG = os.environ.get('GROUNDINGDINO_CFG', '')
+DINO_CHKPT = os.environ.get('GROUNDINGDINO_CHKPT', '')
 
 # Import our modules
 from cognitive_bt_framework.src.vision.realsense import Camera

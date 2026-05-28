@@ -12,6 +12,7 @@ Requirements:
     pip install pybullet numpy scipy argparse
 """
 
+import os
 import pybullet as p
 import pybullet_data
 import numpy as np
@@ -242,7 +243,7 @@ class URDFVisualizer:
 
 def main():
     parser = argparse.ArgumentParser(description="Visualize URDF with coordinate frames")
-    parser.add_argument("--urdf", help="Path to URDF file", default="/home/liam/installs/curobo/src/curobo/content/assets/robot/xarm7/xarm7.urdf")
+    parser.add_argument("--urdf", help="Path to URDF file", default=os.environ.get("CUROBO_XARM7_URDF", ""))
     parser.add_argument("--joints", default="0.0021, -1.2677, -0.0341,  0.8922,  0.0197,  1.5883, -0.0050", help="Joint positions (comma-separated)")
     parser.add_argument("--pos", default="0.16382727, 0.0065152114, 0.6358539", help="Frame position (x,y,z)")
     parser.add_argument("--quat", default="-0.67583245, 0.68075216, -0.18272126, 0.21549949", help="Frame orientation quaternion (x,y,z,w)")

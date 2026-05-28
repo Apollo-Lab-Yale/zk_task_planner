@@ -10,7 +10,7 @@ from scipy.spatial.transform import Rotation as R
 from cognitive_bt_framework.src.thread_safe_viz import ThreadSafeVisualizer
 
 
-XARM_7_PATH = '/home/liam/installs/curobo/src/curobo/content/assets/robot/xarm7/xarm7.urdf'
+XARM_7_PATH = os.environ.get('CUROBO_XARM7_URDF', '')
 
 class PyBulletVisualizer(ThreadSafeVisualizer):
     def __init__(self, robot_urdf_path, camera_params=None):
